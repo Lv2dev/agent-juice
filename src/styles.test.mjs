@@ -8,6 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(resolve(here, "styles.css"), "utf8").replace(/\r\n?/g, "\n");
 const panelMarkup = readFileSync(resolve(here, "index.html"), "utf8").replace(/\r\n?/g, "\n");
 const panelJs = readFileSync(resolve(here, "panel.js"), "utf8").replace(/\r\n?/g, "\n");
+const settingsJs = readFileSync(resolve(here, "settings.js"), "utf8").replace(/\r\n?/g, "\n");
 const tauriConfig = JSON.parse(
   readFileSync(resolve(here, "../src-tauri/tauri.conf.json"), "utf8"),
 );
@@ -557,12 +558,15 @@ test("settings form groups controls into logical sections without changing field
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
 });
 
-test("settings copy uses accurate collection timing labels and hides install action", () => {
+test("settings copy uses accurate collection timing labels and exposes Claude connect action", () => {
   assert.match(panelMarkup, />수집주기</);
   assert.match(panelMarkup, />오래됨 기준</);
   assert.doesNotMatch(panelMarkup, />신선도</);
   assert.doesNotMatch(panelMarkup, /data-action="install-statusline"/);
+  assert.match(panelMarkup, /data-action="connect-statusline"/);
+  assert.match(panelMarkup, />Claude 연결</);
   assert.match(panelMarkup, /data-action="restore-statusline"/);
+  assert.match(settingsJs, /install_statusline/);
 });
 
 test("panel cost estimate meta aligns as a full-width card footer", () => {

@@ -151,6 +151,11 @@ function scheduleAutosave() {
 }
 
 async function runAction(action) {
+  if (action === "connect-statusline") {
+    await invoke("install_statusline");
+    setStatus("Claude 연결됨");
+  }
+
   if (action === "restore-statusline") {
     await invoke("restore_statusline");
     setStatus("복원됨");
