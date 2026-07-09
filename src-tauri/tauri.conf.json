@@ -1,0 +1,76 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Juice",
+  "version": "0.1.0",
+  "identifier": "com.pointi.agentjuice",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "panel",
+        "url": "index.html",
+        "title": "Juice",
+        "width": 620,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 560,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "shadow": true
+      },
+      {
+        "label": "bar-claude",
+        "url": "bar.html?tool=claude",
+        "title": "Juice Bar",
+        "width": 260,
+        "height": 40,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "shadow": false,
+        "transparent": true
+      },
+      {
+        "label": "bar-codex",
+        "url": "bar.html?tool=codex",
+        "title": "Juice Bar",
+        "width": 260,
+        "height": 40,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "shadow": false,
+        "transparent": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self'; img-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}

@@ -1,0 +1,233 @@
+const DEFAULT_CUSTOM = {
+  customSafe: "#22c55e",
+  customWarn: "#f59e0b",
+  customDanger: "#ef4444",
+};
+
+const DEFAULT_RING = {
+  sizePx: 36,
+  thicknessPx: 4,
+  gapPx: 6,
+  centerGapPx: 0,
+  numberFontSizePx: 9,
+  numberFontWeight: 600,
+  textFontSizePx: 11,
+  textFontWeight: 500,
+};
+
+function numberOr(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function intOr(value, fallback) {
+  const number = Math.round(numberOr(value, fallback));
+  return Math.max(1, number);
+}
+
+function intRangeOr(value, fallback, min, max) {
+  const number = Math.round(numberOr(value, fallback));
+  return Math.min(max, Math.max(min, number));
+}
+
+function pxRangeOr(value, fallback, min, max) {
+  const number = numberOr(value, fallback);
+  return Math.min(max, Math.max(min, number));
+}
+
+function weightRangeOr(value, fallback) {
+  return intRangeOr(value, fallback, 100, 900);
+}
+
+function ratioOr(value, fallback) {
+  return Math.min(1, Math.max(0, numberOr(value, fallback)));
+}
+
+function isChecked(value) {
+  return value === true || value === "on" || value === "true";
+}
+
+function boolOr(value, fallback) {
+  if (value == null) return fallback;
+  if (value === false || value === "false" || value === "off") return false;
+  if (value === true || value === "true" || value === "on") return true;
+  return fallback;
+}
+
+function themeOr(value) {
+  const theme = String(value || "system").toLowerCase();
+  return theme === "light" || theme === "dark" ? theme : "system";
+}
+
+function fontModeOr(value) {
+  const mode = String(value || "system").toLowerCase();
+  return mode === "pretendard" ? mode : "system";
+}
+
+function indicatorStyleOr(value) {
+  const style = String(value || "ring").toLowerCase();
+  return style === "bar" ? "bar" : "ring";
+}
+
+function limitOrderOr(value) {
+  const order = String(value || "primary_first").toLowerCase();
+  return order === "secondary_first" ? "secondary_first" : "primary_first";
+}
+
+function hexByte(value) {
+  return Math.min(255, Math.max(0, Math.round(value)))
+    .toString(16)
+    .padStart(2, "0");
+}
+
+function rgbToHex(rgb, fallback) {
+  if (!Array.isArray(rgb) || rgb.length !== 3) return fallback;
+  return `#${hexByte(rgb[0])}${hexByte(rgb[1])}${hexByte(rgb[2])}`;
+}
+
+function paletteState(palette) {
+  if (palette && typeof palette === "object" && Array.isArray(palette.Custom)) {
+    return {
+      palette: "custom",
+      customSafe: rgbToHex(palette.Custom[0], DEFAULT_CUSTOM.customSafe),
+      customWarn: rgbToHex(palette.Custom[1], DEFAULT_CUSTOM.customWarn),
+      customDanger: rgbToHex(palette.Custom[2], DEFAULT_CUSTOM.customDanger),
+    };
+  }
+
+  const value = typeof palette === "string" ? palette.toLowerCase() : "traffic";
+  if (value === "cvd" || value === "cool") {
+    return { palette: value, ...DEFAULT_CUSTOM };
+  }
+  return { palette: "traffic", ...DEFAULT_CUSTOM };
+}
+
+export function formStateFromSettings(settings = {}) {
+  const palette = paletteState(settings.palette);
+  const legacyOffset = ratioOr(settings.taskbar_offset_ratio, 0.5);
+
+  return {
+    palette: palette.palette,
+    warnThreshold: numberOr(settings.warn_threshold, 70),
+    dangerThreshold: numberOr(settings.danger_threshold, 90),
+    pollIntervalSecs: intOr(settings.poll_interval_secs, 2),
+    staleAfterSecs: intOr(settings.stale_after_secs, 90),
+    barMode: settings.bar_mode || "full",
+    limitOrder: limitOrderOr(settings.limit_order),
+    fullscreenHideOn: boolOr(settings.fullscreen_hide_on, true),
+    maximizedHideOn: boolOr(settings.maximized_hide_on, false),
+    indicatorStyle: indicatorStyleOr(settings.indicator_style),
+    ringOn: settings.ring_on !== false,
+    ringNumbersOn: boolOr(settings.ring_numbers_on, true),
+    ringNumberOutlineOn: boolOr(settings.ring_number_outline_on, true),
+    ringSizePx: pxRangeOr(settings.ring_size_px, DEFAULT_RING.sizePx, 20, 44),
+    ringThicknessPx: pxRangeOr(settings.ring_thickness_px, DEFAULT_RING.thicknessPx, 1, 10),
+    ringGapPx: pxRangeOr(settings.ring_gap_px, DEFAULT_RING.gapPx, 2, 14),
+    ringCenterGapPx: pxRangeOr(settings.ring_center_gap_px, DEFAULT_RING.centerGapPx, 0, 8),
+    ringNumberFontSizePx: pxRangeOr(
+      settings.ring_number_font_size_px,
+      DEFAULT_RING.numberFontSizePx,
+      6,
+      16,
+    ),
+    ringNumberFontWeight: weightRangeOr(
+      settings.ring_number_font_weight,
+      DEFAULT_RING.numberFontWeight,
+    ),
+    barTextFontSizePx: pxRangeOr(
+      settings.bar_text_font_size_px,
+      DEFAULT_RING.textFontSizePx,
+      8,
+      16,
+    ),
+    barTextFontWeight: weightRangeOr(
+      settings.bar_text_font_weight,
+      DEFAULT_RING.textFontWeight,
+    ),
+    autostartOn: settings.autostart_on !== false,
+    theme: themeOr(settings.theme),
+    fontMode: fontModeOr(settings.font_mode),
+    claudeTaskbarOffsetRatio: ratioOr(
+      settings.claude_taskbar_offset_ratio,
+      legacyOffset,
+    ),
+    codexTaskbarOffsetRatio: ratioOr(
+      settings.codex_taskbar_offset_ratio,
+      legacyOffset,
+    ),
+    showClaude: settings.show_claude !== false,
+    showCodex: settings.show_codex !== false,
+    customSafe: palette.customSafe,
+    customWarn: palette.customWarn,
+    customDanger: palette.customDanger,
+  };
+}
+
+function entrySource(entries) {
+  if (entries && typeof entries.get === "function") return entries;
+  return {
+    get(name) {
+      return entries?.[name] ?? null;
+    },
+  };
+}
+
+export function payloadFromEntries(entries) {
+  const source = entrySource(entries);
+
+  return {
+    palette: String(source.get("palette") || "traffic"),
+    warn_threshold: numberOr(source.get("warn_threshold"), 70),
+    danger_threshold: numberOr(source.get("danger_threshold"), 90),
+    poll_interval_secs: intOr(source.get("poll_interval_secs"), 2),
+    stale_after_secs: intOr(source.get("stale_after_secs"), 90),
+    bar_mode: String(source.get("bar_mode") || "full"),
+    limit_order: limitOrderOr(source.get("limit_order")),
+    fullscreen_hide_on: isChecked(source.get("fullscreen_hide_on")),
+    maximized_hide_on: isChecked(source.get("maximized_hide_on")),
+    indicator_style: indicatorStyleOr(source.get("indicator_style")),
+    ring_on: isChecked(source.get("ring_on")),
+    ring_numbers_on: isChecked(source.get("ring_numbers_on")),
+    ring_number_outline_on: isChecked(source.get("ring_number_outline_on")),
+    ring_size_px: pxRangeOr(source.get("ring_size_px"), DEFAULT_RING.sizePx, 20, 44),
+    ring_thickness_px: pxRangeOr(source.get("ring_thickness_px"), DEFAULT_RING.thicknessPx, 1, 10),
+    ring_gap_px: pxRangeOr(source.get("ring_gap_px"), DEFAULT_RING.gapPx, 2, 14),
+    ring_center_gap_px: pxRangeOr(source.get("ring_center_gap_px"), DEFAULT_RING.centerGapPx, 0, 8),
+    ring_number_font_size_px: pxRangeOr(
+      source.get("ring_number_font_size_px"),
+      DEFAULT_RING.numberFontSizePx,
+      6,
+      16,
+    ),
+    ring_number_font_weight: weightRangeOr(
+      source.get("ring_number_font_weight"),
+      DEFAULT_RING.numberFontWeight,
+    ),
+    bar_text_font_size_px: pxRangeOr(
+      source.get("bar_text_font_size_px"),
+      DEFAULT_RING.textFontSizePx,
+      8,
+      16,
+    ),
+    bar_text_font_weight: weightRangeOr(
+      source.get("bar_text_font_weight"),
+      DEFAULT_RING.textFontWeight,
+    ),
+    autostart_on: isChecked(source.get("autostart_on")),
+    theme: themeOr(source.get("theme")),
+    font_mode: fontModeOr(source.get("font_mode")),
+    claude_taskbar_offset_ratio: ratioOr(
+      source.get("claude_taskbar_offset_ratio"),
+      0.5,
+    ),
+    codex_taskbar_offset_ratio: ratioOr(
+      source.get("codex_taskbar_offset_ratio"),
+      0.5,
+    ),
+    show_claude: isChecked(source.get("show_claude")),
+    show_codex: isChecked(source.get("show_codex")),
+    custom_safe: String(source.get("custom_safe") || DEFAULT_CUSTOM.customSafe),
+    custom_warn: String(source.get("custom_warn") || DEFAULT_CUSTOM.customWarn),
+    custom_danger: String(source.get("custom_danger") || DEFAULT_CUSTOM.customDanger),
+  };
+}

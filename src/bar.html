@@ -1,0 +1,73 @@
+<!doctype html>
+<html class="bar-root" lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>Juice Bar</title>
+    <script type="module" src="/bar.js" defer></script>
+  </head>
+  <body class="bar-window">
+    <main
+      id="bar"
+      class="bar-shell"
+      data-mode="full"
+      data-indicator="ring"
+      data-ring="on"
+    >
+      <section class="bar-tool" data-tool="claude" data-state="empty" hidden>
+        <div class="bar-ring">
+          <span class="outer-ring"></span>
+          <span class="inner-ring"></span>
+          <strong class="bar-worst"></strong>
+        </div>
+        <div class="bar-quad" aria-hidden="true">
+          <span class="quad-ring quad-primary"></span>
+          <span class="quad-ring quad-secondary"></span>
+        </div>
+        <div class="bar-bars" aria-hidden="true">
+          <span class="limit-bar primary-limit"></span>
+          <span class="limit-bar secondary-limit"></span>
+        </div>
+        <div class="bar-copy">
+          <strong class="bar-tool-name">Claude</strong>
+          <span class="bar-line">
+            <span class="primary-text"></span>
+            <span class="primary-reset"></span>
+          </span>
+          <span class="bar-line">
+            <span class="secondary-text"></span>
+            <span class="secondary-reset"></span>
+          </span>
+        </div>
+      </section>
+
+      <section class="bar-tool" data-tool="codex" data-state="empty" hidden>
+        <div class="bar-ring">
+          <span class="outer-ring"></span>
+          <span class="inner-ring"></span>
+          <strong class="bar-worst"></strong>
+        </div>
+        <div class="bar-quad" aria-hidden="true">
+          <span class="quad-ring quad-primary"></span>
+          <span class="quad-ring quad-secondary"></span>
+        </div>
+        <div class="bar-bars" aria-hidden="true">
+          <span class="limit-bar primary-limit"></span>
+          <span class="limit-bar secondary-limit"></span>
+        </div>
+        <div class="bar-copy">
+          <strong class="bar-tool-name">Codex</strong>
+          <span class="bar-line">
+            <span class="primary-text"></span>
+            <span class="primary-reset"></span>
+          </span>
+          <span class="bar-line">
+            <span class="secondary-text"></span>
+            <span class="secondary-reset"></span>
+          </span>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
