@@ -52,6 +52,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         bar_text_font_size_px: 12.5,
         bar_text_font_weight: 550,
         autostart_on: false,
+        language: "en".into(),
         theme: "light".into(),
         font_mode: "pretendard".into(),
         taskbar_offset_ratio: 0.25,
@@ -86,6 +87,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.bar_text_font_size_px, 12.5);
     assert_eq!(loaded.bar_text_font_weight, 550);
     assert!(!loaded.autostart_on);
+    assert_eq!(loaded.language, "en");
     assert_eq!(loaded.theme, "light");
     assert_eq!(loaded.font_mode, "pretendard");
     assert_eq!(loaded.taskbar_offset_ratio, 0.5);
@@ -121,6 +123,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.bar_text_font_size_px, 11.0);
     assert_eq!(legacy.bar_text_font_weight, 500);
     assert!(legacy.autostart_on);
+    assert_eq!(legacy.language, "system");
     assert_eq!(legacy.theme, "system");
     assert_eq!(legacy.font_mode, "system");
     assert_eq!(legacy.taskbar_offset_ratio, 0.3);
@@ -276,6 +279,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         bar_text_font_size_px: 12.5,
         bar_text_font_weight: 550,
         autostart_on: false,
+        language: "ko".into(),
         theme: "dark".into(),
         font_mode: "pretendard".into(),
         taskbar_offset_ratio: 1.25,
@@ -315,6 +319,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.bar_text_font_size_px, 12.5);
     assert_eq!(settings.bar_text_font_weight, 550);
     assert!(!settings.autostart_on);
+    assert_eq!(settings.language, "ko");
     assert_eq!(settings.theme, "dark");
     assert_eq!(settings.font_mode, "pretendard");
     assert_eq!(settings.taskbar_offset_ratio, 1.0);
@@ -328,6 +333,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
 fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     let settings = Settings::from_input(SettingsInput {
         theme: "unknown".into(),
+        language: "unknown".into(),
         font_mode: "unknown".into(),
         indicator_style: "unexpected".into(),
         limit_order: "unexpected".into(),
@@ -346,6 +352,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     });
 
     assert_eq!(settings.theme, "system");
+    assert_eq!(settings.language, "system");
     assert_eq!(settings.font_mode, "system");
     assert!(settings.fullscreen_hide_on);
     assert!(!settings.maximized_hide_on);

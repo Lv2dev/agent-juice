@@ -9,6 +9,7 @@ const settings = {
   palette: "Traffic",
   bar_mode: "full",
   ring_on: true,
+  language: "ko",
 };
 
 test("barToolViewModel renders remaining account limits, reset text, and lowest remaining ring", () => {
@@ -119,6 +120,12 @@ test("barToolViewModel uses distinct colors for 5h and weekly rings in the same 
   assert.equal(vm.primary.color, "#22c55e");
   assert.equal(vm.secondary.color, "#2563eb");
   assert.notEqual(vm.primary.color, vm.secondary.color);
+});
+
+test("barToolViewModel localizes the weekly limit label", () => {
+  const vm = barToolViewModel([], "codex", { ...settings, language: "en" });
+
+  assert.equal(vm.secondary.text, "Weekly –");
 });
 
 test("barViewModel normalizes mode and ring settings", () => {

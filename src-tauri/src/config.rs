@@ -49,6 +49,8 @@ pub struct Settings {
     pub bar_text_font_weight: i32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_font_mode")]
@@ -111,6 +113,8 @@ pub struct SettingsInput {
     pub bar_text_font_weight: i32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
+    #[serde(default = "default_language")]
+    pub language: String,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_font_mode")]
@@ -231,6 +235,10 @@ fn default_autostart_on() -> bool {
     true
 }
 
+fn default_language() -> String {
+    "system".into()
+}
+
 fn default_theme() -> String {
     "system".into()
 }
@@ -272,6 +280,7 @@ impl Default for Settings {
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
@@ -308,6 +317,7 @@ impl Default for SettingsInput {
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
@@ -347,6 +357,9 @@ impl Settings {
         settings.clamp_ring_geometry();
         settings.limit_order = normalize_limit_order(&settings.limit_order).into();
         settings.indicator_style = normalize_indicator_style(&settings.indicator_style).into();
+        settings.language = normalize_language(&settings.language).into();
+        settings.theme = normalize_theme(&settings.theme).into();
+        settings.font_mode = normalize_font_mode(&settings.font_mode).into();
         settings
     }
 
@@ -387,6 +400,7 @@ impl Settings {
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
@@ -436,6 +450,7 @@ impl Settings {
             ),
             bar_text_font_weight: clamp_font_weight(input.bar_text_font_weight),
             autostart_on: input.autostart_on,
+            language: normalize_language(&input.language).into(),
             theme: normalize_theme(&input.theme).into(),
             font_mode: normalize_font_mode(&input.font_mode).into(),
             taskbar_offset_ratio: clamp_ratio(input.taskbar_offset_ratio),
@@ -695,6 +710,14 @@ fn normalize_theme(value: &str) -> &'static str {
     match value {
         "light" => "light",
         "dark" => "dark",
+        _ => "system",
+    }
+}
+
+fn normalize_language(value: &str) -> &'static str {
+    match value {
+        "ko" => "ko",
+        "en" => "en",
         _ => "system",
     }
 }

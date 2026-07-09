@@ -1,5 +1,6 @@
 import { DEFAULT_SETTINGS, viewModelForTool } from "./panel-state.js";
 import { applyFont } from "./font.js";
+import { applyTranslations } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
 const TOOLS = ["claude", "codex"];
@@ -115,6 +116,7 @@ function renderTool(tool, now) {
   setBar(card, ".pweek", vm.secondary);
   setText(card, ".pc", vm.pcId);
   setText(card, ".meta", vm.meta);
+  setText(card, ".empty-hint", vm.emptyHint);
 }
 
 export function renderStatuses(statuses, now = new Date()) {
@@ -127,6 +129,7 @@ window.addEventListener("settings-updated", (event) => {
     settings = { ...DEFAULT_SETTINGS, ...event.detail };
     applyTheme(settings);
     applyFont(settings);
+    applyTranslations(settings);
     renderStatuses(lastStatuses);
   }
 });
@@ -138,11 +141,13 @@ async function loadSettings() {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
       applyFont(settings);
+      applyTranslations(settings);
     }
   } catch {
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
+    applyTranslations(settings);
   }
 }
 
@@ -156,6 +161,7 @@ async function bindStatusUpdates() {
           settings = { ...DEFAULT_SETTINGS, ...event.payload };
           applyTheme(settings);
           applyFont(settings);
+          applyTranslations(settings);
           renderStatuses(lastStatuses);
         }
       });
@@ -173,6 +179,7 @@ async function bindStatusUpdates() {
 }
 
 async function bootstrap() {
+  applyTranslations(settings);
   bindWindowControls();
   bindPanelDragFallback();
   await loadSettings();

@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const supabasePlan = readFileSync(
-  resolve(here, "../.ai/docs/spec/토큰모니터-구현계획-2-Supabase.md"),
-  "utf8",
-).replace(/\r\n?/g, "\n");
+const supabasePlanPath = resolve(here, "../.ai/docs/spec/토큰모니터-구현계획-2-Supabase.md");
+const supabasePlan = existsSync(supabasePlanPath)
+  ? readFileSync(supabasePlanPath, "utf8").replace(/\r\n?/g, "\n")
+  : "";
 
-test("G4 Supabase plan pins transport and security boundary gates", () => {
+test("G4 Supabase plan pins transport and security boundary gates", (t) => {
+  if (!supabasePlan) t.skip("private .ai Supabase plan is unavailable");
+
   assert.match(supabasePlan, /G4 착수 전 경계 게이트/);
   assert.match(supabasePlan, /대표값 전송 금지/);
   assert.match(supabasePlan, /세션별 `agent_status\.v1`/);

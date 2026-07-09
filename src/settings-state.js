@@ -64,6 +64,11 @@ function fontModeOr(value) {
   return mode === "pretendard" ? mode : "system";
 }
 
+function languageOr(value) {
+  const language = String(value || "system").toLowerCase();
+  return language === "ko" || language === "en" ? language : "system";
+}
+
 function indicatorStyleOr(value) {
   const style = String(value || "ring").toLowerCase();
   return style === "bar" ? "bar" : "ring";
@@ -145,6 +150,7 @@ export function formStateFromSettings(settings = {}) {
       DEFAULT_RING.textFontWeight,
     ),
     autostartOn: settings.autostart_on !== false,
+    language: languageOr(settings.language),
     theme: themeOr(settings.theme),
     fontMode: fontModeOr(settings.font_mode),
     claudeTaskbarOffsetRatio: ratioOr(
@@ -214,6 +220,7 @@ export function payloadFromEntries(entries) {
       DEFAULT_RING.textFontWeight,
     ),
     autostart_on: isChecked(source.get("autostart_on")),
+    language: languageOr(source.get("language")),
     theme: themeOr(source.get("theme")),
     font_mode: fontModeOr(source.get("font_mode")),
     claude_taskbar_offset_ratio: ratioOr(

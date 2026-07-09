@@ -11,6 +11,7 @@ const settings = {
   warn_threshold: 70,
   danger_threshold: 90,
   palette: "Traffic",
+  language: "ko",
 };
 
 test("colorForPercent uses thresholds and palette from settings", () => {
@@ -70,6 +71,7 @@ test("viewModelForTool renders live values, approximate cost, and raw pc id text
   assert.equal(vm.secondary.value, "41%");
   assert.equal(vm.context, "컨텍스트 63%");
   assert.equal(vm.meta, "추정 비용 $0.12 · 근사치");
+  assert.equal(vm.emptyHint, "");
 });
 
 test("viewModelForTool is null-safe and marks stale sessions", () => {
@@ -98,4 +100,12 @@ test("viewModelForTool is null-safe and marks stale sessions", () => {
   assert.equal(vm.secondary.reset, "리셋 지남");
   assert.equal(vm.context, "컨텍스트 – · 오래됨");
   assert.equal(vm.meta, "추정 비용 · 근사치");
+});
+
+test("viewModelForTool explains empty Claude state in the selected language", () => {
+  const ko = viewModelForTool([], "claude", settings);
+  assert.equal(ko.emptyHint, "Claude 연결 후 Claude를 한 번 사용하면 표시됩니다");
+
+  const en = viewModelForTool([], "claude", { ...settings, language: "en" });
+  assert.equal(en.emptyHint, "Connect Claude, then use Claude once on this PC");
 });

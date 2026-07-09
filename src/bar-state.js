@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   representativeByTool,
 } from "./panel-state.js";
+import { formatDuration, resolveLanguage, t } from "./i18n.js";
 
 const TOOL_LABELS = {
   claude: "Claude",
@@ -92,28 +93,23 @@ function arcText(value) {
   return `${(Math.min(100, Math.max(0, number)) * 3.6).toFixed(1)}deg`;
 }
 
-function shortReset(iso, now) {
+function shortReset(iso, now, language) {
   if (!iso) return "";
   const resetAt = Date.parse(iso);
   if (!Number.isFinite(resetAt)) return "";
 
   const minutes = Math.round((resetAt - now.getTime()) / 60000);
-  if (minutes <= 0) return "지남";
-
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor((minutes % 1440) / 60);
-  const mins = minutes % 60;
-  if (days > 0) return `${days}일 ${hours}시간`;
-  return `${hours > 0 ? `${hours}시간 ` : ""}${mins}분`;
+  if (minutes <= 0) return t("reset.past", language);
+  return formatDuration(minutes, language);
 }
 
-function limitModel(label, limit, settings, now, colorForLimit = colorForPercent) {
+function limitModel(labelKey, limit, settings, now, language, colorForLimit = colorForPercent) {
   const used = finiteNumber(limit?.used_percent);
   const remaining = remainingPercent(limit);
   return {
-    text: `${label} ${percentText(remaining)}`,
+    text: `${t(labelKey, language)} ${percentText(remaining)}`,
     percent: remaining,
-    reset: shortReset(limit?.resets_at, now),
+    reset: shortReset(limit?.resets_at, now, language),
     color: colorForLimit(used, settings),
     arc: arcText(remaining),
   };
@@ -132,6 +128,7 @@ export function barToolViewModel(
   settings = DEFAULT_SETTINGS,
   now = new Date(),
 ) {
+  const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
   const base = {
     tool,
@@ -143,8 +140,8 @@ export function barToolViewModel(
       ...base,
       state: "empty",
       severity: "empty",
-      primary: limitModel("5h", null, settings, now),
-      secondary: limitModel("주간", null, settings, now, secondaryColorForPercent),
+      primary: limitModel("limit.fiveHour", null, settings, now, language),
+      secondary: limitModel("limit.weekly", null, settings, now, language, secondaryColorForPercent),
       worst: "–",
     };
   }
@@ -153,8 +150,8 @@ export function barToolViewModel(
     ...base,
     state: status.session?.active === true ? "live" : "stale",
     severity: severityForStatus(status, settings),
-    primary: limitModel("5h", status.primary, settings, now),
-    secondary: limitModel("주간", status.secondary, settings, now, secondaryColorForPercent),
+    primary: limitModel("limit.fiveHour", status.primary, settings, now, language),
+    secondary: limitModel("limit.weekly", status.secondary, settings, now, language, secondaryColorForPercent),
     worst: worstText(status.primary, status.secondary),
   };
 }

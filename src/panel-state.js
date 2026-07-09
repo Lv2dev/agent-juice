@@ -1,8 +1,11 @@
+import { formatDuration, formatLocalDateTime, resolveLanguage, t } from "./i18n.js";
+
 export const DEFAULT_SETTINGS = {
   warn_threshold: 70,
   danger_threshold: 90,
   palette: "Traffic",
   theme: "system",
+  language: "system",
   font_mode: "system",
   taskbar_offset_ratio: 0.5,
   claude_taskbar_offset_ratio: 0.5,
@@ -111,25 +114,18 @@ function percentText(value) {
   return percent == null ? "–" : `${Math.round(percent)}%`;
 }
 
-function formatReset(iso, now) {
+function formatReset(iso, now, language) {
   if (!iso) return "";
   const resetAt = parseTime(iso);
   if (resetAt == null) return "";
 
   const minutes = Math.round((resetAt - now.getTime()) / 60000);
-  if (minutes <= 0) return "리셋 지남";
+  if (minutes <= 0) return t("reset.past", language);
 
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor((minutes % 1440) / 60);
-  const mins = minutes % 60;
-  const relative =
-    days > 0
-      ? `${days}일 ${hours}시간`
-      : `${hours > 0 ? `${hours}시간 ` : ""}${mins}분`;
-  return `리셋 ${relative} (${new Date(resetAt).toLocaleString("ko-KR")})`;
+  return `${t("reset.prefix", language)} ${formatDuration(minutes, language)} (${formatLocalDateTime(resetAt, language)})`;
 }
 
-function limitModel(limit, settings, now) {
+function limitModel(limit, settings, now, language) {
   const value = finiteNumber(limit?.used_percent);
   const clamped = clampPercent(value);
 
@@ -137,13 +133,18 @@ function limitModel(limit, settings, now) {
     value: percentText(value),
     width: `${clamped ?? 0}%`,
     color: colorForPercent(value, settings),
-    reset: formatReset(limit?.resets_at, now),
+    reset: formatReset(limit?.resets_at, now, language),
   };
 }
 
-function formatCost(status) {
-  if (finiteNumber(status?.cost_estimate_usd) == null) return "추정 비용";
-  return `추정 비용 $${status.cost_estimate_usd.toFixed(2)}`;
+function formatCost(status, language) {
+  const label = t("meta.cost", language);
+  if (finiteNumber(status?.cost_estimate_usd) == null) return label;
+  return `${label} $${status.cost_estimate_usd.toFixed(2)}`;
+}
+
+function emptyHintForTool(tool, language) {
+  return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
 }
 
 export function viewModelForTool(
@@ -152,31 +153,34 @@ export function viewModelForTool(
   settings = DEFAULT_SETTINGS,
   now = new Date(),
 ) {
+  const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
 
   if (!status) {
     return {
       active: false,
       exists: false,
-      primary: limitModel(null, settings, now),
-      secondary: limitModel(null, settings, now),
-      context: "컨텍스트 –",
+      primary: limitModel(null, settings, now, language),
+      secondary: limitModel(null, settings, now, language),
+      context: `${t("context.label", language)} –`,
       pcId: "",
-      meta: "추정 비용 · 근사치",
+      meta: `${t("meta.cost", language)} · ${t("meta.approx", language)}`,
+      emptyHint: emptyHintForTool(tool, language),
     };
   }
 
   const active = status.session?.active === true;
   const context = percentText(status.session?.context_used_percent);
-  const approx = status.approx === false ? "" : " · 근사치";
+  const approx = status.approx === false ? "" : ` · ${t("meta.approx", language)}`;
 
   return {
     active,
     exists: true,
-    primary: limitModel(status.primary, settings, now),
-    secondary: limitModel(status.secondary, settings, now),
-    context: `컨텍스트 ${context}${active ? "" : " · 오래됨"}`,
+    primary: limitModel(status.primary, settings, now, language),
+    secondary: limitModel(status.secondary, settings, now, language),
+    context: `${t("context.label", language)} ${context}${active ? "" : ` · ${t("state.stale", language)}`}`,
     pcId: status.pc_id ?? "",
-    meta: `${formatCost(status)}${approx}`,
+    meta: `${formatCost(status, language)}${approx}`,
+    emptyHint: "",
   };
 }

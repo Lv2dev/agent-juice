@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,10 @@ const css = readFileSync(resolve(here, "styles.css"), "utf8").replace(/\r\n?/g, 
 const panelMarkup = readFileSync(resolve(here, "index.html"), "utf8").replace(/\r\n?/g, "\n");
 const panelJs = readFileSync(resolve(here, "panel.js"), "utf8").replace(/\r\n?/g, "\n");
 const settingsJs = readFileSync(resolve(here, "settings.js"), "utf8").replace(/\r\n?/g, "\n");
+const i18nJsPath = resolve(here, "i18n.js");
+const i18nJs = existsSync(i18nJsPath)
+  ? readFileSync(i18nJsPath, "utf8").replace(/\r\n?/g, "\n")
+  : "";
 const tauriConfig = JSON.parse(
   readFileSync(resolve(here, "../src-tauri/tauri.conf.json"), "utf8"),
 );
@@ -18,18 +22,15 @@ const capabilities = readdirSync(capabilitiesDir)
   .map((name) => JSON.parse(readFileSync(resolve(capabilitiesDir, name), "utf8")));
 const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8");
 const rustConfig = readFileSync(resolve(here, "../src-tauri/src/config.rs"), "utf8");
-const releaseVerifier = readFileSync(
-  resolve(here, "../.ai/scripts/verify-release-installer.ps1"),
-  "utf8",
-);
-const taskbarMoveVerifier = readFileSync(
-  resolve(here, "../.ai/scripts/verify-taskbar-native-move.ps1"),
-  "utf8",
-);
-const statuslineVerifier = readFileSync(
-  resolve(here, "../.ai/scripts/verify-statusline-bridge.ps1"),
-  "utf8",
-);
+const gitignore = readFileSync(resolve(here, "../.gitignore"), "utf8").replace(/\r\n?/g, "\n");
+function readOptional(path) {
+  return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";
+}
+
+const pushAllowlist = readOptional(resolve(here, "../.ai/scripts/verify-git-push-allowlist.ps1"));
+const releaseVerifier = readOptional(resolve(here, "../.ai/scripts/verify-release-installer.ps1"));
+const taskbarMoveVerifier = readOptional(resolve(here, "../.ai/scripts/verify-taskbar-native-move.ps1"));
+const statuslineVerifier = readOptional(resolve(here, "../.ai/scripts/verify-statusline-bridge.ps1"));
 const barMarkup = readFileSync(resolve(here, "bar.html"), "utf8").replace(/\r\n?/g, "\n");
 
 function cssBlock(selector) {
@@ -101,6 +102,27 @@ test("font mode defaults to the Windows status area font with a Pretendard overr
   assert.match(panelMarkup, /name="font_mode"/);
   assert.match(rustConfig, /font_mode/);
   assert.match(rustConfig, /default_font_mode/);
+});
+
+test("panel reopen path restores minimized settings window before focusing it", () => {
+  const showPanel = rustLib.match(/fn show_panel[\s\S]*?\n}/)?.[0] ?? "";
+
+  assert.match(showPanel, /window\.show\(\)/);
+  assert.match(showPanel, /window\.unminimize\(\)/);
+  assert.match(showPanel, /window\.set_focus\(\)/);
+  assert.ok(showPanel.indexOf("window.unminimize()") < showPanel.indexOf("window.set_focus()"));
+});
+
+test("language selection is wired through settings and renderer translations", () => {
+  assert.match(panelMarkup, /name="language"/);
+  assert.match(panelMarkup, /<option value="system"[^>]*>시스템<\/option>/);
+  assert.match(panelMarkup, /<option value="ko"[^>]*>한국어<\/option>/);
+  assert.match(panelMarkup, /<option value="en"[^>]*>English<\/option>/);
+  assert.match(rustConfig, /language/);
+  assert.match(settingsJs, /applyTranslations/);
+  assert.match(panelJs, /applyTranslations/);
+  assert.match(i18nJs, /resolveLanguage/);
+  assert.match(i18nJs, /Connect Claude, then use Claude once on this PC/);
 });
 
 test("styles keep the AppBar contract stable", () => {
@@ -550,12 +572,24 @@ test("settings form groups controls into logical sections without changing field
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
   assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"[\s\S]*<details class="settings-advanced" data-settings-advanced="indicator">/);
   assert.doesNotMatch(indicatorSection, /<details class="settings-advanced"[^>]*open/);
-  assert.match(indicatorSection, /<summary>고급 조정<\/summary>/);
+  assert.match(indicatorSection, /<summary data-i18n="advanced\.indicator">고급 조정<\/summary>/);
   assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
   assert.match(markupSection("system"), /name="autostart_on"[\s\S]*data-action="restore-statusline"[\s\S]*id="settings-status"/);
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
+});
+
+test("public README and release template are the only tracked markdown exceptions", (t) => {
+  if (!pushAllowlist) t.skip("private .ai push allowlist is unavailable");
+
+  assert.match(gitignore, /\n!README\.md\n/);
+  assert.match(gitignore, /\n!\.github\/\n/);
+  assert.match(gitignore, /\n!\.github\/RELEASE_TEMPLATE\.md\n/);
+  assert.match(pushAllowlist, /README\.md/);
+  assert.match(pushAllowlist, /\.github\/RELEASE_TEMPLATE\.md/);
+  assert.match(pushAllowlist, /'\\\.md\$'/);
+  assert.match(pushAllowlist, /\^\\.ai\//);
 });
 
 test("settings copy uses accurate collection timing labels and exposes Claude connect action", () => {
@@ -584,13 +618,26 @@ test("styles avoid decorative one-off effects and viewport font scaling", () => 
   assert.doesNotMatch(css, /\b(orb|blob|bokeh)\b/i);
 });
 
-test("release installer verifier stops temporary app processes before cleanup", () => {
+test("release installer verifier stops temporary app processes before cleanup", (t) => {
+  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+
   assert.match(releaseVerifier, /agent-juice-verify-install/);
   assert.match(releaseVerifier, /Stop-Process/);
   assert.match(releaseVerifier, /agent-juice\.exe/);
 });
 
-test("release installer verifier restores installer registry state after temp install checks", () => {
+test("release installer verifier selects the newest generated Juice installer", (t) => {
+  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+
+  assert.match(releaseVerifier, /Get-ChildItem/);
+  assert.match(releaseVerifier, /Juice_\*_x64-setup\.exe/);
+  assert.match(releaseVerifier, /Sort-Object\s+LastWriteTime\s+-Descending/);
+  assert.doesNotMatch(releaseVerifier, /Juice_0\.1\.\d+_x64-setup\.exe/);
+});
+
+test("release installer verifier restores installer registry state after temp install checks", (t) => {
+  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+
   assert.match(releaseVerifier, /HKCU:\\Software\\pointi\\Juice/);
   assert.match(releaseVerifier, /HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Juice/);
   assert.match(releaseVerifier, /Backup-InstallerRegistryState/);
@@ -598,7 +645,9 @@ test("release installer verifier restores installer registry state after temp in
   assert.doesNotMatch(releaseVerifier, /DeleteSubKeyTree/);
 });
 
-test("release installer verifier protects real app processes, Run key, and shortcuts", () => {
+test("release installer verifier protects real app processes, Run key, and shortcuts", (t) => {
+  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+
   assert.match(releaseVerifier, /Assert-NoNonTempAppProcess/);
   assert.match(releaseVerifier, /not under temp install dir/i);
   assert.match(releaseVerifier, /CurrentVersion\\Run/);
@@ -608,13 +657,17 @@ test("release installer verifier protects real app processes, Run key, and short
   assert.match(releaseVerifier, /"\/UPDATE"/);
 });
 
-test("taskbar native move verifier restores user settings after debug probes", () => {
+test("taskbar native move verifier restores user settings after debug probes", (t) => {
+  if (!taskbarMoveVerifier) t.skip("private .ai taskbar verifier is unavailable");
+
   assert.match(taskbarMoveVerifier, /settings\.json/);
   assert.match(taskbarMoveVerifier, /Backup-UserSettings/);
   assert.match(taskbarMoveVerifier, /Restore-UserSettings/);
 });
 
-test("statusline bridge verifier uses an isolated data directory", () => {
+test("statusline bridge verifier uses an isolated data directory", (t) => {
+  if (!statuslineVerifier) t.skip("private .ai statusline verifier is unavailable");
+
   assert.match(statuslineVerifier, /AGENT_JUICE_DATA_DIR/);
   assert.doesNotMatch(statuslineVerifier, /\$env:LOCALAPPDATA/);
 });

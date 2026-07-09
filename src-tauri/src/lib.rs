@@ -340,6 +340,7 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
 fn show_panel<R: tauri::Runtime>(manager: &impl tauri::Manager<R>) {
     if let Some(window) = manager.get_webview_window("panel") {
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }

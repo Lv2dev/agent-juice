@@ -1,5 +1,6 @@
 import { formStateFromSettings, payloadFromEntries } from "./settings-state.js";
 import { applyFont } from "./font.js";
+import { applyTranslations, t } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
 const form = document.querySelector("#settings-form");
@@ -14,8 +15,12 @@ function tauriApi() {
 
 async function invoke(command, args) {
   const fn = tauriApi().core?.invoke;
-  if (!fn) throw new Error("Tauri API를 사용할 수 없습니다");
+  if (!fn) throw new Error(t("error.noTauri", currentLanguageSettings()));
   return fn(command, args);
+}
+
+function currentLanguageSettings() {
+  return { language: form?.elements.namedItem("language")?.value ?? "system" };
 }
 
 function setStatus(text) {
@@ -107,6 +112,7 @@ function fillForm(settings) {
   setField("bar_text_font_size_px", state.barTextFontSizePx);
   setField("bar_text_font_weight", state.barTextFontWeight);
   setField("autostart_on", state.autostartOn);
+  setField("language", state.language);
   setField("theme", state.theme);
   setField("font_mode", state.fontMode);
   setField("claude_taskbar_offset_ratio", state.claudeTaskbarOffsetRatio);
@@ -119,6 +125,7 @@ function fillForm(settings) {
   updateOutputs();
   applyTheme({ theme: state.theme });
   applyFont({ font_mode: state.fontMode });
+  applyTranslations({ language: state.language });
   isHydrating = false;
 }
 
@@ -137,13 +144,13 @@ async function saveSettings() {
   const next = saved || input;
   window.dispatchEvent(new CustomEvent("settings-updated", { detail: next }));
   fillForm(next);
-  setStatus("자동 적용됨");
+  setStatus(t("status.saved", next));
 }
 
 function scheduleAutosave() {
   if (isHydrating) return;
   updateOutputs();
-  setStatus("적용 중...");
+  setStatus(t("status.saving", currentLanguageSettings()));
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
     saveSettings().catch((error) => setStatus(String(error)));
@@ -153,12 +160,12 @@ function scheduleAutosave() {
 async function runAction(action) {
   if (action === "connect-statusline") {
     await invoke("install_statusline");
-    setStatus("Claude 연결됨");
+    setStatus(t("status.connected", currentLanguageSettings()));
   }
 
   if (action === "restore-statusline") {
     await invoke("restore_statusline");
-    setStatus("복원됨");
+    setStatus(t("status.restored", currentLanguageSettings()));
   }
 }
 

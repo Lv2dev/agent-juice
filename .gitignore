@@ -20,6 +20,9 @@ CLAUDE.md
 GEMINI.md
 ai-setup.ps1
 *.md
+!README.md
+!.github/
+!.github/RELEASE_TEMPLATE.md
 
 # Tauri/Rust build outputs
 src-tauri/target/

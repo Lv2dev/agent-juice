@@ -13,12 +13,13 @@
       <header class="panel-chrome" data-tauri-drag-region>
         <div class="chrome-spacer" data-tauri-drag-region></div>
         <div class="chrome-title" data-tauri-drag-region>Juice</div>
-        <div class="window-controls" aria-label="창 제어">
+        <div class="window-controls" aria-label="창 제어" data-i18n-aria-label="aria.windowControls">
           <button
             class="chrome-dot chrome-minimize"
             type="button"
             title="최소화"
             aria-label="최소화"
+            data-i18n-title="window.minimize"
             data-window-action="minimize"
           ></button>
           <button
@@ -26,6 +27,7 @@
             type="button"
             title="최대화"
             aria-label="최대화"
+            data-i18n-title="window.maximize"
             data-window-action="toggle-maximize"
           ></button>
           <button
@@ -33,6 +35,7 @@
             type="button"
             title="닫기"
             aria-label="닫기"
+            data-i18n-title="window.close"
             data-window-action="close"
           ></button>
         </div>
@@ -41,7 +44,7 @@
       <main class="panel-shell">
       <header class="panel-head">
         <h1>Juice</h1>
-        <span>로컬</span>
+        <span data-i18n="scope.local">로컬</span>
       </header>
 
       <section class="tool-card" data-tool="claude" data-state="empty">
@@ -64,13 +67,14 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span>주간</span>
+            <span data-i18n="limit.weekly">주간</span>
             <strong class="val">–</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
         </div>
 
+        <p class="empty-hint"></p>
         <p class="meta">추정 비용 · 근사치</p>
       </section>
 
@@ -94,33 +98,43 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span>주간</span>
+            <span data-i18n="limit.weekly">주간</span>
             <strong class="val">–</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
         </div>
 
+        <p class="empty-hint"></p>
         <p class="meta">추정 비용 · 근사치</p>
       </section>
 
       <details class="settings-card" open>
-        <summary><span>설정</span></summary>
+        <summary><span data-i18n="settings.title">설정</span></summary>
         <form id="settings-form" class="settings-form">
           <fieldset class="settings-section" data-settings-section="appearance">
-            <legend>외형</legend>
+            <legend data-i18n="section.appearance">외형</legend>
             <div class="settings-section-grid">
               <div class="field-row">
-                <label for="theme">테마</label>
+                <label for="theme" data-i18n="field.theme">테마</label>
                 <select id="theme" name="theme">
-                  <option value="system">시스템</option>
-                  <option value="light">라이트</option>
-                  <option value="dark">다크</option>
+                  <option value="system" data-i18n="option.system">시스템</option>
+                  <option value="light" data-i18n="option.light">라이트</option>
+                  <option value="dark" data-i18n="option.dark">다크</option>
                 </select>
               </div>
 
               <div class="field-row">
-                <label for="font-mode">폰트</label>
+                <label for="language" data-i18n="field.language">언어</label>
+                <select id="language" name="language">
+                  <option value="system" data-i18n="option.system">시스템</option>
+                  <option value="ko" data-i18n="option.languageKo">한국어</option>
+                  <option value="en" data-i18n="option.languageEn">English</option>
+                </select>
+              </div>
+
+              <div class="field-row">
+                <label for="font-mode" data-i18n="field.font">폰트</label>
                 <select id="font-mode" name="font_mode">
                   <option value="system">Windows</option>
                   <option value="pretendard">Pretendard</option>
@@ -128,26 +142,26 @@
               </div>
 
               <div class="field-row">
-                <label for="palette">팔레트</label>
+                <label for="palette" data-i18n="field.palette">팔레트</label>
                 <select id="palette" name="palette">
-                  <option value="traffic">신호등</option>
-                  <option value="cvd">색약</option>
-                  <option value="cool">쿨</option>
-                  <option value="custom">커스텀</option>
+                  <option value="traffic" data-i18n="option.traffic">신호등</option>
+                  <option value="cvd" data-i18n="option.cvd">색약</option>
+                  <option value="cool" data-i18n="option.cool">쿨</option>
+                  <option value="custom" data-i18n="option.custom">커스텀</option>
                 </select>
               </div>
 
               <div class="swatch-row" data-custom-palette hidden>
                 <label>
-                  <span>안전</span>
+                  <span data-i18n="field.safe">안전</span>
                   <input type="color" name="custom_safe" value="#22c55e" />
                 </label>
                 <label>
-                  <span>경고</span>
+                  <span data-i18n="field.warning">경고</span>
                   <input type="color" name="custom_warn" value="#f59e0b" />
                 </label>
                 <label>
-                  <span>위험</span>
+                  <span data-i18n="field.danger">위험</span>
                   <input type="color" name="custom_danger" value="#ef4444" />
                 </label>
               </div>
@@ -155,10 +169,10 @@
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="limits">
-            <legend>임계값·수집</legend>
+            <legend data-i18n="section.limits">임계값·수집</legend>
             <div class="settings-section-grid">
               <label class="range-row">
-                <span>경고 <output name="warn-output">70</output>%</span>
+                <span><span data-i18n="field.warning">경고</span> <output name="warn-output">70</output>%</span>
                 <input
                   type="range"
                   name="warn_threshold"
@@ -170,7 +184,7 @@
               </label>
 
               <label class="range-row">
-                <span>위험 <output name="danger-output">90</output>%</span>
+                <span><span data-i18n="field.danger">위험</span> <output name="danger-output">90</output>%</span>
                 <input
                   type="range"
                   name="danger_threshold"
@@ -183,7 +197,7 @@
 
               <div class="field-grid">
                 <label>
-                  <span>수집주기</span>
+                  <span data-i18n="field.pollInterval">수집주기</span>
                   <input
                     type="number"
                     name="poll_interval_secs"
@@ -194,7 +208,7 @@
                   <output name="poll-output">2</output>
                 </label>
                 <label>
-                  <span>오래됨 기준</span>
+                  <span data-i18n="field.staleAfter">오래됨 기준</span>
                   <input
                     type="number"
                     name="stale_after_secs"
@@ -209,79 +223,79 @@
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="taskbar">
-            <legend>작업표시줄</legend>
+            <legend data-i18n="section.taskbar">작업표시줄</legend>
             <div class="settings-section-grid">
               <div class="field-row">
-                <label for="bar-mode">바 모드</label>
+                <label for="bar-mode" data-i18n="field.barMode">바 모드</label>
                 <select id="bar-mode" name="bar_mode">
-                  <option value="full">넉넉</option>
-                  <option value="compact">컴팩트</option>
-                  <option value="dual">이중원</option>
-                  <option value="quad">링4</option>
+                  <option value="full" data-i18n="option.spacious">넉넉</option>
+                  <option value="compact" data-i18n="option.compact">컴팩트</option>
+                  <option value="dual" data-i18n="option.dual">이중원</option>
+                  <option value="quad" data-i18n="option.quad">링4</option>
                 </select>
               </div>
 
               <div class="field-row">
-                <label for="limit-order">한도 순서</label>
+                <label for="limit-order" data-i18n="field.limitOrder">한도 순서</label>
                 <select id="limit-order" name="limit_order">
-                  <option value="primary_first">5h 먼저</option>
-                  <option value="secondary_first">주간 먼저</option>
+                  <option value="primary_first" data-i18n="option.primaryFirst">5h 먼저</option>
+                  <option value="secondary_first" data-i18n="option.secondaryFirst">주간 먼저</option>
                 </select>
               </div>
 
               <div class="field-row">
-                <label for="indicator-style">표시</label>
+                <label for="indicator-style" data-i18n="field.indicatorStyle">표시</label>
                 <select id="indicator-style" name="indicator_style">
-                  <option value="ring">원</option>
-                  <option value="bar">바</option>
+                  <option value="ring" data-i18n="option.ring">원</option>
+                  <option value="bar" data-i18n="option.bar">바</option>
                 </select>
               </div>
 
               <label class="toggle-row">
                 <input type="checkbox" name="fullscreen_hide_on" checked />
-                <span>전체화면 앱에서 숨김</span>
+                <span data-i18n="field.fullscreenHide">전체화면 앱에서 숨김</span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="maximized_hide_on" />
-                <span>전체창 숨김</span>
+                <span data-i18n="field.maximizedHide">전체창 숨김</span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="show_claude" checked />
-                <span>Claude 표시</span>
+                <span data-i18n="field.showClaude">Claude 표시</span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="show_codex" checked />
-                <span>Codex 표시</span>
+                <span data-i18n="field.showCodex">Codex 표시</span>
               </label>
             </div>
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="indicator">
-            <legend>원·바 세부</legend>
+            <legend data-i18n="section.indicator">원·바 세부</legend>
             <div class="settings-section-grid">
               <label class="toggle-row">
                 <input type="checkbox" name="ring_on" checked />
-                <span>링</span>
+                <span data-i18n="field.ring">링</span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="ring_numbers_on" checked />
-                <span>링 숫자</span>
+                <span data-i18n="field.ringNumbers">링 숫자</span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="ring_number_outline_on" checked />
-                <span>숫자 윤곽</span>
+                <span data-i18n="field.numberOutline">숫자 윤곽</span>
               </label>
 
               <details class="settings-advanced" data-settings-advanced="indicator">
-                <summary>고급 조정</summary>
+                <summary data-i18n="advanced.indicator">고급 조정</summary>
                 <div class="settings-advanced-grid">
                   <label class="range-row">
-                    <span>원 크기 <output name="ring-size-output">36</output>px</span>
+                    <span><span data-i18n="field.ringSize">원 크기</span> <output name="ring-size-output">36</output>px</span>
                     <input
                       type="range"
                       name="ring_size_px"
@@ -293,7 +307,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>링 두께 <output name="ring-thickness-output">4</output>px</span>
+                    <span><span data-i18n="field.ringThickness">링 두께</span> <output name="ring-thickness-output">4</output>px</span>
                     <input
                       type="range"
                       name="ring_thickness_px"
@@ -305,7 +319,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>링 간격 <output name="ring-gap-output">6</output>px</span>
+                    <span><span data-i18n="field.ringGap">링 간격</span> <output name="ring-gap-output">6</output>px</span>
                     <input
                       type="range"
                       name="ring_gap_px"
@@ -317,7 +331,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>중앙 공간 <output name="ring-center-gap-output">0</output>px</span>
+                    <span><span data-i18n="field.centerGap">중앙 공간</span> <output name="ring-center-gap-output">0</output>px</span>
                     <input
                       type="range"
                       name="ring_center_gap_px"
@@ -329,7 +343,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>원 숫자 크기 <output name="ring-number-font-size-output">9</output>px</span>
+                    <span><span data-i18n="field.ringNumberSize">원 숫자 크기</span> <output name="ring-number-font-size-output">9</output>px</span>
                     <input
                       type="range"
                       name="ring_number_font_size_px"
@@ -341,7 +355,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>원 숫자 굵기 <output name="ring-number-font-weight-output">600</output></span>
+                    <span><span data-i18n="field.ringNumberWeight">원 숫자 굵기</span> <output name="ring-number-font-weight-output">600</output></span>
                     <input
                       type="range"
                       name="ring_number_font_weight"
@@ -353,7 +367,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>정보 글자 크기 <output name="bar-text-font-size-output">11</output>px</span>
+                    <span><span data-i18n="field.infoTextSize">정보 글자 크기</span> <output name="bar-text-font-size-output">11</output>px</span>
                     <input
                       type="range"
                       name="bar_text_font_size_px"
@@ -365,7 +379,7 @@
                   </label>
 
                   <label class="range-row">
-                    <span>정보 글자 굵기 <output name="bar-text-font-weight-output">500</output></span>
+                    <span><span data-i18n="field.infoTextWeight">정보 글자 굵기</span> <output name="bar-text-font-weight-output">500</output></span>
                     <input
                       type="range"
                       name="bar_text_font_weight"
@@ -381,16 +395,16 @@
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="system">
-            <legend>시스템</legend>
+            <legend data-i18n="section.system">시스템</legend>
             <div class="settings-section-grid">
               <label class="toggle-row">
                 <input type="checkbox" name="autostart_on" checked />
-                <span>자동시작</span>
+                <span data-i18n="field.autostart">자동시작</span>
               </label>
 
               <div class="button-row">
-                <button type="button" data-action="connect-statusline">Claude 연결</button>
-                <button type="button" data-action="restore-statusline">복원</button>
+                <button type="button" data-action="connect-statusline" data-i18n="action.connectClaude">Claude 연결</button>
+                <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
               </div>
 
               <p id="settings-status" class="settings-status"></p>

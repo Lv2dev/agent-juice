@@ -447,6 +447,7 @@ h2 {
 
 .pc,
 .meta,
+.empty-hint,
 .reset {
   min-width: 0;
   overflow: hidden;
@@ -528,6 +529,15 @@ h2 {
   width: 100%;
   justify-self: stretch;
   text-align: right;
+}
+
+.empty-hint {
+  display: none;
+  text-align: left;
+}
+
+.tool-card[data-state="empty"] .empty-hint {
+  display: block;
 }
 
 .bar-window {

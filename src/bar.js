@@ -1,6 +1,7 @@
 import { DEFAULT_SETTINGS } from "./panel-state.js";
 import { barViewModel } from "./bar-state.js";
 import { applyFont } from "./font.js";
+import { applyTranslations } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
 let settings = { ...DEFAULT_SETTINGS };
@@ -143,11 +144,13 @@ async function loadSettings() {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
       applyFont(settings);
+      applyTranslations(settings);
     }
   } catch {
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
+    applyTranslations(settings);
   }
 }
 
@@ -171,6 +174,7 @@ function bindEvents() {
         settings = { ...DEFAULT_SETTINGS, ...event.payload };
         applyTheme(settings);
         applyFont(settings);
+        applyTranslations(settings);
         renderBar();
       }
     });
@@ -190,6 +194,7 @@ async function loadStatus() {
 }
 
 async function bootstrap() {
+  applyTranslations(settings);
   renderBar();
   await loadSettings();
   renderBar();

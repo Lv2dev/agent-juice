@@ -31,6 +31,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       bar_text_font_size_px: 12.5,
       bar_text_font_weight: 550,
       autostart_on: false,
+      language: "en",
       theme: "dark",
       font_mode: "pretendard",
       taskbar_offset_ratio: 0.25,
@@ -62,6 +63,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       barTextFontSizePx: 12.5,
       barTextFontWeight: 550,
       autostartOn: false,
+      language: "en",
       theme: "dark",
       fontMode: "pretendard",
       claudeTaskbarOffsetRatio: 0.15,
@@ -108,6 +110,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     bar_text_font_size_px: "12.5",
     bar_text_font_weight: "550",
     autostart_on: "on",
+    language: "en",
     theme: "light",
     font_mode: "pretendard",
     claude_taskbar_offset_ratio: "0.25",
@@ -142,6 +145,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     bar_text_font_size_px: 12.5,
     bar_text_font_weight: 550,
     autostart_on: true,
+    language: "en",
     theme: "light",
     font_mode: "pretendard",
     claude_taskbar_offset_ratio: 0.25,
@@ -156,6 +160,10 @@ test("payloadFromEntries creates save_settings input payload", () => {
 
 test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).theme, "system");
+  assert.equal(formStateFromSettings({}).language, "system");
+  assert.equal(formStateFromSettings({ language: "ko" }).language, "ko");
+  assert.equal(formStateFromSettings({ language: "en" }).language, "en");
+  assert.equal(formStateFromSettings({ language: "unexpected" }).language, "system");
   assert.equal(formStateFromSettings({}).fontMode, "system");
   assert.equal(formStateFromSettings({}).fullscreenHideOn, true);
   assert.equal(formStateFromSettings({}).maximizedHideOn, false);
@@ -192,6 +200,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
 
   const payload = payloadFromEntries({
     theme: "unexpected",
+    language: "unexpected",
     font_mode: "unexpected",
     indicator_style: "unexpected",
     limit_order: "unexpected",
@@ -208,6 +217,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   });
 
   assert.equal(payload.theme, "system");
+  assert.equal(payload.language, "system");
   assert.equal(payload.font_mode, "system");
   assert.equal(payload.fullscreen_hide_on, false);
   assert.equal(payload.maximized_hide_on, false);
