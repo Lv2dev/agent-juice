@@ -310,6 +310,153 @@ test("bar right click opens a visible refresh menu before forcing a status refre
   delete global.document;
 });
 
+test("bar refresh menu closes when the pointer leaves the bar window", async () => {
+  const listeners = {};
+  const root = { dataset: {} };
+  const menu = {
+    hidden: true,
+    style: {
+      setProperty() {},
+      getPropertyValue() {
+        return "";
+      },
+    },
+    contains() {
+      return false;
+    },
+  };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    innerWidth: 260,
+    innerHeight: 40,
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return [];
+          return null;
+        },
+      },
+      event: {
+        async listen() {},
+      },
+    },
+  };
+  global.document = {
+    addEventListener(name, handler) {
+      listeners[name] = handler;
+    },
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === "#bar-menu") return menu;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-menu-leave`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  listeners.contextmenu?.({
+    clientX: 120,
+    clientY: 20,
+    target: root,
+    preventDefault() {},
+  });
+  assert.equal(menu.hidden, false);
+
+  listeners.mouseout?.({ relatedTarget: null });
+  assert.equal(menu.hidden, true);
+
+  delete global.window;
+  delete global.document;
+});
+
+test("bar refresh menu closes when another tool bar opens its menu", async () => {
+  const listeners = {};
+  const eventHandlers = {};
+  const emissions = [];
+  const root = { dataset: {} };
+  const menu = {
+    hidden: true,
+    style: {
+      setProperty() {},
+      getPropertyValue() {
+        return "";
+      },
+    },
+    contains() {
+      return false;
+    },
+  };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+
+  global.window = {
+    location: { search: "?tool=claude" },
+    innerWidth: 260,
+    innerHeight: 40,
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return [];
+          return null;
+        },
+      },
+      event: {
+        async listen(name, handler) {
+          eventHandlers[name] = handler;
+        },
+        async emit(name, payload) {
+          emissions.push({ name, payload });
+        },
+      },
+    },
+  };
+  global.document = {
+    addEventListener(name, handler) {
+      listeners[name] = handler;
+    },
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === "#bar-menu") return menu;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-menu-cross-window`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  listeners.contextmenu?.({
+    clientX: 120,
+    clientY: 20,
+    target: root,
+    preventDefault() {},
+  });
+  assert.equal(menu.hidden, false);
+  assert.deepEqual(emissions.at(-1), {
+    name: "bar-refresh-menu-opened",
+    payload: { tool: "claude" },
+  });
+
+  eventHandlers["bar-refresh-menu-opened"]?.({ payload: { tool: "codex" } });
+  assert.equal(menu.hidden, true);
+
+  delete global.window;
+  delete global.document;
+});
+
 test("bar renders the current tool before event subscription resolves", async () => {
   const root = { dataset: {}, style: { setProperty() {} } };
   const tools = {

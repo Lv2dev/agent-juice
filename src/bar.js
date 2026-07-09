@@ -18,6 +18,7 @@ const CURRENT_TOOL = currentWindowTool();
 const MENU_WIDTH = 88;
 const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
+const REFRESH_MENU_OPENED_EVENT = "bar-refresh-menu-opened";
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
@@ -28,6 +29,16 @@ document.addEventListener("click", (event) => {
   const menu = refreshMenu();
   if (!menu || menu.hidden || menu.contains(event.target)) return;
   hideRefreshMenu();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  const menu = refreshMenu();
+  if (!menu || menu.hidden || menu.contains(event.target)) return;
+  hideRefreshMenu();
+});
+
+document.addEventListener("mouseout", (event) => {
+  if (!event.relatedTarget) hideRefreshMenu();
 });
 
 document.addEventListener("keydown", (event) => {
@@ -49,6 +60,16 @@ async function refreshTaskbarStatus() {
     await invoke("refresh_status");
   } catch {
     // The bar should still suppress the browser menu even if IPC is unavailable.
+  }
+}
+
+function emitSafely(eventName, payload) {
+  const emit = tauriApi().event?.emit;
+  if (!emit) return;
+  try {
+    Promise.resolve(emit(eventName, payload)).catch(() => {});
+  } catch {
+    // Cross-window menu sync is best-effort; local dismissal still works.
   }
 }
 
@@ -74,6 +95,7 @@ function showRefreshMenu(event) {
   menu.style?.setProperty("--menu-x", `${x}px`);
   menu.style?.setProperty("--menu-y", `${y}px`);
   menu.hidden = false;
+  emitSafely(REFRESH_MENU_OPENED_EVENT, { tool: CURRENT_TOOL ?? "all" });
 }
 
 function hideRefreshMenu() {
@@ -218,6 +240,12 @@ function listenSafely(listen, eventName, handler) {
 function bindEvents() {
   const listen = tauriApi().event?.listen;
   if (listen) {
+    listenSafely(listen, REFRESH_MENU_OPENED_EVENT, (event) => {
+      const openedTool = event.payload?.tool;
+      if (openedTool && openedTool !== (CURRENT_TOOL ?? "all")) {
+        hideRefreshMenu();
+      }
+    });
     listenSafely(listen, "status-updated", (event) => {
       statuses = Array.isArray(event.payload) ? event.payload : [];
       renderBar();
