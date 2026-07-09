@@ -215,10 +215,31 @@ test("bar render applies ring number and geometry settings to the root", async (
   delete global.document;
 });
 
-test("bar right click suppresses the browser context menu and forces a status refresh", async () => {
+test("bar right click opens a visible refresh menu before forcing a status refresh", async () => {
   const listeners = {};
   const invocations = [];
   const root = { dataset: {} };
+  const refreshButton = {
+    handlers: {},
+    addEventListener(name, handler) {
+      this.handlers[name] = handler;
+    },
+  };
+  const menu = {
+    hidden: true,
+    style: {
+      props: {},
+      setProperty(name, value) {
+        this.props[name] = value;
+      },
+      getPropertyValue(name) {
+        return this.props[name] ?? "";
+      },
+    },
+    contains(target) {
+      return target === this || target === refreshButton;
+    },
+  };
   const tools = {
     claude: toolStub(),
     codex: toolStub(),
@@ -226,6 +247,8 @@ test("bar right click suppresses the browser context menu and forces a status re
 
   global.window = {
     location: { search: "?tool=codex" },
+    innerWidth: 260,
+    innerHeight: 40,
     __TAURI__: {
       core: {
         async invoke(command, args) {
@@ -246,6 +269,8 @@ test("bar right click suppresses the browser context menu and forces a status re
     },
     querySelector(selector) {
       if (selector === "#bar") return root;
+      if (selector === "#bar-menu") return menu;
+      if (selector === '[data-bar-action="refresh"]') return refreshButton;
       if (selector === '[data-tool="claude"]') return tools.claude;
       if (selector === '[data-tool="codex"]') return tools.codex;
       return null;
@@ -255,10 +280,24 @@ test("bar right click suppresses the browser context menu and forces a status re
   await import(`./bar.js?test=${Date.now()}-contextmenu`);
   await new Promise((resolve) => setImmediate(resolve));
   let prevented = false;
-  listeners.contextmenu?.({ preventDefault() { prevented = true; } });
+  listeners.contextmenu?.({
+    clientX: 120,
+    clientY: 20,
+    target: root,
+    preventDefault() { prevented = true; },
+  });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(prevented, true);
+  assert.equal(menu.hidden, false);
+  assert.equal(menu.style.getPropertyValue("--menu-x"), "120px");
+  assert.equal(menu.style.getPropertyValue("--menu-y"), "8px");
+  assert.equal(
+    invocations.filter((item) => item.command === "refresh_status").length,
+    0
+  );
+  await refreshButton.handlers.click?.({ preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(
     invocations.filter((item) => item.command === "refresh_status").length,
     1
@@ -560,7 +599,6 @@ test("bar pointer drag does not issue native move commands or open the panel", a
   listeners.pointerdown?.({ button: 0, clientX: 20, screenX: 700, preventDefault() {} });
   listeners.pointermove?.({ clientX: 44, screenX: 724, preventDefault() {} });
   listeners.pointerup?.({ clientX: 44, screenX: 724, preventDefault() {} });
-  assert.equal(listeners.click, undefined);
   listeners.click?.();
   await new Promise((resolve) => setImmediate(resolve));
 

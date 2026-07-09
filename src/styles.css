@@ -424,11 +424,11 @@ h2 {
   flex: 0 0 9px;
   border: 1px solid color-mix(in srgb, white 36%, transparent);
   border-radius: 999px;
-  box-shadow: 0 0 12px color-mix(in srgb, var(--tool-color) 58%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 58%, transparent);
 }
 
 .claude-dot {
-  background: var(--accent-warm);
+  background: var(--accent);
 }
 
 .codex-dot {
@@ -573,6 +573,40 @@ h2 {
 
 .bar-shell::before {
   display: none;
+}
+
+.bar-context-menu {
+  position: absolute;
+  left: var(--menu-x);
+  top: var(--menu-y);
+  z-index: 8;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, var(--hi));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 8px 22px -18px rgba(15, 23, 42, 0.52), inset 0 1px 0 var(--hi);
+}
+
+.bar-context-menu[hidden] {
+  display: none;
+}
+
+.bar-context-menu button {
+  min-width: 74px;
+  height: 24px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.bar-context-menu button:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 .bar-tool {
@@ -1128,6 +1162,15 @@ select {
 input[type="number"] {
   width: 58px;
   padding: 0 6px;
+}
+
+.field-help {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
 }
 
 input[type="range"] {

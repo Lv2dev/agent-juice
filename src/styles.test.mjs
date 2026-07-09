@@ -70,6 +70,9 @@ test("styles define the BDO-lite surface tokens used by Juice", () => {
 test("usage cards share the same surface tint regardless of tool", () => {
   const cardTint = cssBlock(".tool-card::before");
   const hover = cssBlock(".tool-card:hover");
+  const dot = cssBlock(".tool-dot");
+  const claudeDot = cssBlock(".claude-dot");
+  const codexDot = cssBlock(".codex-dot");
   const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
   const codexCard = cssBlock('.tool-card[data-tool="codex"]');
 
@@ -78,6 +81,10 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.match(hover, /var\(--accent\)/);
   assert.doesNotMatch(hover, /var\(--tool-color\)/);
   assert.doesNotMatch(hover, /var\(--tool-glow\)/);
+  assert.match(dot, /var\(--accent\)/);
+  assert.doesNotMatch(claudeDot, /accent-warm/);
+  assert.match(claudeDot, /var\(--accent\)/);
+  assert.match(codexDot, /var\(--accent\)/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
 });
@@ -631,12 +638,28 @@ test("public README and release template are the only tracked markdown exception
 test("settings copy uses accurate collection timing labels and exposes Claude connect action", () => {
   assert.match(panelMarkup, />수집주기</);
   assert.match(panelMarkup, />오래됨 기준</);
+  assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
+  assert.match(i18nJs, /마지막 기록이 몇 초 지나면 오래됨으로 표시할지/);
   assert.doesNotMatch(panelMarkup, />신선도</);
   assert.doesNotMatch(panelMarkup, /data-action="install-statusline"/);
   assert.match(panelMarkup, /data-action="connect-statusline"/);
   assert.match(panelMarkup, />Claude 연결</);
   assert.match(panelMarkup, /data-action="restore-statusline"/);
   assert.match(settingsJs, /install_statusline/);
+});
+
+test("taskbar bar right click exposes a visible refresh action", () => {
+  const menu = cssBlock(".bar-context-menu");
+  const button = cssBlock(".bar-context-menu button");
+
+  assert.match(barMarkup, /id="bar-menu"/);
+  assert.match(barMarkup, /data-bar-action="refresh"/);
+  assert.match(barMarkup, /data-i18n="action.refresh"/);
+  assert.match(menu, /position: absolute/);
+  assert.match(menu, /left: var\(--menu-x\)/);
+  assert.match(menu, /top: var\(--menu-y\)/);
+  assert.match(button, /cursor: pointer/);
+  assert.match(i18nJs, /"action.refresh": "새로고침"/);
 });
 
 test("panel meta removes estimated cost copy and stays as a full-width card footer", () => {
@@ -747,7 +770,10 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
 test("status refresh is available from panel and taskbar bars and periodic loop always emits", () => {
   const statusLoop = rustLib.match(/fn spawn_status_loop[\s\S]*?^}/m)?.[0] ?? "";
 
-  assert.match(rustLib, /fn refresh_status\(window: tauri::Window, app: tauri::AppHandle\)/);
+  assert.match(
+    rustLib,
+    /fn refresh_status\(\s*window: tauri::Window,\s*app: tauri::AppHandle,\s*\)/,
+  );
   assert.match(rustLib, /refresh_status,/);
   assert.match(statusLoop, /handle\.emit\("status-updated"/);
   assert.doesNotMatch(statusLoop, /last_payload_signature/);

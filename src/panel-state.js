@@ -80,6 +80,11 @@ export function colorForPercent(percent, settings = DEFAULT_SETTINGS) {
   return ramp[index];
 }
 
+function panelUsageColor(settings = DEFAULT_SETTINGS) {
+  const set = settings ?? DEFAULT_SETTINGS;
+  return (customRamp(set.palette) ?? RAMP[paletteName(set.palette)] ?? RAMP.Traffic)[0];
+}
+
 function parseTime(value) {
   const time = Date.parse(value);
   return Number.isFinite(time) ? time : null;
@@ -132,7 +137,7 @@ function limitModel(limit, settings, now, language) {
   return {
     value: percentText(value),
     width: `${clamped ?? 0}%`,
-    color: colorForPercent(value, settings),
+    color: value == null ? UNKNOWN_COLOR : panelUsageColor(settings),
     reset: formatReset(limit?.resets_at, now, language),
   };
 }

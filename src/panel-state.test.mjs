@@ -66,9 +66,10 @@ test("viewModelForTool renders live values, approximate flag, and raw pc id text
   assert.equal(vm.pcId, "<b>DESKTOP</b>");
   assert.equal(vm.primary.value, "88%");
   assert.equal(vm.primary.width, "88%");
-  assert.equal(vm.primary.color, "#f59e0b");
+  assert.equal(vm.primary.color, "#22c55e");
   assert.match(vm.primary.reset, /^리셋 1시간 5분 \(/);
   assert.equal(vm.secondary.value, "41%");
+  assert.equal(vm.secondary.color, "#22c55e");
   assert.equal(vm.context, "컨텍스트 63%");
   assert.equal(vm.meta, "근사치");
   assert.equal(vm.emptyHint, "");

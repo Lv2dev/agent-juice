@@ -15,10 +15,23 @@ function currentWindowTool() {
 }
 
 const CURRENT_TOOL = currentWindowTool();
+const MENU_WIDTH = 88;
+const MENU_HEIGHT = 28;
+const MENU_MARGIN = 4;
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  void refreshTaskbarStatus();
+  showRefreshMenu(event);
+});
+
+document.addEventListener("click", (event) => {
+  const menu = refreshMenu();
+  if (!menu || menu.hidden || menu.contains(event.target)) return;
+  hideRefreshMenu();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideRefreshMenu();
 });
 
 function tauriApi() {
@@ -37,6 +50,44 @@ async function refreshTaskbarStatus() {
   } catch {
     // The bar should still suppress the browser menu even if IPC is unavailable.
   }
+}
+
+function refreshMenu() {
+  return document.querySelector("#bar-menu");
+}
+
+function clampMenuPosition(value, size, max) {
+  const coordinate = Number.isFinite(value) ? value : MENU_MARGIN;
+  const upper = Math.max(MENU_MARGIN, max - size - MENU_MARGIN);
+  return Math.max(MENU_MARGIN, Math.min(coordinate, upper));
+}
+
+function showRefreshMenu(event) {
+  const menu = refreshMenu();
+  if (!menu) {
+    void refreshTaskbarStatus();
+    return;
+  }
+
+  const x = clampMenuPosition(event?.clientX, MENU_WIDTH, window.innerWidth ?? MENU_WIDTH);
+  const y = clampMenuPosition(event?.clientY, MENU_HEIGHT, window.innerHeight ?? MENU_HEIGHT);
+  menu.style?.setProperty("--menu-x", `${x}px`);
+  menu.style?.setProperty("--menu-y", `${y}px`);
+  menu.hidden = false;
+}
+
+function hideRefreshMenu() {
+  const menu = refreshMenu();
+  if (menu) menu.hidden = true;
+}
+
+function bindRefreshMenu() {
+  const button = document.querySelector('[data-bar-action="refresh"]');
+  button?.addEventListener("click", (event) => {
+    event.preventDefault();
+    hideRefreshMenu();
+    void refreshTaskbarStatus();
+  });
 }
 
 function setText(scope, selector, value) {
@@ -197,6 +248,7 @@ async function loadStatus() {
 
 async function bootstrap() {
   applyTranslations(settings);
+  bindRefreshMenu();
   renderBar();
   await loadSettings();
   renderBar();
