@@ -287,6 +287,7 @@ fn tray_png_for_status(status: &AgentStatus, settings: &Settings) -> Option<Vec<
     render::svg_to_png(&svg, 32).ok()
 }
 
+#[cfg(test)]
 fn status_payload_signature(statuses: &[AgentStatus]) -> String {
     serde_json::to_string(statuses).unwrap_or_default()
 }
@@ -359,16 +360,11 @@ fn setup_panel_close_hide(app: &tauri::App) {
 
 fn spawn_status_loop(handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_payload_signature = String::new();
         loop {
             let settings = Settings::load();
             let representatives = collect_representatives(&settings);
 
-            let payload_signature = status_payload_signature(&representatives);
-            if payload_signature != last_payload_signature {
-                let _ = handle.emit("status-updated", &representatives);
-                last_payload_signature = payload_signature;
-            }
+            let _ = handle.emit("status-updated", &representatives);
             tokio::time::sleep(std::time::Duration::from_secs(
                 settings.poll_interval_secs.max(1),
             ))
@@ -664,6 +660,17 @@ fn get_status() -> Vec<AgentStatus> {
 }
 
 #[tauri::command]
+fn refresh_status(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<Vec<AgentStatus>, String> {
+    ensure_status_refresh_command(window.label())?;
+    let statuses = collect_representatives(&Settings::load());
+    let _ = app.emit("status-updated", &statuses);
+    Ok(statuses)
+}
+
+#[tauri::command]
 fn get_settings() -> Settings {
     Settings::load()
 }
@@ -773,6 +780,14 @@ fn ensure_taskbar_bar_command(label: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("command is restricted to taskbar bar windows".into())
+    }
+}
+
+fn ensure_status_refresh_command(label: &str) -> Result<(), String> {
+    if ensure_panel_command(label).is_ok() || ensure_taskbar_bar_command(label).is_ok() {
+        Ok(())
+    } else {
+        Err("command is restricted to panel or taskbar bar windows".into())
     }
 }
 
@@ -1195,6 +1210,7 @@ pub fn run() {
         ))
         .invoke_handler(tauri::generate_handler![
             get_status,
+            refresh_status,
             get_settings,
             save_settings,
             move_taskbar_bar,
@@ -1240,7 +1256,9 @@ mod tests {
     #[test]
     fn tray_uses_one_product_icon_id() {
         assert_eq!(super::tray_icon_ids(), ["juice"]);
-        assert!(!super::tray_icon_ids().iter().any(|id| id.starts_with("aj-")));
+        assert!(!super::tray_icon_ids()
+            .iter()
+            .any(|id| id.starts_with("aj-")));
     }
 
     #[test]
@@ -1324,6 +1342,10 @@ mod tests {
         assert!(super::ensure_taskbar_bar_command("bar-claude").is_ok());
         assert!(super::ensure_taskbar_bar_command("bar-codex").is_ok());
         assert!(super::ensure_taskbar_bar_command("panel").is_err());
+        assert!(super::ensure_status_refresh_command("panel").is_ok());
+        assert!(super::ensure_status_refresh_command("bar-claude").is_ok());
+        assert!(super::ensure_status_refresh_command("bar-codex").is_ok());
+        assert!(super::ensure_status_refresh_command("settings").is_err());
 
         assert!(super::ensure_matching_bar_command("bar-claude", "claude").is_ok());
         assert!(super::ensure_matching_bar_command("bar-codex", "codex").is_ok());

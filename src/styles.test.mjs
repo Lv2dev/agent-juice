@@ -67,6 +67,21 @@ test("styles define the BDO-lite surface tokens used by Juice", () => {
   assert.match(card, /border-radius: var\(--radius\)/);
 });
 
+test("usage cards share the same surface tint regardless of tool", () => {
+  const cardTint = cssBlock(".tool-card::before");
+  const hover = cssBlock(".tool-card:hover");
+  const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
+  const codexCard = cssBlock('.tool-card[data-tool="codex"]');
+
+  assert.match(cardTint, /var\(--accent\)/);
+  assert.doesNotMatch(cardTint, /var\(--tool-glow\)/);
+  assert.match(hover, /var\(--accent\)/);
+  assert.doesNotMatch(hover, /var\(--tool-color\)/);
+  assert.doesNotMatch(hover, /var\(--tool-glow\)/);
+  assert.doesNotMatch(claudeCard, /--tool-glow/);
+  assert.doesNotMatch(codexCard, /--tool-glow/);
+});
+
 test("styles default to system theme and allow explicit light or dark overrides", () => {
   const root = cssBlock(":root");
   const light = cssBlock('html[data-theme="light"]');
@@ -725,7 +740,20 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
   assert.notEqual(panelCapability.identifier, barCapability.identifier);
   assert.match(rustLib, /ensure_panel_command/);
   assert.match(rustLib, /ensure_matching_bar_command/);
+  assert.match(rustLib, /ensure_status_refresh_command/);
   assert.match(rustLib, /window\.label\(\)/);
+});
+
+test("status refresh is available from panel and taskbar bars and periodic loop always emits", () => {
+  const statusLoop = rustLib.match(/fn spawn_status_loop[\s\S]*?^}/m)?.[0] ?? "";
+
+  assert.match(rustLib, /fn refresh_status\(window: tauri::Window, app: tauri::AppHandle\)/);
+  assert.match(rustLib, /refresh_status,/);
+  assert.match(statusLoop, /handle\.emit\("status-updated"/);
+  assert.doesNotMatch(statusLoop, /last_payload_signature/);
+  assert.doesNotMatch(statusLoop, /payload_signature !=/);
+  assert.match(capabilities.map((item) => item.identifier).join(","), /taskbar-bars/);
+  assert.match(capabilities.map((item) => item.identifier).join(","), /panel/);
 });
 
 test("taskbar movement is persisted only by the native drag loop final save", () => {

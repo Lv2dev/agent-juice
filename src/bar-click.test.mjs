@@ -215,7 +215,7 @@ test("bar render applies ring number and geometry settings to the root", async (
   delete global.document;
 });
 
-test("bar right click suppresses the browser context menu and pauses taskbar bars", async () => {
+test("bar right click suppresses the browser context menu and forces a status refresh", async () => {
   const listeners = {};
   const invocations = [];
   const root = { dataset: {} };
@@ -260,8 +260,12 @@ test("bar right click suppresses the browser context menu and pauses taskbar bar
 
   assert.equal(prevented, true);
   assert.equal(
-    invocations.filter((item) => item.command === "pause_taskbar_bars").length,
+    invocations.filter((item) => item.command === "refresh_status").length,
     1
+  );
+  assert.equal(
+    invocations.filter((item) => item.command === "pause_taskbar_bars").length,
+    0
   );
   delete global.window;
   delete global.document;

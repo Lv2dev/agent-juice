@@ -334,8 +334,6 @@ h1::before {
 }
 
 .tool-card {
-  --tool-color: var(--accent);
-  --tool-glow: var(--accent);
   position: relative;
   min-width: 0;
   padding: 12px;
@@ -364,7 +362,7 @@ h1::before {
   content: "";
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--tool-glow) 14%, transparent), transparent 54%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent 54%);
   opacity: 0.34;
 }
 
@@ -374,21 +372,17 @@ h1::before {
 }
 
 .tool-card:hover {
-  border-color: color-mix(in srgb, var(--tool-color) 34%, var(--line-strong));
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
   box-shadow:
-    0 20px 50px -34px color-mix(in srgb, var(--tool-glow) 38%, black),
+    0 20px 50px -34px color-mix(in srgb, var(--accent) 38%, black),
     inset 0 1px 0 var(--hi);
   transform: translateY(-1px);
 }
 
 .tool-card[data-tool="claude"] {
-  --tool-color: var(--accent-warm);
-  --tool-glow: #d7b56d;
 }
 
 .tool-card[data-tool="codex"] {
-  --tool-color: var(--accent);
-  --tool-glow: var(--accent);
 }
 
 .tool-card[data-state="stale"],

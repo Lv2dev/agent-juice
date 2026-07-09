@@ -18,7 +18,7 @@ const CURRENT_TOOL = currentWindowTool();
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  void pauseTaskbarBars();
+  void refreshTaskbarStatus();
 });
 
 function tauriApi() {
@@ -31,9 +31,9 @@ async function invoke(command, args) {
   return fn(command, args);
 }
 
-async function pauseTaskbarBars() {
+async function refreshTaskbarStatus() {
   try {
-    await invoke("pause_taskbar_bars");
+    await invoke("refresh_status");
   } catch {
     // The bar should still suppress the browser menu even if IPC is unavailable.
   }
