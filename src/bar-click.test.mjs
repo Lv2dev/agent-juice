@@ -364,6 +364,8 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#2563eb");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "212.4deg");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
+  assert.equal(tools.claude.textContentFor(".quad-primary-number"), "12");
+  assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "59");
   delete global.window;
   delete global.document;
 });
@@ -425,6 +427,8 @@ test("bar render can show weekly limits before 5h without changing semantic limi
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "43.2deg");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "12%");
   assert.equal(tools.claude.textContentFor(".bar-worst"), "12");
+  assert.equal(tools.claude.textContentFor(".quad-primary-number"), "59");
+  assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "12");
   delete global.window;
   delete global.document;
 });

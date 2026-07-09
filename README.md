@@ -10,7 +10,7 @@ Windows 11용 로컬 Claude/Codex 사용량 모니터입니다. Juice는 Claude 
 
 ### 핵심 개념
 
-Juice v1은 단일 PC 로컬 모니터입니다. 계정 서버, 클라우드 동기화, 원격 PC 조회 기능이 없으며 LLM API 키도 사용하지 않습니다. 다른 PC에서 보려면 그 PC에도 Juice를 설치하고 Claude/Codex 연결을 별도로 완료해야 합니다.
+Juice v1은 단일 PC 로컬 모니터입니다. 계정 서버, 클라우드 동기화, 원격 PC 조회 기능이 없으며 LLM API 키도 사용하지 않습니다. 다른 PC에서 보려면 그 PC에도 Juice를 설치하고 Claude/Codex 로컬 수집을 별도로 완료해야 합니다.
 
 표시되는 퍼센트는 공식 구독 한도 API가 아니라 로컬에서 관측한 Claude statusline JSON과 Codex session JSONL 기반 근사치입니다.
 
@@ -18,7 +18,7 @@ Juice v1은 단일 PC 로컬 모니터입니다. 계정 서버, 클라우드 동
 
 1. [Releases](https://github.com/Lv2dev/agent-juice/releases)에서 최신 `Juice_*_x64-setup.exe`를 받습니다.
 2. 설치 후 Windows tray의 Juice 아이콘을 클릭해 설정창을 엽니다.
-3. Claude를 표시하려면 설정의 `Claude 연결`을 누른 뒤, 이 PC에서 Claude Code를 한 번 사용합니다.
+3. Claude는 설치본 실행 시 자동 연결을 시도합니다. 표시되지 않으면 설정의 `Claude 연결`로 다시 연결한 뒤, 이 PC에서 Claude Code를 한 번 사용합니다.
 4. Codex를 표시하려면 이 PC에서 Codex를 한 번 사용합니다.
 
 ### 사용법
@@ -35,7 +35,7 @@ Juice는 로컬 전용이라 PC 간 데이터를 공유하지 않습니다. 다�
 
 1. 그 PC에 Juice 설치
 2. 그 PC에서 Claude Code 로그인 확인
-3. Juice 설정창에서 `Claude 연결` 클릭
+3. Juice가 자동 연결을 시도합니다. 실패했거나 값이 비어 있으면 설정창에서 `Claude 연결` 클릭
 4. Claude Code를 한 번 실행해 statusline forward 파일 생성
 5. Codex도 그 PC에서 한 번 사용해 session 파일 생성
 
@@ -43,7 +43,7 @@ Juice는 로컬 전용이라 PC 간 데이터를 공유하지 않습니다. 다�
 
 ### 문제 해결
 
-- Claude가 비어 있음: `Claude 연결`을 누른 뒤 Claude Code를 한 번 사용하세요.
+- Claude가 비어 있음: 설치본을 다시 실행하거나 `Claude 연결`을 누른 뒤 Claude Code를 한 번 사용하세요.
 - Codex가 비어 있음: Codex를 이 PC에서 한 번 사용해야 `~/.codex/sessions` 데이터가 생깁니다.
 - 설정창을 최소화한 뒤 안 보임: tray 아이콘을 다시 클릭하세요. 최신 main에는 최소화 복원 경로가 보강되어 있습니다.
 - 값이 대시로 보임: 해당 도구가 아직 rate limit 정보를 내보내지 않았거나 오래된 세션일 수 있습니다.
@@ -65,7 +65,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 Juice is a Windows 11 local usage monitor for Claude Code and Codex. It reads local status files on the current PC and shows remaining 5-hour and weekly usage in a taskbar-aligned bar and a compact settings panel.
 
-Juice v1 is local-only. It does not sync across PCs, does not use a backend account, and does not store LLM API keys. To use Juice on another PC, install it there and connect Claude/Codex on that PC too.
+Juice v1 is local-only. It does not sync across PCs, does not use a backend account, and does not store LLM API keys. To use Juice on another PC, install it there and let Claude/Codex emit local data on that PC too.
 
 The percentages are local approximations based on Claude statusline JSON and Codex session JSONL, not an official subscription-limit API.
 
@@ -73,7 +73,7 @@ The percentages are local approximations based on Claude statusline JSON and Cod
 
 1. Download the latest `Juice_*_x64-setup.exe` from [Releases](https://github.com/Lv2dev/agent-juice/releases).
 2. Install it, then click the Juice tray icon to open Settings.
-3. For Claude, click `Connect Claude`, then use Claude Code once on this PC.
+3. For Claude, the installed app attempts to connect automatically. If Claude remains empty, click `Connect Claude`, then use Claude Code once on this PC.
 4. For Codex, use Codex once on this PC.
 
 ### Usage
@@ -90,7 +90,7 @@ Juice does not share data between PCs in v1. On every PC, repeat the local setup
 
 1. Install Juice on that PC.
 2. Confirm Claude Code is logged in on that PC.
-3. Click `Connect Claude` in Juice Settings.
+3. Juice attempts to connect automatically. If it fails or stays empty, click `Connect Claude` in Juice Settings.
 4. Use Claude Code once so Juice receives statusline data.
 5. Use Codex once so Juice can read local session data.
 
@@ -98,7 +98,7 @@ Viewing one PC's usage from another PC is planned for a later multi-PC Supabase 
 
 ### Troubleshooting
 
-- Claude is empty: click `Connect Claude`, then use Claude Code once.
+- Claude is empty: restart the installed app or click `Connect Claude`, then use Claude Code once.
 - Codex is empty: use Codex once on the same PC so `~/.codex/sessions` exists.
 - The settings panel was minimized: click the tray icon again. The current main branch restores minimized panels before focusing them.
 - Values show dashes: the tool may not have emitted rate-limit data yet, or the session may be stale.

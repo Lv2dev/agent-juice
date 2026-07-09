@@ -676,23 +676,44 @@ h2 {
   align-items: center;
   justify-content: flex-start;
   gap: 7px;
-  background: linear-gradient(var(--tool-brand), var(--tool-brand)) center calc(100% - 5px) /
-    38px 2px no-repeat;
 }
 
 .quad-ring {
   --quad-color: var(--unknown);
   --quad-arc: 0deg;
+  position: relative;
+  display: grid;
+  place-items: center;
   width: var(--ring-size);
   height: var(--ring-size);
   flex: 0 0 var(--ring-size);
   border-radius: 999px;
+}
+
+.quad-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   background: conic-gradient(
     var(--quad-color) 0 var(--quad-arc),
     color-mix(in srgb, var(--text-faint) 26%, transparent) 0
   );
   -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
   mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
+}
+
+.quad-number {
+  position: relative;
+  z-index: 1;
+  min-width: 18px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  font-size: var(--ring-number-font-size);
+  line-height: 1;
+  font-weight: var(--ring-number-font-weight);
+  text-align: center;
 }
 
 .quad-primary {
@@ -786,11 +807,13 @@ h2 {
   display: none;
 }
 
-.bar-shell[data-ring-numbers="off"] .bar-worst {
+.bar-shell[data-ring-numbers="off"] .bar-worst,
+.bar-shell[data-ring-numbers="off"] .quad-number {
   display: none;
 }
 
-.bar-shell[data-number-outline="on"] .bar-worst {
+.bar-shell[data-number-outline="on"] .bar-worst,
+.bar-shell[data-number-outline="on"] .quad-number {
   -webkit-text-stroke: 2px rgba(255, 255, 255, 0.82);
   paint-order: stroke fill;
 }

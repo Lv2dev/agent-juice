@@ -1152,6 +1152,19 @@ fn statusline_bridge_path() -> Result<String, String> {
         })
 }
 
+fn auto_connect_statusline_for_release() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    let result = statusline_bridge_path().and_then(|bridge| {
+        Settings::install_statusline_wrap(&bridge).map_err(|err| err.to_string())
+    });
+    if let Err(err) = result {
+        eprintln!("[statusline] auto-connect failed: {err}");
+    }
+}
+
 fn apply_autostart_for_release<R, M>(manager: &M, settings: &Settings)
 where
     R: tauri::Runtime,
@@ -1202,6 +1215,7 @@ pub fn run() {
             setup_panel_close_hide(app);
             setup_trays(app)?;
             apply_autostart_for_release(app, &settings);
+            auto_connect_statusline_for_release();
             spawn_status_loop(app.handle().clone());
             spawn_taskbar_drag_loop(app.handle().clone());
             spawn_taskbar_visibility_loop(app.handle().clone());

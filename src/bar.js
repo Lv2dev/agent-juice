@@ -85,6 +85,8 @@ function renderTool(vm, limitOrder) {
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
   setText(item, ".bar-worst", vm.worst);
+  setText(item, ".quad-primary-number", first.number);
+  setText(item, ".quad-secondary-number", second.number);
   setText(item, ".primary-text", first.text);
   setText(item, ".primary-reset", first.reset);
   setText(item, ".secondary-text", second.text);

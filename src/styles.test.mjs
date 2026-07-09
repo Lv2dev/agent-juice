@@ -314,6 +314,7 @@ test("taskbar overlay implements the four documented bar display modes", () => {
   assert.equal(compactLimitText, "");
   assert.match(dualCopy, /display: none/);
   assert.match(quad, /display: none/);
+  assert.doesNotMatch(quad, /background:/);
   assert.match(quadMode, /display: flex/);
   assert.match(quadCopy, /display: none/);
   assert.match(quadPrimary, /--quad-color: var\(--primary-color\)/);
@@ -331,6 +332,8 @@ test("dual ring center number stays inside the ring hole", () => {
   const outer = cssBlock(".outer-ring");
   const inner = cssBlock(".inner-ring");
   const quadRing = cssBlock(".quad-ring");
+  const quadRingBefore = cssBlock(".quad-ring::before");
+  const quadNumber = cssBlock(".quad-number");
   const shell = cssBlock(".bar-shell");
 
   assert.match(shell, /--ring-center-gap: 0px/);
@@ -343,7 +346,12 @@ test("dual ring center number stays inside the ring hole", () => {
   assert.match(inner, /var\(--ring-visible-thickness\)/);
   assert.match(quadRing, /width: var\(--ring-size\)/);
   assert.match(quadRing, /height: var\(--ring-size\)/);
-  assert.match(quadRing, /var\(--ring-visible-thickness\)/);
+  assert.match(quadRing, /position: relative/);
+  assert.match(quadRingBefore, /position: absolute/);
+  assert.match(quadRingBefore, /var\(--ring-visible-thickness\)/);
+  assert.match(quadNumber, /place-items: center/);
+  assert.match(quadNumber, /font-size: var\(--ring-number-font-size\)/);
+  assert.match(quadNumber, /font-weight: var\(--ring-number-font-weight\)/);
   assert.match(worst, /font-size: var\(--ring-number-font-size\)/);
   assert.match(worst, /font-weight: var\(--ring-number-font-weight\)/);
   assert.match(worst, /min-width: 18px/);
@@ -351,8 +359,8 @@ test("dual ring center number stays inside the ring hole", () => {
 });
 
 test("taskbar ring number visibility and outline are configurable", () => {
-  const numbersOff = cssBlock('.bar-shell[data-ring-numbers="off"] .bar-worst');
-  const outlineOn = cssBlock('.bar-shell[data-number-outline="on"] .bar-worst');
+  const numbersOff = cssBlock('.bar-shell[data-ring-numbers="off"] .bar-worst,\n.bar-shell[data-ring-numbers="off"] .quad-number');
+  const outlineOn = cssBlock('.bar-shell[data-number-outline="on"] .bar-worst,\n.bar-shell[data-number-outline="on"] .quad-number');
 
   assert.match(panelMarkup, /name="fullscreen_hide_on"/);
   assert.match(panelMarkup, /name="maximized_hide_on"/);
@@ -429,8 +437,21 @@ test("taskbar overlay has no blur, filter, text shadow, transition, or animation
   const ring = cssBlock(".bar-ring");
   const quad = cssBlock(".bar-quad");
   const quadRing = cssBlock(".quad-ring");
+  const quadRingBefore = cssBlock(".quad-ring::before");
+  const quadNumber = cssBlock(".quad-number");
   const worst = cssBlock(".bar-worst");
-  const barBlocks = [windowBlock, shell, tool, liveRing, ring, quad, quadRing, worst].join("\n");
+  const barBlocks = [
+    windowBlock,
+    shell,
+    tool,
+    liveRing,
+    ring,
+    quad,
+    quadRing,
+    quadRingBefore,
+    quadNumber,
+    worst,
+  ].join("\n");
 
   assert.doesNotMatch(barBlocks, /backdrop-filter:/);
   assert.doesNotMatch(barBlocks, /-webkit-backdrop-filter:/);
@@ -603,13 +624,24 @@ test("settings copy uses accurate collection timing labels and exposes Claude co
   assert.match(settingsJs, /install_statusline/);
 });
 
-test("panel cost estimate meta aligns as a full-width card footer", () => {
+test("panel meta removes estimated cost copy and stays as a full-width card footer", () => {
   const meta = cssBlock(".meta");
 
+  assert.doesNotMatch(panelMarkup, /추정 비용/);
+  assert.doesNotMatch(i18nJs, /meta\.cost/);
   assert.match(meta, /width:\s*100%/);
   assert.match(meta, /justify-self:\s*stretch/);
   assert.match(meta, /text-align:\s*right/);
   assert.doesNotMatch(meta, /max-width:/);
+});
+
+test("release startup attempts a non-fatal Claude statusline auto-connect", () => {
+  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)/);
+  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*cfg!\(debug_assertions\)/);
+  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*statusline_bridge_path\(\)/);
+  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*Settings::install_statusline_wrap/);
+  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*eprintln!\("\[statusline\] auto-connect failed/);
+  assert.match(rustLib, /auto_connect_statusline_for_release\(\);[\s\S]*spawn_status_loop/);
 });
 
 test("styles avoid decorative one-off effects and viewport font scaling", () => {

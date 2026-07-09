@@ -87,6 +87,11 @@ function percentText(value) {
   return number == null ? "–" : `${Math.round(number)}%`;
 }
 
+function numberText(value) {
+  const number = finiteNumber(value);
+  return number == null ? "–" : String(Math.round(number));
+}
+
 function arcText(value) {
   const number = finiteNumber(value);
   if (number == null) return "0deg";
@@ -108,6 +113,7 @@ function limitModel(labelKey, limit, settings, now, language, colorForLimit = co
   const remaining = remainingPercent(limit);
   return {
     text: `${t(labelKey, language)} ${percentText(remaining)}`,
+    number: numberText(remaining),
     percent: remaining,
     reset: shortReset(limit?.resets_at, now, language),
     color: colorForLimit(used, settings),

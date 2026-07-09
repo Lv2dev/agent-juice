@@ -137,12 +137,6 @@ function limitModel(limit, settings, now, language) {
   };
 }
 
-function formatCost(status, language) {
-  const label = t("meta.cost", language);
-  if (finiteNumber(status?.cost_estimate_usd) == null) return label;
-  return `${label} $${status.cost_estimate_usd.toFixed(2)}`;
-}
-
 function emptyHintForTool(tool, language) {
   return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
 }
@@ -164,14 +158,14 @@ export function viewModelForTool(
       secondary: limitModel(null, settings, now, language),
       context: `${t("context.label", language)} –`,
       pcId: "",
-      meta: `${t("meta.cost", language)} · ${t("meta.approx", language)}`,
+      meta: "",
       emptyHint: emptyHintForTool(tool, language),
     };
   }
 
   const active = status.session?.active === true;
   const context = percentText(status.session?.context_used_percent);
-  const approx = status.approx === false ? "" : ` · ${t("meta.approx", language)}`;
+  const meta = status.approx === false ? "" : t("meta.approx", language);
 
   return {
     active,
@@ -180,7 +174,7 @@ export function viewModelForTool(
     secondary: limitModel(status.secondary, settings, now, language),
     context: `${t("context.label", language)} ${context}${active ? "" : ` · ${t("state.stale", language)}`}`,
     pcId: status.pc_id ?? "",
-    meta: `${formatCost(status, language)}${approx}`,
+    meta,
     emptyHint: "",
   };
 }
