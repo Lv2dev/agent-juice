@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(resolve(here, "styles.css"), "utf8").replace(/\r\n?/g, "\n");
 const iconDir = resolve(here, "../src-tauri/icons");
+const projectRoot = resolve(here, "..");
 
 function cssToken(name) {
   const match = css.match(new RegExp(`${name}:\\s*(#[0-9a-fA-F]{6})`));
@@ -117,4 +118,37 @@ print(json.dumps(checks))
   assert.ok(result.topDistance < 42, `top distance ${result.topDistance}`);
   assert.ok(result.bottomDistance < 42, `bottom distance ${result.bottomDistance}`);
   assert.ok(result.cornerAlphaMax < 8, `corner alpha ${result.cornerAlphaMax}`);
+});
+
+test("README opens with a horizontal Juice brand lockup", () => {
+  const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
+  const brandPath = resolve(projectRoot, "docs/assets/juice-brand.svg");
+
+  assert.ok(existsSync(brandPath), "README brand lockup asset is missing");
+  assert.match(
+    readme,
+    /^<p align="center">\n\s*<img src="docs\/assets\/juice-brand\.svg" alt="Juice" width="260">\n<\/p>/,
+  );
+  assert.doesNotMatch(readme, /src-tauri\/icons\/icon\.png/);
+
+  const brand = readFileSync(brandPath, "utf8");
+  assert.match(brand, /<title id="title">Juice<\/title>/);
+  assert.match(brand, /<text[^>]*>Juice<\/text>/);
+});
+
+test("README preview keeps all window controls inside the frame safe area", () => {
+  const preview = readFileSync(resolve(projectRoot, "docs/assets/juice-preview.svg"), "utf8");
+  const frameRight = 150 + 820;
+  const safeInset = 12;
+  const controls = preview.match(/<g id="window-controls">([\s\S]*?)<\/g>/)?.[1] ?? "";
+  const circles = [...controls.matchAll(/<circle cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].map(
+    ([, cx, cy, radius]) => ({ cx: Number(cx), cy: Number(cy), radius: Number(radius) }),
+  );
+
+  assert.equal(circles.length, 3);
+  for (const circle of circles) {
+    assert.ok(circle.cx + circle.radius <= frameRight - safeInset, `control exceeds right safe area: ${circle.cx}`);
+    assert.ok(circle.cy - circle.radius >= 66, `control exceeds top frame: ${circle.cy}`);
+    assert.ok(circle.cy + circle.radius <= 110, `control exceeds title bar: ${circle.cy}`);
+  }
 });

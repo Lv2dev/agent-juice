@@ -1,6 +1,6 @@
-# Juice
-
-![Juice icon](src-tauri/icons/icon.png)
+<p align="center">
+  <img src="docs/assets/juice-brand.svg" alt="Juice" width="260">
+</p>
 
 Windows 11용 로컬 Claude/Codex 사용량 모니터입니다. Juice는 이 PC의 Claude Code 상태와 Codex CLI 계정 한도를 읽어 작업표시줄 위의 작은 bar와 설정 패널에 5시간/주간 한도 잔여량을 표시합니다.
 

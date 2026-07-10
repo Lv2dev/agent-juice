@@ -19,9 +19,11 @@
   <g filter="url(#softShadow)">
     <rect x="150" y="66" width="820" height="442" rx="18" fill="#f8faf7" fill-opacity="0.72" stroke="#d8ded5"/>
     <rect x="150" y="66" width="820" height="44" rx="18" fill="#ffffff" fill-opacity="0.48"/>
-    <circle cx="918" cy="88" r="8" fill="#f4b641"/>
-    <circle cx="944" cy="88" r="8" fill="#4cc27a"/>
-    <circle cx="970" cy="88" r="8" fill="#f06f6b"/>
+    <g id="window-controls">
+      <circle cx="902" cy="88" r="8" fill="#f4b641"/>
+      <circle cx="926" cy="88" r="8" fill="#4cc27a"/>
+      <circle cx="950" cy="88" r="8" fill="#f06f6b"/>
+    </g>
     <rect x="188" y="146" width="744" height="146" rx="12" fill="#ffffff" fill-opacity="0.58" stroke="#dde4db"/>
     <rect x="205" y="167" width="8" height="28" rx="4" fill="url(#mark)"/>
     <text x="226" y="188" font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="700" fill="#1f2d3d">Juice</text>
