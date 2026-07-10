@@ -112,6 +112,7 @@ function renderTool(tool, now) {
   const vm = viewModelForTool(lastStatuses, tool, settings, now);
 
   card.dataset.state = vm.exists ? (vm.active ? "live" : "stale") : "empty";
+  card.style?.setProperty("--tool-brand", vm.brandColor);
   setBar(card, ".p5h", vm.primary);
   setBar(card, ".pweek", vm.secondary);
   setText(card, ".pc", vm.pcId);

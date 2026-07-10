@@ -54,8 +54,8 @@ const SECONDARY_RAMP = {
 
 const UNKNOWN_COLOR = "#9ca3af";
 const TOOL_SAFE = {
-  claude: ["#b7833a", "#a65f72"],
-  codex: ["#4f8a73", "#4f76a6"],
+  claude: ["#d79a32", "#d36b86"],
+  codex: ["#2fac7d", "#4d86d6"],
 };
 
 function rgbColor(value, fallback) {
@@ -67,6 +67,10 @@ function configuredToolColor(settings, tool, secondary) {
   const fallback = TOOL_SAFE[tool]?.[secondary ? 1 : 0] ?? UNKNOWN_COLOR;
   const key = `${tool}_${secondary ? "secondary" : "primary"}`;
   return rgbColor(settings?.tool_colors?.[key], fallback);
+}
+
+export function toolBrandColor(tool, settings = DEFAULT_SETTINGS) {
+  return configuredToolColor(settings ?? DEFAULT_SETTINGS, tool, false);
 }
 
 function finiteNumber(value) {
@@ -253,6 +257,7 @@ export function viewModelForTool(
     return {
       active: false,
       exists: false,
+      brandColor: toolBrandColor(tool, settings),
       primary: limitModel(null, settings, now, language, tool),
       secondary: limitModel(null, settings, now, language, tool, true),
       context: `${t("context.label", language)} –`,
@@ -269,6 +274,7 @@ export function viewModelForTool(
   return {
     active,
     exists: true,
+    brandColor: toolBrandColor(tool, settings),
     primary: limitModel(status.primary, settings, now, language, tool),
     secondary: limitModel(status.secondary, settings, now, language, tool, true),
     context: `${t("context.label", language)} ${context}${active ? "" : ` · ${t("state.stale", language)}`}`,

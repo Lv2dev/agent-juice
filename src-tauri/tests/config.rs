@@ -196,6 +196,34 @@ fn legacy_center_gap_migrates_to_the_visible_center_diameter() {
 }
 
 #[test]
+fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() {
+    let root = temp_root("legacy-tool-colors");
+    let path = root.join("settings.json");
+    fs::write(
+        &path,
+        r#"{"tool_colors":{"claude_primary":[183,131,58],"claude_secondary":[166,95,114],"codex_primary":[79,138,115],"codex_secondary":[79,118,166]}}"#,
+    )
+    .unwrap();
+
+    let migrated = Settings::load_from(&path);
+    assert_eq!(migrated.tool_colors, ToolColors::default());
+
+    let custom = ToolColors {
+        claude_primary: [0xb7, 0x83, 0x3a],
+        claude_secondary: [0xa6, 0x5f, 0x72],
+        codex_primary: [0x12, 0x34, 0x56],
+        codex_secondary: [0x4f, 0x76, 0xa6],
+    };
+    fs::write(
+        &path,
+        serde_json::to_string(&serde_json::json!({ "tool_colors": custom })).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(Settings::load_from(&path).tool_colors, custom);
+}
+
+#[test]
 fn install_statusline_wrap_preserves_original_and_is_idempotent() {
     let root = temp_root("install");
     let home = root.join("home");

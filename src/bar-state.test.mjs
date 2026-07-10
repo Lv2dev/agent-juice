@@ -117,8 +117,9 @@ test("barToolViewModel uses distinct colors for 5h and weekly rings in the same 
     settings,
   );
 
-  assert.equal(vm.primary.color, "#b7833a");
-  assert.equal(vm.secondary.color, "#a65f72");
+  assert.equal(vm.brandColor, "#d79a32");
+  assert.equal(vm.primary.color, "#d79a32");
+  assert.equal(vm.secondary.color, "#d36b86");
   assert.notEqual(vm.primary.color, vm.secondary.color);
 });
 
@@ -137,10 +138,12 @@ test("barToolViewModel distinguishes tool colors and supports usage display basi
   assert.equal(claude.primary.text, "5h 20%");
   assert.equal(claude.primary.percent, 20);
   assert.equal(claude.worst, "25");
-  assert.equal(claude.primary.color, "#b7833a");
-  assert.equal(claude.secondary.color, "#a65f72");
-  assert.equal(codex.primary.color, "#4f8a73");
-  assert.equal(codex.secondary.color, "#4f76a6");
+  assert.equal(claude.brandColor, "#d79a32");
+  assert.equal(claude.primary.color, "#d79a32");
+  assert.equal(claude.secondary.color, "#d36b86");
+  assert.equal(codex.brandColor, "#2fac7d");
+  assert.equal(codex.primary.color, "#2fac7d");
+  assert.equal(codex.secondary.color, "#4d86d6");
 
   const customCodex = barToolViewModel(statuses, "codex", {
     ...usedSettings,

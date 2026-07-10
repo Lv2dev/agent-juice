@@ -254,10 +254,10 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).showCodex, true);
   assert.equal(formStateFromSettings({}).claudeAccountAutoCollectOn, true);
   assert.equal(formStateFromSettings({}).updateCheckOn, true);
-  assert.equal(formStateFromSettings({}).claudePrimaryColor, "#b7833a");
-  assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#a65f72");
-  assert.equal(formStateFromSettings({}).codexPrimaryColor, "#4f8a73");
-  assert.equal(formStateFromSettings({}).codexSecondaryColor, "#4f76a6");
+  assert.equal(formStateFromSettings({}).claudePrimaryColor, "#d79a32");
+  assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#d36b86");
+  assert.equal(formStateFromSettings({}).codexPrimaryColor, "#2fac7d");
+  assert.equal(formStateFromSettings({}).codexSecondaryColor, "#4d86d6");
   assert.equal(formStateFromSettings({ update_check_on: false }).updateCheckOn, false);
   assert.equal(
     formStateFromSettings({ claude_usage_auto_refresh_lab_on: false }).claudeAccountAutoCollectOn,

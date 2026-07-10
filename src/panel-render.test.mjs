@@ -22,10 +22,19 @@ function toolCardStub() {
     [".pweek", metricStub()],
   ]);
   const textNodes = new Map();
+  const styles = new Map();
 
   return {
     dataset: {},
     hidden: false,
+    style: {
+      setProperty(name, value) {
+        styles.set(name, value);
+      },
+      getPropertyValue(name) {
+        return styles.get(name) ?? "";
+      },
+    },
     querySelector(selector) {
       if (metrics.has(selector)) return metrics.get(selector);
       if (!textNodes.has(selector)) {
@@ -114,6 +123,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
 
   assert.equal(cards.claude.hidden, true);
   assert.equal(cards.codex.hidden, false);
+  assert.equal(cards.codex.style.getPropertyValue("--tool-brand"), "#2fac7d");
   assert.equal(focusListenerCount, 0);
   let prevented = false;
   listeners.contextmenu?.({ preventDefault() { prevented = true; } });

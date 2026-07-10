@@ -4,6 +4,7 @@ import {
   displayPercentFromUsed,
   normalizeDisplayBasis,
   representativeByTool,
+  toolBrandColor,
 } from "./panel-state.js";
 import { formatDuration, resolveLanguage, t } from "./i18n.js";
 
@@ -182,6 +183,7 @@ export function barToolViewModel(
   const base = {
     tool,
     label: TOOL_LABELS[tool] ?? tool,
+    brandColor: toolBrandColor(tool, settings),
   };
 
   if (!status) {

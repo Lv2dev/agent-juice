@@ -41,12 +41,15 @@ function cssBlock(selector) {
 }
 
 function markupSection(name) {
-  const match = panelMarkup.match(
-    new RegExp(
-      `<fieldset class="settings-section(?: [^"]*)?" data-settings-section="${name}">(?<body>[\\s\\S]*?)</fieldset>`,
-    ),
-  );
-  return match?.groups?.body ?? "";
+  for (const tag of ["fieldset", "section"]) {
+    const match = panelMarkup.match(
+      new RegExp(
+        `<${tag} class="[^"]*" data-settings-section="${name}">(?<body>[\\s\\S]*?)</${tag}>`,
+      ),
+    );
+    if (match) return match.groups?.body ?? "";
+  }
+  return "";
 }
 
 test("styles define the restrained Quiet Glass surface tokens used by Juice", () => {
@@ -72,8 +75,7 @@ test("usage cards share the same surface tint regardless of tool", () => {
   const cardTint = cssBlock(".tool-card::before");
   const hover = cssBlock(".tool-card:hover");
   const dot = cssBlock(".tool-dot");
-  const claudeDot = cssBlock(".claude-dot");
-  const codexDot = cssBlock(".codex-dot");
+  const dotFill = cssBlock(".claude-dot,\n.codex-dot");
   const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
   const codexCard = cssBlock('.tool-card[data-tool="codex"]');
 
@@ -83,9 +85,9 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.doesNotMatch(hover, /var\(--tool-color\)/);
   assert.doesNotMatch(hover, /var\(--tool-glow\)/);
   assert.match(dot, /var\(--accent\)/);
-  assert.match(claudeDot, /#b7833a/);
-  assert.match(codexDot, /#4f8a73/);
-  assert.notEqual(claudeDot, codexDot);
+  assert.match(dotFill, /background: var\(--tool-brand\)/);
+  assert.match(claudeCard, /--tool-brand: #d79a32/);
+  assert.match(codexCard, /--tool-brand: #2fac7d/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
 });
@@ -554,13 +556,13 @@ test("styles include restrained panel motion with a reduced-motion escape hatch"
 });
 
 test("settings controls keep glass at the card level and use quiet flat rows", () => {
-  const card = cssBlock(".settings-card");
+  const card = cssBlock(".settings-card,\n.settings-utility-card");
   const cardTint = cssBlock(".settings-card::before");
   const toolTint = cssBlock(".tool-card::before");
   const form = cssBlock(".settings-form");
   const section = cssBlock(".settings-section");
   const legend = cssBlock(".settings-section legend");
-  const summaryAccent = cssBlock(".settings-card summary span::before");
+  const summaryAccent = cssBlock(".settings-card summary .settings-title::before");
   const rowSurface = cssBlock(".field-row,\n.range-row,\n.toggle-row,\n.swatch-row,\n.field-grid label");
   const select =
     [...css.matchAll(/(?:^|\n)select\s*\{(?<body>[^}]+)\}/g)].map((match) => match.groups.body)
@@ -601,6 +603,8 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   assert.match(form, /grid-template-columns: minmax\(0,\s*1fr\)/);
   assert.match(section, /border-top: 1px solid/);
   assert.doesNotMatch(section, /box-shadow:/);
+  assert.match(legend, /border-left: 3px solid/);
+  assert.match(legend, /background: color-mix/);
   assert.doesNotMatch(legend, /position: sticky/);
   assert.doesNotMatch(legend, /z-index:/);
   assert.match(rowSurface, /background: transparent/);
@@ -659,6 +663,31 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   assert.doesNotMatch(panelMarkup, />저장</);
 });
 
+test("autosave completion uses a centered transient toast outside the scrolling shell", () => {
+  const layer = cssBlock(".settings-toast-layer");
+  const toast = cssBlock(".settings-toast");
+  const previewBars = cssBlock(".effect-preview-bars");
+  const depthBar = cssBlock('.bar-shell[data-effect="depth"] .limit-bar::before');
+
+  assert.match(panelMarkup, /<\/main>\s*<div class="settings-toast-layer" data-settings-toast hidden>/);
+  assert.match(panelMarkup, /data-settings-toast-text/);
+  assert.match(panelMarkup, /data-settings-save-state data-state="ready" hidden/);
+  assert.match(layer, /position: fixed/);
+  assert.match(layer, /left: 0/);
+  assert.match(layer, /right: 0/);
+  assert.match(layer, /place-items: center/);
+  assert.match(layer, /bottom: 16px/);
+  assert.match(toast, /min-height: 34px/);
+  assert.match(toast, /max-width: min\(360px, 100%\)/);
+  assert.match(toast, /text-align: center/);
+  assert.doesNotMatch(previewBars, /color-mix/);
+  assert.match(previewBars, /border-top: 3px solid currentColor/);
+  assert.match(previewBars, /border-bottom: 3px solid currentColor/);
+  assert.match(depthBar, /background: var\(--limit-color\)/);
+  assert.match(i18nJs, /"status\.saved": "적용 완료"/);
+  assert.match(i18nJs, /"status\.saved": "Applied"/);
+});
+
 test("palette picker exposes stable swatches and a clear selected state", () => {
   const field = cssBlock(".palette-field");
   const picker = cssBlock(".palette-picker");
@@ -680,7 +709,7 @@ test("palette picker exposes stable swatches and a clear selected state", () => 
 
 test("settings form groups controls into logical sections without changing field names", () => {
   const sections = [
-    ...panelMarkup.matchAll(/<fieldset class="settings-section(?: [^"]*)?" data-settings-section="([^"]+)">/g),
+    ...panelMarkup.matchAll(/<(?:fieldset|section) class="[^"]*" data-settings-section="([^"]+)">/g),
   ].map((match) => match[1]);
   const indicatorSection = markupSection("indicator");
 
@@ -702,9 +731,13 @@ test("settings form groups controls into logical sections without changing field
   assert.doesNotMatch(markupSection("system"), /id="settings-status"/);
   assert.match(markupSection("update"), /name="update_check_on"[\s\S]*data-action="check-updates"[\s\S]*data-action="open-releases"[\s\S]*id="update-check-status"/);
   assert.doesNotMatch(markupSection("about"), /name="update_check_on"|data-action="check-updates"/);
-  assert.match(panelMarkup, /<\/main>\s*<footer class="settings-footer" data-state="ready">[\s\S]*id="settings-status"/);
-  assert.match(cssBlock(".settings-footer"), /position: fixed/);
-  assert.match(cssBlock(".settings-footer"), /bottom: 10px/);
+  assert.match(panelMarkup, /<form id="settings-form" class="settings-layout">[\s\S]*<section class="settings-utility-card update-card" data-settings-section="update">[\s\S]*<\/section>\s*<\/form>/);
+  assert.match(panelMarkup, /<summary>[\s\S]*data-settings-save-state[\s\S]*id="settings-status"[\s\S]*<\/summary>/);
+  assert.match(panelMarkup, /<\/form>\s*<section class="settings-utility-card about-card" data-settings-section="about">[\s\S]*<\/section>\s*<\/main>/);
+  assert.doesNotMatch(panelMarkup, /settings-footer/);
+  assert.doesNotMatch(cssBlock(".settings-save-state"), /position:\s*fixed/);
+  assert.doesNotMatch(cssBlock(".settings-save-state"), /background:|border:/);
+  assert.equal(sections.at(-1), "about");
   assert.match(markupSection("limits"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
   assert.doesNotMatch(panelMarkup, /claude_usage_auto_refresh_lab_on/);

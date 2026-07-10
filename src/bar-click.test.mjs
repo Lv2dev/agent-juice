@@ -566,11 +566,12 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(root.dataset.mode, "quad");
+  assert.equal(tools.claude.style.getPropertyValue("--tool-brand"), "#d79a32");
   assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#f59e0b");
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "43.2deg");
   assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "12");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "12%");
-  assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#a65f72");
+  assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#d36b86");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "212.4deg");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
@@ -633,9 +634,10 @@ test("bar render can show weekly limits before 5h without changing semantic limi
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(root.dataset.limitOrder, "secondary-first");
+  assert.equal(tools.claude.style.getPropertyValue("--tool-brand"), "#d79a32");
   assert.equal(tools.claude.textContentFor(".primary-text"), "주간 59%");
   assert.equal(tools.claude.textContentFor(".secondary-text"), "5h 12%");
-  assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#a65f72");
+  assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#d36b86");
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "212.4deg");
   assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "59%");
