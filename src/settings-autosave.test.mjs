@@ -107,7 +107,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     __TAURI__: {
       core: {
         async invoke(command, args) {
-          if (command === "get_settings") return { maximized_hide_on: true };
+          if (command === "get_settings") return { maximized_hide_on: true, language: "ko" };
           if (command === "save_settings") {
             savedInputs.push(args.input);
             if (deferSaveResponses) {
