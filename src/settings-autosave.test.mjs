@@ -30,8 +30,16 @@ test("settings form auto-saves changed values without a submit button", async ()
   const pendingSaveResponses = [];
   let deferSaveResponses = false;
   let settingsEventHandler = null;
-  const statusFooter = { dataset: {} };
-  const statusEl = { textContent: "", closest: () => statusFooter };
+  const statusHost = { dataset: {} };
+  const statusEl = {
+    textContent: "",
+    closest(selector) {
+      assert.equal(selector, "[data-settings-save-state]");
+      return statusHost;
+    },
+  };
+  const toastLayer = { dataset: {}, hidden: true };
+  const toastText = { textContent: "" };
   const customRow = { hidden: true };
   const toolColorRow = { hidden: true };
   const fields = {
@@ -86,10 +94,10 @@ test("settings form auto-saves changed values without a submit button", async ()
     custom_safe: makeField("#22c55e"),
     custom_warn: makeField("#f59e0b"),
     custom_danger: makeField("#ef4444"),
-    claude_primary_color: makeField("#b7833a", "color"),
-    claude_secondary_color: makeField("#a65f72", "color"),
-    codex_primary_color: makeField("#4f8a73", "color"),
-    codex_secondary_color: makeField("#4f76a6", "color"),
+    claude_primary_color: makeField("#d79a32", "color"),
+    claude_secondary_color: makeField("#d36b86", "color"),
+    codex_primary_color: makeField("#2fac7d", "color"),
+    codex_secondary_color: makeField("#4d86d6", "color"),
   };
   const form = {
     elements: {
@@ -146,6 +154,8 @@ test("settings form auto-saves changed values without a submit button", async ()
     querySelector(selector) {
       if (selector === "#settings-form") return form;
       if (selector === "#settings-status") return statusEl;
+      if (selector === "[data-settings-toast]") return toastLayer;
+      if (selector === "[data-settings-toast-text]") return toastText;
       if (selector === "[data-custom-palette]") return customRow;
       if (selector === "[data-tool-palette]") return toolColorRow;
       return null;
@@ -155,6 +165,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   await import(`./settings.js?test=${Date.now()}-autosave`);
   await new Promise((resolve) => setImmediate(resolve));
 
+  assert.equal(statusHost.hidden, true, "initial hydration must not show a completion state");
+  assert.equal(toastLayer.hidden, true, "initial hydration must not show a completion toast");
   assert.equal(fields.warn_threshold.style.getPropertyValue("--range-progress"), "30%");
   assert.equal(fields.ring_size_px.style.getPropertyValue("--range-progress"), "66.7%");
 
@@ -189,15 +201,20 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].bar_text_font_weight, 500);
   assert.equal(savedInputs[0].update_check_on, true);
   assert.equal(savedInputs[0].claude_primary_color, "#123456");
-  assert.equal(savedInputs[0].claude_secondary_color, "#a65f72");
+  assert.equal(savedInputs[0].claude_secondary_color, "#d36b86");
   assert.equal(toolColorRow.hidden, false);
   assert.equal(dispatched.at(-1)?.type, "settings-updated");
-  assert.match(statusEl.textContent, /자동 적용/);
-  assert.equal(statusFooter.dataset.state, "saved");
+  assert.equal(statusEl.textContent, "");
+  assert.equal(statusHost.hidden, true);
+  assert.equal(toastLayer.hidden, false);
+  assert.equal(toastLayer.dataset.visible, "true");
+  assert.equal(toastText.textContent, "적용 완료");
 
   deferSaveResponses = true;
   fields.bar_mode.value = "compact";
   listeners.input?.({ target: fields.bar_mode });
+  assert.equal(toastLayer.hidden, true, "a new edit must dismiss the previous completion toast");
+  assert.match(statusEl.textContent, /적용 중/);
   await new Promise((resolve) => setTimeout(resolve, 150));
   fields.bar_mode.value = "quad";
   listeners.input?.({ target: fields.bar_mode });
@@ -289,10 +306,10 @@ test("settings form ignores early input events until stored settings hydrate", a
     custom_safe: makeField("#22c55e"),
     custom_warn: makeField("#f59e0b"),
     custom_danger: makeField("#ef4444"),
-    claude_primary_color: makeField("#b7833a", "color"),
-    claude_secondary_color: makeField("#a65f72", "color"),
-    codex_primary_color: makeField("#4f8a73", "color"),
-    codex_secondary_color: makeField("#4f76a6", "color"),
+    claude_primary_color: makeField("#d79a32", "color"),
+    claude_secondary_color: makeField("#d36b86", "color"),
+    codex_primary_color: makeField("#2fac7d", "color"),
+    codex_secondary_color: makeField("#4d86d6", "color"),
   };
   const form = {
     elements: {

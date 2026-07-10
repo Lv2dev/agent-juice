@@ -5,7 +5,9 @@ import { applyTheme } from "./theme.js";
 
 const form = document.querySelector("#settings-form");
 const statusEl = document.querySelector("#settings-status");
-const statusFooter = statusEl?.closest?.(".settings-footer");
+const statusHost = statusEl?.closest?.("[data-settings-save-state]");
+const toastLayer = document.querySelector("[data-settings-toast]");
+const toastText = document.querySelector("[data-settings-toast-text]");
 const customRow = document.querySelector("[data-custom-palette]");
 const monoRow = document.querySelector("[data-mono-palette]");
 const toolColorRow = document.querySelector("[data-tool-palette]");
@@ -23,6 +25,8 @@ let savedRevision = 0;
 let saveQueue = Promise.resolve();
 let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
+let toastTimer = null;
+let toastHideTimer = null;
 
 function tauriApi() {
   return window.__TAURI__ ?? {};
@@ -39,8 +43,48 @@ function currentLanguageSettings() {
 }
 
 function setStatus(text, state = "ready") {
-  if (statusEl) statusEl.textContent = text;
-  if (statusFooter) statusFooter.dataset.state = state;
+  const value = String(text ?? "");
+  if (statusEl) statusEl.textContent = value;
+  if (statusHost) {
+    statusHost.dataset.state = state;
+    statusHost.hidden = value.length === 0;
+  }
+}
+
+function clearToastTimers() {
+  clearTimeout(toastTimer);
+  clearTimeout(toastHideTimer);
+  toastTimer = null;
+  toastHideTimer = null;
+}
+
+function scheduleToastTimer(callback, delay) {
+  const timer = setTimeout(callback, delay);
+  timer?.unref?.();
+  return timer;
+}
+
+function hideSettingsToast() {
+  clearToastTimers();
+  if (!toastLayer) return;
+  delete toastLayer.dataset.visible;
+  toastLayer.hidden = true;
+}
+
+function showSettingsToast(text) {
+  if (!toastLayer || !toastText) return;
+  clearToastTimers();
+  toastText.textContent = text;
+  toastLayer.hidden = false;
+  toastLayer.dataset.visible = "true";
+  toastTimer = scheduleToastTimer(() => {
+    delete toastLayer.dataset.visible;
+    toastHideTimer = scheduleToastTimer(() => {
+      toastLayer.hidden = true;
+      toastHideTimer = null;
+    }, 180);
+    toastTimer = null;
+  }, 1600);
 }
 
 function setField(name, value) {
@@ -155,19 +199,19 @@ function updateOutputs() {
   );
   palettePicker?.style?.setProperty(
     "--tool-claude-primary-swatch",
-    form.elements.namedItem("claude_primary_color")?.value ?? "#b7833a",
+    form.elements.namedItem("claude_primary_color")?.value ?? "#d79a32",
   );
   palettePicker?.style?.setProperty(
     "--tool-claude-secondary-swatch",
-    form.elements.namedItem("claude_secondary_color")?.value ?? "#a65f72",
+    form.elements.namedItem("claude_secondary_color")?.value ?? "#d36b86",
   );
   palettePicker?.style?.setProperty(
     "--tool-codex-primary-swatch",
-    form.elements.namedItem("codex_primary_color")?.value ?? "#4f8a73",
+    form.elements.namedItem("codex_primary_color")?.value ?? "#2fac7d",
   );
   palettePicker?.style?.setProperty(
     "--tool-codex-secondary-swatch",
-    form.elements.namedItem("codex_secondary_color")?.value ?? "#4f76a6",
+    form.elements.namedItem("codex_secondary_color")?.value ?? "#4d86d6",
   );
   updateDisplayBasisCopy();
 }
@@ -237,10 +281,10 @@ async function loadSettings() {
   try {
     const settings = await invoke("get_settings");
     hydrateSettings(settings || {});
-    setStatus(t("status.saved", settings || {}), "saved");
+    setStatus("", "ready");
   } catch {
     hydrateSettings({});
-    setStatus(t("status.saved", currentLanguageSettings()), "saved");
+    setStatus("", "ready");
   }
 }
 
@@ -287,13 +331,15 @@ async function saveSettings(input, revision) {
   savedRevision = revision;
   window.dispatchEvent(new CustomEvent("settings-updated", { detail: next }));
   fillForm(next);
-  setStatus(t("status.saved", next), "saved");
+  setStatus("", "ready");
+  showSettingsToast(t("status.saved", next));
 }
 
 function scheduleAutosave() {
   if (isHydrating || !hasLoadedSettings) return;
   localRevision += 1;
   updateOutputs();
+  hideSettingsToast();
   setStatus(t("status.saving", currentLanguageSettings()), "saving");
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
@@ -316,7 +362,8 @@ function handleSettingsMutation(event) {
 async function runAction(action) {
   if (action === "restore-statusline") {
     await invoke("restore_statusline");
-    setStatus(t("status.restored", currentLanguageSettings()), "saved");
+    setStatus("", "ready");
+    showSettingsToast(t("status.restored", currentLanguageSettings()));
     return;
   }
   if (action === "check-updates") {

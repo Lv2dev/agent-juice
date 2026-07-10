@@ -5,6 +5,7 @@ import {
   colorForPercent,
   colorForToolPercent,
   representativeByTool,
+  toolBrandColor,
   viewModelForTool,
 } from "./panel-state.js";
 
@@ -14,6 +15,21 @@ const settings = {
   palette: "Traffic",
   language: "ko",
 };
+
+function luminance(hex) {
+  const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => Number.parseInt(value, 16) / 255);
+  const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+test("default tool colors are brighter than the legacy muted set", () => {
+  const current = ["#d79a32", "#d36b86", "#2fac7d", "#4d86d6"];
+  const legacy = ["#b7833a", "#a65f72", "#4f8a73", "#4f76a6"];
+
+  current.forEach((color, index) => {
+    assert.ok(luminance(color) > luminance(legacy[index]), `${color} must be brighter`);
+  });
+});
 
 test("colorForPercent uses thresholds and palette from settings", () => {
   assert.equal(colorForPercent(50, settings), "#22c55e");
@@ -54,6 +70,8 @@ test("tool palette accepts four persisted live colors without replacing warning 
   assert.equal(colorForToolPercent(50, "codex", customized, true), "#a0b0c0");
   assert.equal(colorForToolPercent(80, "claude", customized), "#f59e0b");
   assert.equal(colorForToolPercent(95, "codex", customized, true), "#db2777");
+  assert.equal(toolBrandColor("claude", customized), "#102030");
+  assert.equal(toolBrandColor("codex", customized), "#708090");
 });
 
 test("representativeByTool picks the newest captured_at per tool", () => {
@@ -104,7 +122,8 @@ test("viewModelForTool renders remaining values by default", () => {
   assert.equal(vm.primary.color, "#f59e0b");
   assert.match(vm.primary.reset, /^리셋 1시간 5분 \(/);
   assert.equal(vm.secondary.value, "59%");
-  assert.equal(vm.secondary.color, "#a65f72");
+  assert.equal(vm.brandColor, "#d79a32");
+  assert.equal(vm.secondary.color, "#d36b86");
   assert.equal(vm.context, "컨텍스트 63%");
   assert.equal(vm.meta, "근사치");
   assert.equal(vm.emptyHint, "");
@@ -126,10 +145,11 @@ test("viewModelForTool can render canonical usage values", () => {
 
   assert.equal(vm.primary.value, "23%");
   assert.equal(vm.primary.width, "23%");
-  assert.equal(vm.primary.color, "#4f8a73");
+  assert.equal(vm.brandColor, "#2fac7d");
+  assert.equal(vm.primary.color, "#2fac7d");
   assert.equal(vm.secondary.value, "41%");
   assert.equal(vm.secondary.width, "41%");
-  assert.equal(vm.secondary.color, "#4f76a6");
+  assert.equal(vm.secondary.color, "#4d86d6");
 });
 
 test("viewModelForTool is null-safe and marks stale sessions", () => {

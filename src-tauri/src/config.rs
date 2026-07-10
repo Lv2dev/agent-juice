@@ -21,13 +21,20 @@ pub struct ToolColors {
     pub codex_secondary: [u8; 3],
 }
 
+const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
+    claude_primary: [0xb7, 0x83, 0x3a],
+    claude_secondary: [0xa6, 0x5f, 0x72],
+    codex_primary: [0x4f, 0x8a, 0x73],
+    codex_secondary: [0x4f, 0x76, 0xa6],
+};
+
 impl Default for ToolColors {
     fn default() -> Self {
         Self {
-            claude_primary: [0xb7, 0x83, 0x3a],
-            claude_secondary: [0xa6, 0x5f, 0x72],
-            codex_primary: [0x4f, 0x8a, 0x73],
-            codex_secondary: [0x4f, 0x76, 0xa6],
+            claude_primary: [0xd7, 0x9a, 0x32],
+            claude_secondary: [0xd3, 0x6b, 0x86],
+            codex_primary: [0x2f, 0xac, 0x7d],
+            codex_secondary: [0x4d, 0x86, 0xd6],
         }
     }
 }
@@ -470,6 +477,7 @@ impl Settings {
         settings.apply_legacy_taskbar_offset(value.as_ref());
         settings.apply_legacy_collection_interval(value.as_ref());
         settings.apply_legacy_ring_center_size(value.as_ref());
+        settings.apply_legacy_tool_colors(value.as_ref());
         settings.clamp_offsets();
         settings.clamp_ring_geometry();
         settings.display_basis = normalize_display_basis(&settings.display_basis).into();
@@ -665,6 +673,15 @@ impl Settings {
         let visible_thickness = (thickness - legacy_gap).max(1.0);
         self.ring_center_size_px =
             clamp_ring_center_size(size - 2.0 * gap - 2.0 * visible_thickness);
+    }
+
+    fn apply_legacy_tool_colors(&mut self, value: Option<&serde_json::Value>) {
+        let Some(value) = value else {
+            return;
+        };
+        if json_has_field(value, "tool_colors") && self.tool_colors == LEGACY_DEFAULT_TOOL_COLORS {
+            self.tool_colors = ToolColors::default();
+        }
     }
 
     fn clamp_offsets(&mut self) {

@@ -5,10 +5,10 @@ const DEFAULT_CUSTOM = {
 };
 
 const DEFAULT_TOOL_COLORS = {
-  claudePrimary: "#b7833a",
-  claudeSecondary: "#a65f72",
-  codexPrimary: "#4f8a73",
-  codexSecondary: "#4f76a6",
+  claudePrimary: "#d79a32",
+  claudeSecondary: "#d36b86",
+  codexPrimary: "#2fac7d",
+  codexSecondary: "#4d86d6",
 };
 
 const DEFAULT_MONO_COLOR = "#4f8a73";

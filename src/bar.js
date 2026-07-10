@@ -178,6 +178,7 @@ function renderTool(vm, limitOrder) {
   item.hidden = false;
   item.dataset.state = vm.state;
   item.dataset.severity = vm.severity;
+  item.style?.setProperty("--tool-brand", vm.brandColor);
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
   setText(item, ".bar-worst", vm.worst);
