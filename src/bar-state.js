@@ -1,6 +1,8 @@
 import {
-  colorForPercent,
+  colorForToolPercent,
   DEFAULT_SETTINGS,
+  displayPercentFromUsed,
+  normalizeDisplayBasis,
   representativeByTool,
 } from "./panel-state.js";
 import { formatDuration, resolveLanguage, t } from "./i18n.js";
@@ -10,10 +12,10 @@ const TOOL_LABELS = {
   codex: "Codex",
 };
 
-const SECONDARY_RAMP = ["#2563eb", "#7c3aed", "#db2777"];
 const MODES = new Set(["full", "compact", "dual", "quad"]);
 const TOOLS = ["claude", "codex"];
 const INDICATOR_STYLES = new Set(["ring", "bar"]);
+const INDICATOR_EFFECT_STYLES = new Set(["flat", "soft", "depth", "glow", "breathe"]);
 const LIMIT_ORDERS = new Set(["primary_first", "secondary_first"]);
 
 function finiteNumber(value) {
@@ -52,11 +54,6 @@ function worstLimitPercent(primary, secondary) {
   return values.length === 0 ? null : Math.max(...values);
 }
 
-function remainingPercent(limit) {
-  const used = finiteNumber(limit?.used_percent);
-  return used == null ? null : Math.max(0, Math.min(100, 100 - used));
-}
-
 function severityForStatus(status, settings) {
   if (!status) return "empty";
   if (status.session?.active !== true) return "stale";
@@ -69,17 +66,6 @@ function severityForStatus(status, settings) {
   if (worst >= danger) return "danger";
   if (worst >= warn) return "warn";
   return "live";
-}
-
-function secondaryColorForPercent(percent, settings) {
-  const value = finiteNumber(percent);
-  if (value == null) return colorForPercent(percent, settings);
-
-  const warn = finiteNumber(settings.warn_threshold) ?? DEFAULT_SETTINGS.warn_threshold;
-  const danger = finiteNumber(settings.danger_threshold) ?? DEFAULT_SETTINGS.danger_threshold;
-  if (value >= danger) return SECONDARY_RAMP[2];
-  if (value >= warn) return SECONDARY_RAMP[1];
-  return SECONDARY_RAMP[0];
 }
 
 function percentText(value) {
@@ -114,47 +100,41 @@ function geometryNumber(value) {
   return Math.round(value * 10) / 10;
 }
 
-function ringSvgGeometry(sizePx, thicknessPx, gapPx, centerGapPx) {
+function ringSvgGeometry(sizePx, thicknessPx, gapPx, centerSizePx) {
   const size = Math.max(1, sizePx);
-  const visibleThickness = Math.max(1, thicknessPx - centerGapPx);
+  const centerSize = Math.min(Math.max(4, centerSizePx), Math.max(4, size - 4));
+  const visibleThickness = Math.max(1, Math.min(thicknessPx, (size - centerSize) / 4));
+  const maxCenterGap = Math.max(visibleThickness, (size - centerSize) / 2 - visibleThickness);
+  const centerGap = Math.min(Math.max(gapPx, visibleThickness), maxCenterGap);
+  const quadThickness = Math.max(1, Math.min(thicknessPx, (size - centerSize) / 2));
   const scale = 100 / size;
   const requestedStroke = visibleThickness * scale;
-  const requestedOuterRadius = Math.max(requestedStroke / 2, 50 - requestedStroke / 2);
-  const requestedInnerRadius = Math.max(
-    requestedStroke / 2,
-    50 - gapPx * scale - requestedStroke / 2,
-  );
-  const roundedStroke = geometryNumber(requestedStroke);
-  const roundedOuterRadius = geometryNumber(requestedOuterRadius);
-  const roundedInnerRadius = geometryNumber(requestedInnerRadius);
-  const requestedGeometryIsValid =
-    roundedOuterRadius > roundedInnerRadius &&
-    roundedOuterRadius + roundedStroke / 2 <= 50 &&
-    roundedInnerRadius - roundedStroke / 2 >= 0 &&
-    roundedOuterRadius - roundedInnerRadius >= roundedStroke;
-
-  if (requestedGeometryIsValid) {
-    return {
-      ringSvgStroke: geometryText(requestedStroke),
-      outerRadius: geometryText(requestedOuterRadius),
-      innerRadius: geometryText(requestedInnerRadius),
-    };
-  }
-
-  const stroke = Math.min(24.9, roundedStroke);
-  const outerRadius = Math.floor((50 - stroke / 2) * 10) / 10;
+  const requestedInnerRadius = (centerSize / 2 + visibleThickness / 2) * scale;
+  const requestedOuterRadius = requestedInnerRadius + centerGap * scale;
+  const requestedQuadStroke = quadThickness * scale;
+  const requestedQuadRadius = (centerSize / 2 + quadThickness / 2) * scale;
+  const stroke = geometryNumber(requestedStroke);
+  const quadStroke = geometryNumber(requestedQuadStroke);
+  const outerBound = Math.floor((50 - stroke / 2) * 10) / 10;
+  const quadOuterBound = Math.floor((50 - quadStroke / 2) * 10) / 10;
+  const outerRadius = Math.min(geometryNumber(requestedOuterRadius), outerBound);
+  const innerFloor = Math.ceil((stroke / 2) * 10) / 10;
   const innerRadius = Math.max(
-    Math.ceil((stroke / 2) * 10) / 10,
-    Math.min(
-      geometryNumber(outerRadius - stroke),
-      geometryNumber(50 - gapPx * scale - stroke / 2),
-    ),
+    innerFloor,
+    Math.min(geometryNumber(requestedInnerRadius), geometryNumber(outerRadius - stroke)),
+  );
+  const quadRadius = Math.max(
+    Math.ceil((quadStroke / 2) * 10) / 10,
+    Math.min(geometryNumber(requestedQuadRadius), quadOuterBound),
   );
 
   return {
+    ringCenterSizePx: geometryNumber(centerSize),
     ringSvgStroke: geometryText(stroke),
     outerRadius: geometryText(outerRadius),
     innerRadius: geometryText(innerRadius),
+    quadSvgStroke: geometryText(quadStroke),
+    quadRadius: geometryText(quadRadius),
   };
 }
 
@@ -168,25 +148,27 @@ function shortReset(iso, now, language) {
   return formatDuration(minutes, language);
 }
 
-function limitModel(labelKey, limit, settings, now, language, colorForLimit = colorForPercent) {
+function limitModel(labelKey, limit, settings, now, language, tool, secondary = false) {
   const used = finiteNumber(limit?.used_percent);
-  const remaining = remainingPercent(limit);
+  const displayed = displayPercentFromUsed(used, settings);
   return {
-    text: `${t(labelKey, language)} ${percentText(remaining)}`,
-    number: numberText(remaining),
-    percent: remaining,
+    text: `${t(labelKey, language)} ${percentText(displayed)}`,
+    number: numberText(displayed),
+    percent: displayed,
     reset: shortReset(limit?.resets_at, now, language),
-    color: colorForLimit(used, settings),
-    arc: arcText(remaining),
-    dash: dashText(remaining),
+    color: colorForToolPercent(used, tool, settings, secondary),
+    arc: arcText(displayed),
+    dash: dashText(displayed),
   };
 }
 
-function worstText(primary, secondary) {
-  const values = [remainingPercent(primary), remainingPercent(secondary)].filter(
-    (value) => value != null,
-  );
-  return values.length === 0 ? "–" : String(Math.round(Math.min(...values)));
+function worstText(primary, secondary, settings) {
+  const values = [primary, secondary]
+    .map((limit) => displayPercentFromUsed(limit?.used_percent, settings))
+    .filter((value) => value != null);
+  if (values.length === 0) return "–";
+  const pick = normalizeDisplayBasis(settings?.display_basis) === "used" ? Math.max : Math.min;
+  return String(Math.round(pick(...values)));
 }
 
 export function barToolViewModel(
@@ -207,8 +189,8 @@ export function barToolViewModel(
       ...base,
       state: "empty",
       severity: "empty",
-      primary: limitModel("limit.fiveHour", null, settings, now, language),
-      secondary: limitModel("limit.weekly", null, settings, now, language, secondaryColorForPercent),
+      primary: limitModel("limit.fiveHour", null, settings, now, language, tool),
+      secondary: limitModel("limit.weekly", null, settings, now, language, tool, true),
       worst: "–",
     };
   }
@@ -217,9 +199,9 @@ export function barToolViewModel(
     ...base,
     state: status.session?.active === true ? "live" : "stale",
     severity: severityForStatus(status, settings),
-    primary: limitModel("limit.fiveHour", status.primary, settings, now, language),
-    secondary: limitModel("limit.weekly", status.secondary, settings, now, language, secondaryColorForPercent),
-    worst: worstText(status.primary, status.secondary),
+    primary: limitModel("limit.fiveHour", status.primary, settings, now, language, tool),
+    secondary: limitModel("limit.weekly", status.secondary, settings, now, language, tool, true),
+    worst: worstText(status.primary, status.secondary, settings),
   };
 }
 
@@ -231,6 +213,10 @@ function normalizeIndicatorStyle(value) {
   return INDICATOR_STYLES.has(value) ? value : "ring";
 }
 
+function normalizeIndicatorEffectStyle(value) {
+  return INDICATOR_EFFECT_STYLES.has(value) ? value : "flat";
+}
+
 function normalizeLimitOrder(value) {
   return LIMIT_ORDERS.has(value) ? value : "primary_first";
 }
@@ -240,18 +226,20 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
   const ringSizePx = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
   const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10);
   const ringGapPx = numberRangeSetting(merged.ring_gap_px, 6, 2, 14);
-  const ringCenterGapPx = numberRangeSetting(merged.ring_center_gap_px, 0, 0, 8);
+  const ringCenterSizePx = numberRangeSetting(merged.ring_center_size_px, 16, 4, 32);
   const svgGeometry = ringSvgGeometry(
     ringSizePx,
     ringThicknessPx,
     ringGapPx,
-    ringCenterGapPx,
+    ringCenterSizePx,
   );
 
   return {
     mode: normalizeBarMode(merged.bar_mode),
+    displayBasis: normalizeDisplayBasis(merged.display_basis),
     limitOrder: normalizeLimitOrder(merged.limit_order),
     indicatorStyle: normalizeIndicatorStyle(merged.indicator_style),
+    indicatorEffectStyle: normalizeIndicatorEffectStyle(merged.indicator_effect_style),
     ringOn: merged.ring_on !== false,
     ringNumbersOn: boolSetting(merged.ring_numbers_on, true),
     ringNumberOutlineOn: boolSetting(merged.ring_number_outline_on, true),
@@ -259,7 +247,6 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
     ringSizePx,
     ringThicknessPx,
     ringGapPx,
-    ringCenterGapPx,
     ...svgGeometry,
     ringNumberFontSizePx: numberRangeSetting(merged.ring_number_font_size_px, 9, 6, 16),
     ringNumberFontWeight: intRangeSetting(merged.ring_number_font_weight, 600, 100, 900),

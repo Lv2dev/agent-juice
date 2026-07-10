@@ -47,6 +47,14 @@
         <span data-i18n="scope.local">로컬</span>
       </header>
 
+      <section id="update-band" class="update-band" hidden aria-live="polite">
+        <div class="update-band-copy">
+          <strong data-i18n="update.available">새 버전을 사용할 수 있습니다</strong>
+          <span data-update-version></span>
+        </div>
+        <button type="button" data-action="open-available-release" data-i18n="action.viewRelease">릴리즈 보기</button>
+      </section>
+
       <section class="tool-card" data-tool="claude" data-state="empty">
         <header class="tool-head">
           <div class="tool-title">
@@ -141,14 +149,76 @@
                 </select>
               </div>
 
-              <div class="field-row">
-                <label for="palette" data-i18n="field.palette">팔레트</label>
-                <select id="palette" name="palette">
-                  <option value="traffic" data-i18n="option.traffic">신호등</option>
-                  <option value="cvd" data-i18n="option.cvd">색약</option>
-                  <option value="cool" data-i18n="option.cool">쿨</option>
-                  <option value="custom" data-i18n="option.custom">커스텀</option>
-                </select>
+              <div class="palette-field">
+                <span id="palette-label" class="palette-label" data-i18n="field.palette">팔레트</span>
+                <input id="palette" type="hidden" name="palette" value="traffic" />
+                <div class="palette-picker" role="radiogroup" aria-labelledby="palette-label" data-palette-picker>
+                  <button type="button" class="palette-option" role="radio" aria-checked="true" data-palette-value="traffic">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                    <span data-i18n="option.tool">도구별</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="signal">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.signal">신호등</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="ocean">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.ocean">바다</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="forest">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.forest">숲</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="sunset">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.sunset">노을</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="cvd">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.cvd">색각 보정</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="cool">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.cool">오로라</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="mono">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.mono">단색</span>
+                  </button>
+                  <button type="button" class="palette-option" role="radio" aria-checked="false" data-palette-value="custom">
+                    <span class="palette-sample" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span data-i18n="option.custom">사용자 지정</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="tool-color-field" data-tool-palette>
+                <span class="palette-label" data-i18n="field.toolColors">도구별 색상</span>
+                <div class="swatch-row tool-swatch-row">
+                  <label>
+                    <span data-i18n="field.claudePrimaryColor">Claude 5h</span>
+                    <input type="color" name="claude_primary_color" value="#b7833a" />
+                  </label>
+                  <label>
+                    <span data-i18n="field.claudeSecondaryColor">Claude 주간</span>
+                    <input type="color" name="claude_secondary_color" value="#a65f72" />
+                  </label>
+                  <label>
+                    <span data-i18n="field.codexPrimaryColor">Codex 5h</span>
+                    <input type="color" name="codex_primary_color" value="#4f8a73" />
+                  </label>
+                  <label>
+                    <span data-i18n="field.codexSecondaryColor">Codex 주간</span>
+                    <input type="color" name="codex_secondary_color" value="#4f76a6" />
+                  </label>
+                </div>
+              </div>
+
+              <div class="swatch-row" data-mono-palette hidden>
+                <label>
+                  <span data-i18n="field.monoColor">통일 색상</span>
+                  <input type="color" name="mono_color" value="#4f8a73" />
+                </label>
               </div>
 
               <div class="swatch-row" data-custom-palette hidden>
@@ -169,10 +239,18 @@
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="limits">
-            <legend data-i18n="section.limits">잔여량·수집</legend>
+            <legend data-i18n="section.limits">표시·수집</legend>
             <div class="settings-section-grid">
+              <div class="field-row">
+                <label for="display-basis" data-i18n="field.displayBasis">표시 기준</label>
+                <select id="display-basis" name="display_basis">
+                  <option value="remaining" data-i18n="option.remaining">잔여량</option>
+                  <option value="used" data-i18n="option.used">사용량</option>
+                </select>
+              </div>
+
               <label class="range-row">
-                <span><span data-i18n="field.remainingWarning">잔여량 경고</span> <output name="warn-output">30</output>%</span>
+                <span><span data-display-basis-copy="warning">잔여량 경고</span> <output name="warn-output">30</output>%</span>
                 <input
                   type="range"
                   name="warn_threshold"
@@ -184,7 +262,7 @@
               </label>
 
               <label class="range-row">
-                <span><span data-i18n="field.remainingDanger">잔여량 위험</span> <output name="danger-output">10</output>%</span>
+                <span><span data-display-basis-copy="danger">잔여량 위험</span> <output name="danger-output">10</output>%</span>
                 <input
                   type="range"
                   name="danger_threshold"
@@ -195,22 +273,23 @@
                 />
               </label>
 
-              <small class="field-help threshold-help" data-i18n="help.remainingThresholds">작업표시줄은 남은 사용량을 표시하므로, 이 값 이하가 되면 경고/위험 색을 씁니다.</small>
+              <small class="field-help threshold-help" data-display-basis-copy="help">표시값이 이 값 이하가 되면 경고/위험 색을 씁니다.</small>
 
               <div class="field-grid">
-                <label>
+                <label class="field-with-help">
                   <span data-i18n="field.pollInterval">수집주기</span>
                   <input
                     type="number"
                     name="poll_interval_secs"
                     min="1"
                     max="60"
-                    value="2"
+                    value="60"
                   />
-                  <output name="poll-output">2</output>
+                  <output name="poll-output">60</output>
                   <span data-i18n="unit.seconds">초</span>
+                  <small class="field-help" data-i18n="help.pollInterval">로컬 상태를 다시 읽는 간격.</small>
                 </label>
-                <label>
+                <label class="field-with-help">
                   <span data-i18n="field.staleAfter">오래됨</span>
                   <input
                     type="number"
@@ -224,6 +303,14 @@
                   <small class="field-help" data-i18n="help.staleAfter">마지막 기록 후 오래됨 표시까지.</small>
                 </label>
               </div>
+
+              <label class="toggle-row toggle-row-wide collection-toggle">
+                <input type="checkbox" name="claude_account_auto_collect_on" checked />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.claudeUsageAutoRefresh">Claude 계정 사용량 자동 수집</span>
+                  <small class="field-help" data-i18n="help.claudeUsageAutoRefresh">Claude Code 로컬 로그인으로 계정 사용량을 조회합니다. 채팅을 보내지 않으며 실패 시 기존 statusline 값을 유지합니다.</small>
+                </span>
+              </label>
             </div>
           </fieldset>
 
@@ -281,6 +368,33 @@
           <fieldset class="settings-section" data-settings-section="indicator">
             <legend data-i18n="section.indicator">원·바 세부</legend>
             <div class="settings-section-grid">
+              <div class="effect-field">
+                <span id="effect-style-label" class="effect-label" data-i18n="field.effectStyle">표현 스타일</span>
+                <input id="indicator-effect-style" type="hidden" name="indicator_effect_style" value="flat" />
+                <div class="effect-picker" role="radiogroup" aria-labelledby="effect-style-label" data-effect-picker>
+                  <button type="button" class="effect-option" role="radio" aria-checked="true" data-effect-value="flat">
+                    <span class="effect-preview" aria-hidden="true"><i class="effect-preview-ring"></i><i class="effect-preview-bars"></i></span>
+                    <span data-i18n="effect.flat">플랫</span>
+                  </button>
+                  <button type="button" class="effect-option" role="radio" aria-checked="false" data-effect-value="soft">
+                    <span class="effect-preview" aria-hidden="true"><i class="effect-preview-ring"></i><i class="effect-preview-bars"></i></span>
+                    <span data-i18n="effect.soft">소프트 그림자</span>
+                  </button>
+                  <button type="button" class="effect-option" role="radio" aria-checked="false" data-effect-value="depth">
+                    <span class="effect-preview" aria-hidden="true"><i class="effect-preview-ring"></i><i class="effect-preview-bars"></i></span>
+                    <span data-i18n="effect.depth">입체</span>
+                  </button>
+                  <button type="button" class="effect-option" role="radio" aria-checked="false" data-effect-value="glow">
+                    <span class="effect-preview" aria-hidden="true"><i class="effect-preview-ring"></i><i class="effect-preview-bars"></i></span>
+                    <span data-i18n="effect.glow">글로우</span>
+                  </button>
+                  <button type="button" class="effect-option" role="radio" aria-checked="false" data-effect-value="breathe">
+                    <span class="effect-preview" aria-hidden="true"><i class="effect-preview-ring"></i><i class="effect-preview-bars"></i></span>
+                    <span data-i18n="effect.breathe">숨쉬기</span>
+                  </button>
+                </div>
+              </div>
+
               <label class="toggle-row">
                 <input type="checkbox" name="ring_on" checked />
                 <span data-i18n="field.ring">링</span>
@@ -295,6 +409,71 @@
                 <input type="checkbox" name="ring_number_outline_on" checked />
                 <span data-i18n="field.numberOutline">숫자 윤곽</span>
               </label>
+
+              <label class="range-row center-size-row">
+                <span><span data-i18n="field.centerSize">중앙 공간 지름</span> <output name="ring-center-size-output">16</output>px</span>
+                <input
+                  type="range"
+                  name="ring_center_size_px"
+                  min="4"
+                  max="32"
+                  step="0.1"
+                  value="16"
+                />
+              </label>
+
+              <details class="settings-advanced" data-settings-advanced="typography" open>
+                <summary data-i18n="advanced.typography">글자 조정</summary>
+                <div class="settings-advanced-grid">
+                  <label class="range-row">
+                    <span><span data-i18n="field.ringNumberSize">원 안 숫자 크기</span> <output name="ring-number-font-size-output">9</output>px</span>
+                    <input
+                      type="range"
+                      name="ring_number_font_size_px"
+                      min="6"
+                      max="16"
+                      step="0.1"
+                      value="9"
+                    />
+                  </label>
+
+                  <label class="range-row">
+                    <span><span data-i18n="field.ringNumberWeight">원 안 숫자 굵기</span> <output name="ring-number-font-weight-output">600</output></span>
+                    <input
+                      type="range"
+                      name="ring_number_font_weight"
+                      min="100"
+                      max="900"
+                      step="50"
+                      value="600"
+                    />
+                  </label>
+
+                  <label class="range-row">
+                    <span><span data-i18n="field.infoTextSize">바깥 정보 글자 크기</span> <output name="bar-text-font-size-output">11</output>px</span>
+                    <input
+                      type="range"
+                      name="bar_text_font_size_px"
+                      min="8"
+                      max="16"
+                      step="0.1"
+                      value="11"
+                    />
+                  </label>
+
+                  <label class="range-row">
+                    <span><span data-i18n="field.infoTextWeight">바깥 정보 글자 굵기</span> <output name="bar-text-font-weight-output">500</output></span>
+                    <input
+                      type="range"
+                      name="bar_text_font_weight"
+                      min="100"
+                      max="900"
+                      step="50"
+                      value="500"
+                    />
+                  </label>
+                </div>
+              </details>
 
               <details class="settings-advanced" data-settings-advanced="indicator">
                 <summary data-i18n="advanced.indicator">고급 조정</summary>
@@ -347,65 +526,6 @@
                     />
                   </label>
 
-                  <label class="range-row">
-                    <span><span data-i18n="field.centerGap">중앙 공간</span> <output name="ring-center-gap-output">0</output>px</span>
-                    <input
-                      type="range"
-                      name="ring_center_gap_px"
-                      min="0"
-                      max="8"
-                      step="0.1"
-                      value="0"
-                    />
-                  </label>
-
-                  <label class="range-row">
-                    <span><span data-i18n="field.ringNumberSize">원 숫자 크기</span> <output name="ring-number-font-size-output">9</output>px</span>
-                    <input
-                      type="range"
-                      name="ring_number_font_size_px"
-                      min="6"
-                      max="16"
-                      step="0.1"
-                      value="9"
-                    />
-                  </label>
-
-                  <label class="range-row">
-                    <span><span data-i18n="field.ringNumberWeight">원 숫자 굵기</span> <output name="ring-number-font-weight-output">600</output></span>
-                    <input
-                      type="range"
-                      name="ring_number_font_weight"
-                      min="100"
-                      max="900"
-                      step="50"
-                      value="600"
-                    />
-                  </label>
-
-                  <label class="range-row">
-                    <span><span data-i18n="field.infoTextSize">정보 글자 크기</span> <output name="bar-text-font-size-output">11</output>px</span>
-                    <input
-                      type="range"
-                      name="bar_text_font_size_px"
-                      min="8"
-                      max="16"
-                      step="0.1"
-                      value="11"
-                    />
-                  </label>
-
-                  <label class="range-row">
-                    <span><span data-i18n="field.infoTextWeight">정보 글자 굵기</span> <output name="bar-text-font-weight-output">500</output></span>
-                    <input
-                      type="range"
-                      name="bar_text_font_weight"
-                      min="100"
-                      max="900"
-                      step="50"
-                      value="500"
-                    />
-                  </label>
                 </div>
               </details>
             </div>
@@ -423,20 +543,36 @@
                 <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
               </div>
 
-              <p id="settings-status" class="settings-status"></p>
             </div>
           </fieldset>
 
-          <fieldset class="settings-section" data-settings-section="lab">
-            <legend data-i18n="section.lab">실험실</legend>
-            <div class="settings-section-grid">
-              <label class="toggle-row">
-                <input type="checkbox" name="claude_usage_auto_refresh_lab_on" />
+          <fieldset class="settings-section update-section" data-settings-section="update">
+            <legend data-i18n="section.update">업데이트</legend>
+            <div class="settings-section-grid update-controls">
+              <label class="toggle-row toggle-row-wide">
+                <input type="checkbox" name="update_check_on" checked />
                 <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.claudeUsageAutoRefresh">Claude /usage 자동 새로고침</span>
-                  <small class="field-help" data-i18n="help.claudeUsageAutoRefresh">수동 새로고침에서만 쓰던 Claude /usage 보조 조회를 수집주기에도 실행합니다.</small>
+                  <span class="toggle-title" data-i18n="field.updateCheck">업데이트 자동 확인</span>
+                  <span class="field-help" data-i18n="help.updateCheck">시작 후 하루에 한 번 최신 정식 릴리즈를 확인합니다.</span>
                 </span>
               </label>
+              <div class="button-row update-actions">
+                <button type="button" data-action="check-updates" data-i18n="action.checkUpdate">업데이트 확인</button>
+                <button type="button" data-action="open-releases" data-i18n="action.releasePage">릴리즈 페이지</button>
+              </div>
+              <p id="update-check-status" class="settings-status update-check-status" aria-live="polite"></p>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-section about-section" data-settings-section="about">
+            <legend data-i18n="section.about">정보</legend>
+            <div class="about-copy">
+              <div class="about-heading">
+                <strong>Juice</strong>
+                <span><span data-i18n="about.version">버전</span> <b data-app-version>–</b></span>
+              </div>
+              <p data-i18n="about.description">Claude Code와 Codex의 5시간·주간 사용량을 Windows 작업표시줄에서 확인하는 로컬 모니터입니다.</p>
+              <p data-i18n="about.privacy">Juice는 사용량이나 로그인 정보를 별도 Juice 서버에 저장하지 않습니다.</p>
             </div>
           </fieldset>
 
@@ -445,6 +581,10 @@
         </form>
       </details>
       </main>
+      <footer class="settings-footer" data-state="ready">
+        <span class="settings-footer-dot" aria-hidden="true"></span>
+        <p id="settings-status" class="settings-status" aria-live="polite"></p>
+      </footer>
     </div>
   </body>
 </html>

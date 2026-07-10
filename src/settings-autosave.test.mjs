@@ -30,10 +30,13 @@ test("settings form auto-saves changed values without a submit button", async ()
   const pendingSaveResponses = [];
   let deferSaveResponses = false;
   let settingsEventHandler = null;
-  const statusEl = { textContent: "" };
+  const statusFooter = { dataset: {} };
+  const statusEl = { textContent: "", closest: () => statusFooter };
   const customRow = { hidden: true };
+  const toolColorRow = { hidden: true };
   const fields = {
     palette: makeField("traffic"),
+    display_basis: makeField("remaining", "text", { name: "display_basis" }),
     warn_threshold: makeField("30", "range", { min: "0", max: "100" }),
     "warn-output": makeField("30"),
     danger_threshold: makeField("10", "range", { min: "0", max: "100" }),
@@ -47,6 +50,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     fullscreen_hide_on: makeField(true, "checkbox"),
     maximized_hide_on: makeField(true, "checkbox"),
     indicator_style: makeField("ring"),
+    indicator_effect_style: makeField("flat"),
     ring_on: makeField(true, "checkbox"),
     ring_numbers_on: makeField(true, "checkbox"),
     ring_number_outline_on: makeField(true, "checkbox"),
@@ -58,8 +62,8 @@ test("settings form auto-saves changed values without a submit button", async ()
     "ring-thickness-output": makeField("4"),
     ring_gap_px: makeField("6", "range", { min: "2", max: "14" }),
     "ring-gap-output": makeField("6"),
-    ring_center_gap_px: makeField("0", "range", { min: "0", max: "8" }),
-    "ring-center-gap-output": makeField("0"),
+    ring_center_size_px: makeField("16", "range", { min: "4", max: "32" }),
+    "ring-center-size-output": makeField("16"),
     ring_number_font_size_px: makeField("9", "range", { min: "6", max: "16" }),
     "ring-number-font-size-output": makeField("9"),
     ring_number_font_weight: makeField("600", "range", { min: "100", max: "900" }),
@@ -69,6 +73,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     bar_text_font_weight: makeField("500", "range", { min: "100", max: "900" }),
     "bar-text-font-weight-output": makeField("500"),
     autostart_on: makeField(true, "checkbox"),
+    update_check_on: makeField(true, "checkbox"),
     language: makeField("ko"),
     theme: makeField("system"),
     font_mode: makeField("system"),
@@ -76,9 +81,15 @@ test("settings form auto-saves changed values without a submit button", async ()
     codex_taskbar_offset_ratio: makeField("0.5"),
     show_claude: makeField(true, "checkbox"),
     show_codex: makeField(true, "checkbox"),
+    claude_account_auto_collect_on: makeField(true, "checkbox"),
+    mono_color: makeField("#4f8a73", "color"),
     custom_safe: makeField("#22c55e"),
     custom_warn: makeField("#f59e0b"),
     custom_danger: makeField("#ef4444"),
+    claude_primary_color: makeField("#b7833a", "color"),
+    claude_secondary_color: makeField("#a65f72", "color"),
+    codex_primary_color: makeField("#4f8a73", "color"),
+    codex_secondary_color: makeField("#4f76a6", "color"),
   };
   const form = {
     elements: {
@@ -136,6 +147,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       if (selector === "#settings-form") return form;
       if (selector === "#settings-status") return statusEl;
       if (selector === "[data-custom-palette]") return customRow;
+      if (selector === "[data-tool-palette]") return toolColorRow;
       return null;
     },
   };
@@ -147,28 +159,41 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(fields.ring_size_px.style.getPropertyValue("--range-progress"), "66.7%");
 
   fields.bar_mode.value = "dual";
-  listeners.input?.({ target: fields.bar_mode });
+  fields.claude_primary_color.value = "#123456";
+  fields.display_basis.value = "used";
+  listeners.input?.({ target: fields.display_basis });
+  assert.equal(fields.warn_threshold.value, "70");
+  assert.equal(fields.danger_threshold.value, "90");
   await new Promise((resolve) => setTimeout(resolve, 180));
 
   assert.equal(savedInputs.length, 1);
   assert.equal(savedInputs[0].bar_mode, "dual");
+  assert.equal(savedInputs[0].display_basis, "used");
+  assert.equal(savedInputs[0].warn_threshold, 70);
+  assert.equal(savedInputs[0].danger_threshold, 90);
   assert.equal(savedInputs[0].limit_order, "primary_first");
   assert.equal(savedInputs[0].fullscreen_hide_on, true);
   assert.equal(savedInputs[0].maximized_hide_on, true);
   assert.equal(savedInputs[0].indicator_style, "ring");
+  assert.equal(savedInputs[0].indicator_effect_style, "flat");
   assert.equal(savedInputs[0].ring_numbers_on, true);
   assert.equal(savedInputs[0].ring_number_outline_on, true);
   assert.equal(savedInputs[0].ring_number_outline_width_px, 1.2);
   assert.equal(savedInputs[0].ring_size_px, 36);
   assert.equal(savedInputs[0].ring_thickness_px, 4);
   assert.equal(savedInputs[0].ring_gap_px, 6);
-  assert.equal(savedInputs[0].ring_center_gap_px, 0);
+  assert.equal(savedInputs[0].ring_center_size_px, 16);
   assert.equal(savedInputs[0].ring_number_font_size_px, 9);
   assert.equal(savedInputs[0].ring_number_font_weight, 600);
   assert.equal(savedInputs[0].bar_text_font_size_px, 11);
   assert.equal(savedInputs[0].bar_text_font_weight, 500);
+  assert.equal(savedInputs[0].update_check_on, true);
+  assert.equal(savedInputs[0].claude_primary_color, "#123456");
+  assert.equal(savedInputs[0].claude_secondary_color, "#a65f72");
+  assert.equal(toolColorRow.hidden, false);
   assert.equal(dispatched.at(-1)?.type, "settings-updated");
   assert.match(statusEl.textContent, /자동 적용/);
+  assert.equal(statusFooter.dataset.state, "saved");
 
   deferSaveResponses = true;
   fields.bar_mode.value = "compact";
@@ -198,8 +223,23 @@ test("settings form ignores early input events until stored settings hydrate", a
   const listeners = {};
   const savedInputs = [];
   const customRow = { hidden: true };
+  const monoRow = { hidden: true };
+  const toolColorRow = { hidden: true };
+  const paletteOptions = ["traffic", "ocean", "mono", "custom"].map((value) => ({
+    dataset: { paletteValue: value },
+    setAttribute(name, next) {
+      this[name] = next;
+    },
+  }));
+  const palettePicker = {
+    style: makeStyle(),
+    querySelectorAll() {
+      return paletteOptions;
+    },
+  };
   const fields = {
     palette: makeField("custom"),
+    display_basis: makeField("remaining", "text", { name: "display_basis" }),
     warn_threshold: makeField("30", "range", { min: "0", max: "100" }),
     "warn-output": makeField("30"),
     danger_threshold: makeField("10", "range", { min: "0", max: "100" }),
@@ -213,6 +253,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     fullscreen_hide_on: makeField(false, "checkbox"),
     maximized_hide_on: makeField(false, "checkbox"),
     indicator_style: makeField("bar"),
+    indicator_effect_style: makeField("flat"),
     ring_on: makeField(true, "checkbox"),
     ring_numbers_on: makeField(true, "checkbox"),
     ring_number_outline_on: makeField(true, "checkbox"),
@@ -224,8 +265,8 @@ test("settings form ignores early input events until stored settings hydrate", a
     "ring-thickness-output": makeField("4"),
     ring_gap_px: makeField("6", "range", { min: "2", max: "14" }),
     "ring-gap-output": makeField("6"),
-    ring_center_gap_px: makeField("0", "range", { min: "0", max: "8" }),
-    "ring-center-gap-output": makeField("0"),
+    ring_center_size_px: makeField("16", "range", { min: "4", max: "32" }),
+    "ring-center-size-output": makeField("16"),
     ring_number_font_size_px: makeField("9", "range", { min: "6", max: "16" }),
     "ring-number-font-size-output": makeField("9"),
     ring_number_font_weight: makeField("600", "range", { min: "100", max: "900" }),
@@ -235,6 +276,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     bar_text_font_weight: makeField("500", "range", { min: "100", max: "900" }),
     "bar-text-font-weight-output": makeField("500"),
     autostart_on: makeField(true, "checkbox"),
+    update_check_on: makeField(true, "checkbox"),
     language: makeField("system"),
     theme: makeField("system"),
     font_mode: makeField("system"),
@@ -242,10 +284,15 @@ test("settings form ignores early input events until stored settings hydrate", a
     codex_taskbar_offset_ratio: makeField("0.5"),
     show_claude: makeField(true, "checkbox"),
     show_codex: makeField(true, "checkbox"),
-    claude_usage_auto_refresh_lab_on: makeField(false, "checkbox"),
+    claude_account_auto_collect_on: makeField(true, "checkbox"),
+    mono_color: makeField("#4f8a73", "color"),
     custom_safe: makeField("#22c55e"),
     custom_warn: makeField("#f59e0b"),
     custom_danger: makeField("#ef4444"),
+    claude_primary_color: makeField("#b7833a", "color"),
+    claude_secondary_color: makeField("#a65f72", "color"),
+    codex_primary_color: makeField("#4f8a73", "color"),
+    codex_secondary_color: makeField("#4f76a6", "color"),
   };
   const form = {
     elements: {
@@ -298,6 +345,9 @@ test("settings form ignores early input events until stored settings hydrate", a
       if (selector === "#settings-form") return form;
       if (selector === "#settings-status") return { textContent: "" };
       if (selector === "[data-custom-palette]") return customRow;
+      if (selector === "[data-mono-palette]") return monoRow;
+      if (selector === "[data-tool-palette]") return toolColorRow;
+      if (selector === "[data-palette-picker]") return palettePicker;
       return null;
     },
   };
@@ -317,13 +367,26 @@ test("settings form ignores early input events until stored settings hydrate", a
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.palette.value, "traffic");
   assert.equal(fields.bar_mode.value, "compact");
+  assert.equal(paletteOptions[0]["aria-checked"], "true");
+
+  listeners.click?.({
+    target: {
+      closest(selector) {
+        return selector === "[data-palette-value]" ? paletteOptions[1] : null;
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(fields.palette.value, "ocean");
+  assert.equal(savedInputs.length, 1);
+  assert.equal(savedInputs[0].palette, "ocean");
 
   fields.bar_mode.value = "dual";
   listeners.input?.({ target: fields.bar_mode });
   await new Promise((resolve) => setTimeout(resolve, 180));
-  assert.equal(savedInputs.length, 1);
-  assert.equal(savedInputs[0].palette, "traffic");
-  assert.equal(savedInputs[0].bar_mode, "dual");
+  assert.equal(savedInputs.length, 2);
+  assert.equal(savedInputs[1].palette, "ocean");
+  assert.equal(savedInputs[1].bar_mode, "dual");
 
   delete global.window;
   delete global.document;

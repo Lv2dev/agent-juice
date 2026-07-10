@@ -13,14 +13,37 @@ use crate::render::Palette;
 static SETTINGS_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolColors {
+    pub claude_primary: [u8; 3],
+    pub claude_secondary: [u8; 3],
+    pub codex_primary: [u8; 3],
+    pub codex_secondary: [u8; 3],
+}
+
+impl Default for ToolColors {
+    fn default() -> Self {
+        Self {
+            claude_primary: [0xb7, 0x83, 0x3a],
+            claude_secondary: [0xa6, 0x5f, 0x72],
+            codex_primary: [0x4f, 0x8a, 0x73],
+            codex_secondary: [0x4f, 0x76, 0xa6],
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_palette")]
     pub palette: Palette,
+    #[serde(default)]
+    pub tool_colors: ToolColors,
     #[serde(default = "default_warn")]
     pub warn_threshold: f32,
     #[serde(default = "default_danger")]
     pub danger_threshold: f32,
+    #[serde(default = "default_display_basis")]
+    pub display_basis: String,
     #[serde(default = "default_interval")]
     pub poll_interval_secs: u64,
     #[serde(default = "default_stale")]
@@ -35,6 +58,8 @@ pub struct Settings {
     pub maximized_hide_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
+    #[serde(default = "default_indicator_effect_style")]
+    pub indicator_effect_style: String,
     #[serde(default = "default_ring_on")]
     pub ring_on: bool,
     #[serde(default = "default_ring_numbers_on")]
@@ -49,8 +74,8 @@ pub struct Settings {
     pub ring_thickness_px: f32,
     #[serde(default = "default_ring_gap_px")]
     pub ring_gap_px: f32,
-    #[serde(default = "default_ring_center_gap_px")]
-    pub ring_center_gap_px: f32,
+    #[serde(default = "default_ring_center_size_px")]
+    pub ring_center_size_px: f32,
     #[serde(default = "default_ring_number_font_size_px")]
     pub ring_number_font_size_px: f32,
     #[serde(default = "default_ring_number_font_weight")]
@@ -61,6 +86,8 @@ pub struct Settings {
     pub bar_text_font_weight: i32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
+    #[serde(default = "default_update_check_on")]
+    pub update_check_on: bool,
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default = "default_theme")]
@@ -81,8 +108,11 @@ pub struct Settings {
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
-    #[serde(default)]
-    pub claude_usage_auto_refresh_lab_on: bool,
+    #[serde(
+        default = "default_claude_account_auto_collect_on",
+        alias = "claude_usage_auto_refresh_lab_on"
+    )]
+    pub claude_account_auto_collect_on: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -93,6 +123,8 @@ pub struct SettingsInput {
     pub warn_threshold: f32,
     #[serde(default = "default_danger")]
     pub danger_threshold: f32,
+    #[serde(default = "default_display_basis")]
+    pub display_basis: String,
     #[serde(default = "default_interval")]
     pub poll_interval_secs: u64,
     #[serde(default = "default_stale")]
@@ -107,6 +139,8 @@ pub struct SettingsInput {
     pub maximized_hide_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
+    #[serde(default = "default_indicator_effect_style")]
+    pub indicator_effect_style: String,
     #[serde(default = "default_ring_on")]
     pub ring_on: bool,
     #[serde(default = "default_ring_numbers_on")]
@@ -121,8 +155,8 @@ pub struct SettingsInput {
     pub ring_thickness_px: f32,
     #[serde(default = "default_ring_gap_px")]
     pub ring_gap_px: f32,
-    #[serde(default = "default_ring_center_gap_px")]
-    pub ring_center_gap_px: f32,
+    #[serde(default = "default_ring_center_size_px")]
+    pub ring_center_size_px: f32,
     #[serde(default = "default_ring_number_font_size_px")]
     pub ring_number_font_size_px: f32,
     #[serde(default = "default_ring_number_font_weight")]
@@ -133,6 +167,8 @@ pub struct SettingsInput {
     pub bar_text_font_weight: i32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
+    #[serde(default = "default_update_check_on")]
+    pub update_check_on: bool,
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default = "default_theme")]
@@ -153,14 +189,27 @@ pub struct SettingsInput {
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
+    #[serde(
+        default = "default_claude_account_auto_collect_on",
+        alias = "claude_usage_auto_refresh_lab_on"
+    )]
+    pub claude_account_auto_collect_on: bool,
     #[serde(default)]
-    pub claude_usage_auto_refresh_lab_on: bool,
+    pub mono_color: Option<String>,
     #[serde(default)]
     pub custom_safe: Option<String>,
     #[serde(default)]
     pub custom_warn: Option<String>,
     #[serde(default)]
     pub custom_danger: Option<String>,
+    #[serde(default)]
+    pub claude_primary_color: Option<String>,
+    #[serde(default)]
+    pub claude_secondary_color: Option<String>,
+    #[serde(default)]
+    pub codex_primary_color: Option<String>,
+    #[serde(default)]
+    pub codex_secondary_color: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -186,7 +235,11 @@ fn default_danger() -> f32 {
 }
 
 fn default_interval() -> u64 {
-    2
+    60
+}
+
+fn default_display_basis() -> String {
+    "remaining".into()
 }
 
 fn default_stale() -> i64 {
@@ -211,6 +264,10 @@ fn default_maximized_hide_on() -> bool {
 
 fn default_indicator_style() -> String {
     "ring".into()
+}
+
+fn default_indicator_effect_style() -> String {
+    "flat".into()
 }
 
 fn default_ring_on() -> bool {
@@ -241,8 +298,8 @@ fn default_ring_gap_px() -> f32 {
     6.0
 }
 
-fn default_ring_center_gap_px() -> f32 {
-    0.0
+fn default_ring_center_size_px() -> f32 {
+    16.0
 }
 
 fn default_ring_number_font_size_px() -> f32 {
@@ -262,6 +319,10 @@ fn default_bar_text_font_weight() -> i32 {
 }
 
 fn default_autostart_on() -> bool {
+    true
+}
+
+fn default_update_check_on() -> bool {
     true
 }
 
@@ -285,12 +346,18 @@ fn default_show_tool() -> bool {
     true
 }
 
+fn default_claude_account_auto_collect_on() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             palette: default_palette(),
+            tool_colors: ToolColors::default(),
             warn_threshold: default_warn(),
             danger_threshold: default_danger(),
+            display_basis: default_display_basis(),
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
@@ -298,6 +365,7 @@ impl Default for Settings {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
+            indicator_effect_style: default_indicator_effect_style(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -305,12 +373,13 @@ impl Default for Settings {
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
-            ring_center_gap_px: default_ring_center_gap_px(),
+            ring_center_size_px: default_ring_center_size_px(),
             ring_number_font_size_px: default_ring_number_font_size_px(),
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            update_check_on: default_update_check_on(),
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
@@ -321,7 +390,7 @@ impl Default for Settings {
             codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
-            claude_usage_auto_refresh_lab_on: false,
+            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
         }
     }
 }
@@ -332,6 +401,7 @@ impl Default for SettingsInput {
             palette: default_palette_name(),
             warn_threshold: default_warn(),
             danger_threshold: default_danger(),
+            display_basis: default_display_basis(),
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
@@ -339,6 +409,7 @@ impl Default for SettingsInput {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
+            indicator_effect_style: default_indicator_effect_style(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -346,12 +417,13 @@ impl Default for SettingsInput {
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
-            ring_center_gap_px: default_ring_center_gap_px(),
+            ring_center_size_px: default_ring_center_size_px(),
             ring_number_font_size_px: default_ring_number_font_size_px(),
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            update_check_on: default_update_check_on(),
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
@@ -362,10 +434,15 @@ impl Default for SettingsInput {
             codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
-            claude_usage_auto_refresh_lab_on: false,
+            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
+            mono_color: None,
             custom_safe: None,
             custom_warn: None,
             custom_danger: None,
+            claude_primary_color: None,
+            claude_secondary_color: None,
+            codex_primary_color: None,
+            codex_secondary_color: None,
         }
     }
 }
@@ -391,10 +468,15 @@ impl Settings {
         let value = serde_json::from_str::<serde_json::Value>(&contents).ok();
         let mut settings = serde_json::from_str::<Self>(&contents).unwrap_or_default();
         settings.apply_legacy_taskbar_offset(value.as_ref());
+        settings.apply_legacy_collection_interval(value.as_ref());
+        settings.apply_legacy_ring_center_size(value.as_ref());
         settings.clamp_offsets();
         settings.clamp_ring_geometry();
+        settings.display_basis = normalize_display_basis(&settings.display_basis).into();
         settings.limit_order = normalize_limit_order(&settings.limit_order).into();
         settings.indicator_style = normalize_indicator_style(&settings.indicator_style).into();
+        settings.indicator_effect_style =
+            normalize_indicator_effect_style(&settings.indicator_effect_style).into();
         settings.language = normalize_language(&settings.language).into();
         settings.theme = normalize_theme(&settings.theme).into();
         settings.font_mode = normalize_font_mode(&settings.font_mode).into();
@@ -434,6 +516,7 @@ impl Settings {
             palette: palette.into(),
             warn_threshold: warn,
             danger_threshold: danger,
+            display_basis: default_display_basis(),
             poll_interval_secs: interval,
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
@@ -441,6 +524,7 @@ impl Settings {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
+            indicator_effect_style: default_indicator_effect_style(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -448,12 +532,13 @@ impl Settings {
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
-            ring_center_gap_px: default_ring_center_gap_px(),
+            ring_center_size_px: default_ring_center_size_px(),
             ring_number_font_size_px: default_ring_number_font_size_px(),
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
             autostart_on: default_autostart_on(),
+            update_check_on: default_update_check_on(),
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
@@ -464,10 +549,15 @@ impl Settings {
             codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
-            claude_usage_auto_refresh_lab_on: false,
+            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
+            mono_color: None,
             custom_safe: None,
             custom_warn: None,
             custom_danger: None,
+            claude_primary_color: None,
+            claude_secondary_color: None,
+            codex_primary_color: None,
+            codex_secondary_color: None,
         })
     }
 
@@ -476,8 +566,10 @@ impl Settings {
         let danger = clamp_percent(input.danger_threshold).max(warn);
         Self {
             palette: palette_from_input(&input),
+            tool_colors: tool_colors_from_input(&input),
             warn_threshold: warn,
             danger_threshold: danger,
+            display_basis: normalize_display_basis(&input.display_basis).into(),
             poll_interval_secs: input.poll_interval_secs.max(1),
             stale_after_secs: input.stale_after_secs.max(1),
             bar_mode: normalize_bar_mode(&input.bar_mode).into(),
@@ -485,6 +577,8 @@ impl Settings {
             fullscreen_hide_on: input.fullscreen_hide_on,
             maximized_hide_on: input.maximized_hide_on,
             indicator_style: normalize_indicator_style(&input.indicator_style).into(),
+            indicator_effect_style: normalize_indicator_effect_style(&input.indicator_effect_style)
+                .into(),
             ring_on: input.ring_on,
             ring_numbers_on: input.ring_numbers_on,
             ring_number_outline_on: input.ring_number_outline_on,
@@ -494,7 +588,7 @@ impl Settings {
             ring_size_px: clamp_px(input.ring_size_px, default_ring_size_px(), 20.0, 44.0),
             ring_thickness_px: clamp_ring_thickness(input.ring_thickness_px),
             ring_gap_px: clamp_ring_gap(input.ring_gap_px),
-            ring_center_gap_px: clamp_ring_center_gap(input.ring_center_gap_px),
+            ring_center_size_px: clamp_ring_center_size(input.ring_center_size_px),
             ring_number_font_size_px: clamp_px(
                 input.ring_number_font_size_px,
                 default_ring_number_font_size_px(),
@@ -510,6 +604,7 @@ impl Settings {
             ),
             bar_text_font_weight: clamp_font_weight(input.bar_text_font_weight),
             autostart_on: input.autostart_on,
+            update_check_on: input.update_check_on,
             language: normalize_language(&input.language).into(),
             theme: normalize_theme(&input.theme).into(),
             font_mode: normalize_font_mode(&input.font_mode).into(),
@@ -520,7 +615,7 @@ impl Settings {
             codex_taskbar_monitor_key: input.codex_taskbar_monitor_key,
             show_claude: input.show_claude,
             show_codex: input.show_codex,
-            claude_usage_auto_refresh_lab_on: input.claude_usage_auto_refresh_lab_on,
+            claude_account_auto_collect_on: input.claude_account_auto_collect_on,
         }
     }
 
@@ -540,6 +635,38 @@ impl Settings {
         }
     }
 
+    fn apply_legacy_collection_interval(&mut self, value: Option<&serde_json::Value>) {
+        let Some(value) = value else {
+            return;
+        };
+        let is_legacy = !json_has_field(value, "display_basis");
+        let used_old_default = value
+            .get("poll_interval_secs")
+            .and_then(|item| item.as_u64())
+            == Some(2);
+        if is_legacy && used_old_default {
+            self.poll_interval_secs = default_interval();
+        }
+    }
+
+    fn apply_legacy_ring_center_size(&mut self, value: Option<&serde_json::Value>) {
+        let Some(value) = value else {
+            return;
+        };
+        if json_has_field(value, "ring_center_size_px") {
+            return;
+        }
+
+        let size = json_f32_field(value, "ring_size_px").unwrap_or(default_ring_size_px());
+        let thickness =
+            json_f32_field(value, "ring_thickness_px").unwrap_or(default_ring_thickness_px());
+        let gap = json_f32_field(value, "ring_gap_px").unwrap_or(default_ring_gap_px());
+        let legacy_gap = json_f32_field(value, "ring_center_gap_px").unwrap_or(0.0);
+        let visible_thickness = (thickness - legacy_gap).max(1.0);
+        self.ring_center_size_px =
+            clamp_ring_center_size(size - 2.0 * gap - 2.0 * visible_thickness);
+    }
+
     fn clamp_offsets(&mut self) {
         self.taskbar_offset_ratio = clamp_ratio(self.taskbar_offset_ratio);
         self.claude_taskbar_offset_ratio = clamp_ratio(self.claude_taskbar_offset_ratio);
@@ -550,7 +677,7 @@ impl Settings {
         self.ring_size_px = clamp_px(self.ring_size_px, default_ring_size_px(), 20.0, 44.0);
         self.ring_thickness_px = clamp_ring_thickness(self.ring_thickness_px);
         self.ring_gap_px = clamp_ring_gap(self.ring_gap_px);
-        self.ring_center_gap_px = clamp_ring_center_gap(self.ring_center_gap_px);
+        self.ring_center_size_px = clamp_ring_center_size(self.ring_center_size_px);
         self.ring_number_outline_width_px =
             clamp_ring_number_outline_width(self.ring_number_outline_width_px);
         self.ring_number_font_size_px = clamp_px(
@@ -764,10 +891,27 @@ fn normalize_limit_order(value: &str) -> &'static str {
     }
 }
 
+fn normalize_display_basis(value: &str) -> &'static str {
+    match value {
+        "used" => "used",
+        _ => "remaining",
+    }
+}
+
 fn normalize_indicator_style(value: &str) -> &'static str {
     match value {
         "bar" => "bar",
         _ => "ring",
+    }
+}
+
+fn normalize_indicator_effect_style(value: &str) -> &'static str {
+    match value {
+        "soft" => "soft",
+        "depth" => "depth",
+        "glow" => "glow",
+        "breathe" => "breathe",
+        _ => "flat",
     }
 }
 
@@ -822,8 +966,8 @@ fn clamp_ring_gap(value: f32) -> f32 {
     clamp_px(value, default_ring_gap_px(), 2.0, 14.0)
 }
 
-fn clamp_ring_center_gap(value: f32) -> f32 {
-    clamp_px(value, default_ring_center_gap_px(), 0.0, 8.0)
+fn clamp_ring_center_size(value: f32) -> f32 {
+    clamp_px(value, default_ring_center_size_px(), 4.0, 32.0)
 }
 
 fn clamp_ring_number_outline_width(value: f32) -> f32 {
@@ -842,8 +986,15 @@ fn json_f32_field(value: &serde_json::Value, key: &str) -> Option<f32> {
 
 fn palette_from_input(input: &SettingsInput) -> Palette {
     match input.palette.to_ascii_lowercase().as_str() {
+        "signal" => Palette::Signal,
         "cvd" => Palette::Cvd,
         "cool" => Palette::Cool,
+        "ocean" => Palette::Ocean,
+        "forest" => Palette::Forest,
+        "sunset" => Palette::Sunset,
+        "mono" => {
+            Palette::Mono(parse_hex_rgb(input.mono_color.as_deref()).unwrap_or([0x4f, 0x8a, 0x73]))
+        }
         "custom" => match (
             parse_hex_rgb(input.custom_safe.as_deref()),
             parse_hex_rgb(input.custom_warn.as_deref()),
@@ -853,6 +1004,20 @@ fn palette_from_input(input: &SettingsInput) -> Palette {
             _ => Palette::Traffic,
         },
         _ => Palette::Traffic,
+    }
+}
+
+fn tool_colors_from_input(input: &SettingsInput) -> ToolColors {
+    let defaults = ToolColors::default();
+    ToolColors {
+        claude_primary: parse_hex_rgb(input.claude_primary_color.as_deref())
+            .unwrap_or(defaults.claude_primary),
+        claude_secondary: parse_hex_rgb(input.claude_secondary_color.as_deref())
+            .unwrap_or(defaults.claude_secondary),
+        codex_primary: parse_hex_rgb(input.codex_primary_color.as_deref())
+            .unwrap_or(defaults.codex_primary),
+        codex_secondary: parse_hex_rgb(input.codex_secondary_color.as_deref())
+            .unwrap_or(defaults.codex_secondary),
     }
 }
 

@@ -21,6 +21,12 @@ function pngDimensions(path) {
   return [buffer.readUInt32BE(16), buffer.readUInt32BE(20)];
 }
 
+function gifDimensions(path) {
+  const buffer = readFileSync(path);
+  assert.match(buffer.subarray(0, 6).toString("ascii"), /^GIF8[79]a$/, `${path} is not a GIF`);
+  return [buffer.readUInt16LE(6), buffer.readUInt16LE(8)];
+}
+
 test("app and tray icons use the same vertical capsule mark as the settings logo", () => {
   const script = String.raw`
 import json
@@ -140,6 +146,7 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   const brand = readFileSync(brandPath, "utf8");
   assert.match(brand, /<title id="title">Juice<\/title>/);
   assert.match(brand, /<text[^>]*>Juice<\/text>/);
+  assert.match(brand, /width="330" height="150" viewBox="0 0 330 150"/);
 
   for (const forbidden of [
     "npm install",
@@ -153,24 +160,42 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
     assert.ok(!readme.includes(forbidden), `README still contains internal copy: ${forbidden}`);
   }
 
-  assert.match(readme, /Claude `\/usage` 자동 새로고침/);
-  assert.match(readme, /기본값은 \*\*꺼짐\*\*/);
-  assert.match(readme, /statusline의 5시간\/주간 값이 있으면 덮어쓰지 않습니다/);
-  assert.match(readme, /`Claude \/usage` auto-refresh/);
-  assert.match(readme, /off by default/);
-  assert.match(readme, /never overwrites existing statusline limits/);
+  assert.match(readme, /Claude 계정 사용량 자동 수집/);
+  assert.match(readme, /기본값은 \*\*켜짐\*\*/);
+  assert.match(readme, /정확 OAuth 계정 한도는 statusline의 오래된 계정 값보다 우선합니다/);
+  assert.match(readme, /Automatic Claude account usage collection/);
+  assert.match(readme, /on by default/);
+  assert.match(readme, /Exact OAuth account limits take priority over stale statusline account values/);
   assert.match(readme, /4가지 바 모드/);
   assert.match(readme, /four bar modes/);
+  assert.match(readme, /원·바 표현 스타일/);
+  assert.match(readme, /Ring and bar visual styles/);
+  assert.match(readme, /업데이트 확인과 알림/);
+  assert.match(readme, /Update checks and notifications/);
+  assert.match(readme, /테마·팔레트·도구별 색상/);
+  assert.match(readme, /Theme, palettes, and per-tool colors/);
+  assert.match(readme, /정보와 로컬 처리 원칙/);
+  assert.match(readme, /About and local processing/);
+  assert.match(readme, /보조 모니터로 이동/);
+  assert.match(readme, /Move to another monitor/);
+  assert.match(readme, /합성 데모/);
+  assert.match(readme, /synthetic demo/);
+  assert.match(readme, /기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다/);
+  assert.match(readme, /default collection interval and Claude account cache are both 60 seconds/);
 });
 
 test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
-    ["juice-panel-overview.png", [620, 720]],
-    ["juice-panel-settings-full.png", [620, 1473]],
-    ["juice-panel-taskbar.png", [620, 720]],
-    ["juice-panel-lab.png", [620, 720]],
-    ["juice-taskbar-modes.png", [760, 292]],
+    ["juice-v013-panel-overview.png", [1240, 1032]],
+    ["juice-v013-panel-appearance.png", [1240, 1280]],
+    ["juice-v013-panel-settings-full.png", [1240, 4584]],
+    ["juice-v013-panel-taskbar.png", [1240, 1652]],
+    ["juice-v013-panel-collection.png", [1240, 1036]],
+    ["juice-v013-panel-effects.png", [1240, 1182]],
+    ["juice-v013-panel-update.png", [1240, 726]],
+    ["juice-v013-panel-about.png", [1240, 628]],
+    ["juice-v013-taskbar-modes.png", [1520, 584]],
   ]);
 
   for (const [name, dimensions] of assets) {
@@ -180,4 +205,28 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
     assert.deepEqual(pngDimensions(path), dimensions, `${name} dimensions changed`);
     assert.ok(readFileSync(path).length > 10_000, `${name} is unexpectedly small`);
   }
+
+  const gifName = "juice-v013-multi-monitor.gif";
+  const gifPath = resolve(projectRoot, `docs/assets/${gifName}`);
+  assert.ok(existsSync(gifPath), `${gifName} is missing`);
+  assert.match(readme, new RegExp(`docs/assets/${gifName.replaceAll(".", "\\.")}`));
+  assert.deepEqual(gifDimensions(gifPath), [960, 420]);
+  assert.ok(readFileSync(gifPath).length > 100_000, `${gifName} is unexpectedly small`);
+  assert.ok(readFileSync(gifPath).length < 1_500_000, `${gifName} is too large for the README`);
+  const gifStats = JSON.parse(
+    execFileSync(
+      "python",
+      [
+        "-c",
+        "import json,sys; from PIL import Image; im=Image.open(sys.argv[1]); durations=[]; [(im.seek(i), durations.append(im.info.get('duration', 0))) for i in range(im.n_frames)]; print(json.dumps({'frames': im.n_frames, 'duration': sum(durations)}))",
+        gifPath,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  assert.ok(gifStats.frames >= 20, `${gifName} does not have enough motion frames`);
+  assert.ok(gifStats.duration >= 3_000 && gifStats.duration <= 8_000, `${gifName} has an unsuitable duration`);
+
+  assert.doesNotMatch(readme, /docs\/assets\/juice-panel-/);
+  assert.doesNotMatch(readme, /docs\/assets\/juice-taskbar-modes\.png/);
 });

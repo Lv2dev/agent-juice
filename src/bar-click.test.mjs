@@ -168,12 +168,14 @@ test("bar render applies ring number and geometry settings to the root", async (
           if (command === "get_settings") {
             return {
               indicator_style: "bar",
+              indicator_effect_style: "depth",
               ring_numbers_on: false,
               ring_number_outline_on: true,
               ring_number_outline_width_px: 1.4,
               ring_size_px: 34.5,
               ring_thickness_px: 6.5,
               ring_gap_px: 8.5,
+              ring_center_size_px: 18.5,
               ring_number_font_size_px: 10.5,
               ring_number_font_weight: 650,
               bar_text_font_size_px: 12.5,
@@ -203,15 +205,18 @@ test("bar render applies ring number and geometry settings to the root", async (
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(root.dataset.indicator, "bar");
+  assert.equal(root.dataset.effect, "depth");
   assert.equal(root.dataset.ringNumbers, "off");
   assert.equal(root.dataset.numberOutline, "on");
   assert.equal(root.style.getPropertyValue("--ring-number-outline-width"), "1.4px");
   assert.equal(root.style.getPropertyValue("--ring-size"), "34.5px");
   assert.equal(root.style.getPropertyValue("--ring-thickness"), "6.5px");
   assert.equal(root.style.getPropertyValue("--ring-gap"), "8.5px");
-  assert.equal(root.style.getPropertyValue("--ring-svg-stroke"), "18.8");
-  assert.equal(root.style.getPropertyValue("--outer-radius"), "40.6");
-  assert.equal(root.style.getPropertyValue("--inner-radius"), "15.9");
+  assert.equal(root.style.getPropertyValue("--ring-svg-stroke"), "11.6");
+  assert.equal(root.style.getPropertyValue("--outer-radius"), "44.2");
+  assert.equal(root.style.getPropertyValue("--inner-radius"), "32.6");
+  assert.equal(root.style.getPropertyValue("--quad-svg-stroke"), "18.8");
+  assert.equal(root.style.getPropertyValue("--quad-radius"), "36.2");
   assert.equal(root.style.getPropertyValue("--ring-number-font-size"), "10.5px");
   assert.equal(root.style.getPropertyValue("--ring-number-font-weight"), "650");
   assert.equal(root.style.getPropertyValue("--bar-text-font-size"), "12.5px");
@@ -315,7 +320,7 @@ test("bar right click opens a visible refresh menu before forcing a status refre
   delete global.document;
 });
 
-test("bar refresh menu closes when the pointer leaves the bar window", async () => {
+test("bar refresh menu tolerates transient window leave and closes after a grace period", async () => {
   const listeners = {};
   const root = { dataset: {} };
   const menu = {
@@ -377,6 +382,14 @@ test("bar refresh menu closes when the pointer leaves the bar window", async () 
   assert.equal(menu.hidden, false);
 
   listeners.mouseout?.({ relatedTarget: null });
+  assert.equal(menu.hidden, false);
+
+  listeners.mouseover?.({});
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(menu.hidden, false);
+
+  listeners.mouseout?.({ relatedTarget: null });
+  await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(menu.hidden, true);
 
   delete global.window;
@@ -557,7 +570,7 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "43.2deg");
   assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "12");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "12%");
-  assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#2563eb");
+  assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#a65f72");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "212.4deg");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
@@ -622,7 +635,7 @@ test("bar render can show weekly limits before 5h without changing semantic limi
   assert.equal(root.dataset.limitOrder, "secondary-first");
   assert.equal(tools.claude.textContentFor(".primary-text"), "주간 59%");
   assert.equal(tools.claude.textContentFor(".secondary-text"), "5h 12%");
-  assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#2563eb");
+  assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#a65f72");
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "212.4deg");
   assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "59%");
