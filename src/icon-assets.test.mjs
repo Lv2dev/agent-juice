@@ -187,15 +187,14 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
 test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
-    ["juice-v013-panel-overview.png", [1240, 1032]],
-    ["juice-v013-panel-appearance.png", [1240, 1280]],
-    ["juice-v013-panel-settings-full.png", [1240, 4584]],
-    ["juice-v013-panel-taskbar.png", [1240, 1652]],
-    ["juice-v013-panel-collection.png", [1240, 1036]],
-    ["juice-v013-panel-effects.png", [1240, 1182]],
-    ["juice-v013-panel-update.png", [1240, 726]],
-    ["juice-v013-panel-about.png", [1240, 628]],
-    ["juice-v013-taskbar-modes.png", [1520, 584]],
+    ["juice-v014-panel-overview.png", [1240, 944]],
+    ["juice-v014-panel-appearance.png", [1240, 1224]],
+    ["juice-v014-panel-settings-full.png", [1240, 4824]],
+    ["juice-v014-panel-taskbar.png", [1240, 1630]],
+    ["juice-v014-panel-collection.png", [1240, 980]],
+    ["juice-v014-panel-effects.png", [1240, 1126]],
+    ["juice-v014-panel-update.png", [1240, 588]],
+    ["juice-v014-taskbar-modes.png", [1520, 584]],
   ]);
 
   for (const [name, dimensions] of assets) {
@@ -206,7 +205,7 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
     assert.ok(readFileSync(path).length > 10_000, `${name} is unexpectedly small`);
   }
 
-  const gifName = "juice-v013-multi-monitor.gif";
+  const gifName = "juice-v014-multi-monitor.gif";
   const gifPath = resolve(projectRoot, `docs/assets/${gifName}`);
   assert.ok(existsSync(gifPath), `${gifName} is missing`);
   assert.match(readme, new RegExp(`docs/assets/${gifName.replaceAll(".", "\\.")}`));
@@ -227,6 +226,43 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
   assert.ok(gifStats.frames >= 20, `${gifName} does not have enough motion frames`);
   assert.ok(gifStats.duration >= 3_000 && gifStats.duration <= 8_000, `${gifName} has an unsuitable duration`);
 
+  const taskbarPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-modes.png");
+  const ringHeights = JSON.parse(
+    execFileSync(
+      "python",
+      [
+        "-c",
+        `
+import json
+import sys
+from PIL import Image
+
+image = Image.open(sys.argv[1]).convert("RGB")
+colors = [(215, 154, 50), (211, 107, 134), (47, 172, 125), (77, 134, 214)]
+rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
+columns = [(224, 850), (850, 1476)]
+heights = []
+for top, bottom in rows:
+    row = []
+    for left, right in columns:
+        points = [
+            (x, y)
+            for y in range(top, bottom)
+            for x in range(left, right)
+            if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
+        ]
+        row.append(max(y for _, y in points) - min(y for _, y in points) + 1)
+    heights.append(row)
+print(json.dumps(heights))
+`,
+        taskbarPath,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  assert.deepEqual(ringHeights, [[64, 64], [64, 64], [64, 64], [64, 64]]);
+
   assert.doesNotMatch(readme, /docs\/assets\/juice-panel-/);
   assert.doesNotMatch(readme, /docs\/assets\/juice-taskbar-modes\.png/);
+  assert.doesNotMatch(readme, /docs\/assets\/juice-v014-panel-about\.png/);
 });
