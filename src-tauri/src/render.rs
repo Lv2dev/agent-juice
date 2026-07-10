@@ -6,8 +6,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum Palette {
     Traffic,
+    Signal,
     Cvd,
     Cool,
+    Ocean,
+    Forest,
+    Sunset,
+    Mono([u8; 3]),
     Custom([u8; 3], [u8; 3], [u8; 3]),
 }
 
@@ -34,8 +39,13 @@ pub fn color_for(pct: f32, warn: f32, danger: f32, p: Palette) -> String {
 
     match p {
         Palette::Traffic => ["#22c55e", "#f59e0b", "#ef4444"][idx].into(),
+        Palette::Signal => ["#22c55e", "#f59e0b", "#ef4444"][idx].into(),
         Palette::Cvd => ["#0072b2", "#e69f00", "#cc79a7"][idx].into(),
         Palette::Cool => ["#14b8a6", "#6366f1", "#ec4899"][idx].into(),
+        Palette::Ocean => ["#0f9fb5", "#377bd3", "#6d5bd0"][idx].into(),
+        Palette::Forest => ["#4f8a64", "#b18432", "#c6535d"][idx].into(),
+        Palette::Sunset => ["#d9823d", "#d2576f", "#9658b3"][idx].into(),
+        Palette::Mono(base) => [hex(base), "#f59e0b".into(), "#ef4444".into()][idx].clone(),
         Palette::Custom(s, w, d) => hex([s, w, d][idx]),
     }
 }

@@ -18,7 +18,9 @@ const CURRENT_TOOL = currentWindowTool();
 const MENU_WIDTH = 88;
 const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
+const MENU_CLOSE_GRACE_MS = 120;
 const REFRESH_MENU_OPENED_EVENT = "bar-refresh-menu-opened";
+let refreshMenuCloseTimer = null;
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
@@ -38,8 +40,10 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 document.addEventListener("mouseout", (event) => {
-  if (!event.relatedTarget) hideRefreshMenu();
+  if (!event.relatedTarget) scheduleRefreshMenuClose();
 });
+
+document.addEventListener("mouseover", cancelRefreshMenuClose);
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") hideRefreshMenu();
@@ -90,6 +94,7 @@ function showRefreshMenu(event) {
     return;
   }
 
+  cancelRefreshMenuClose();
   const x = clampMenuPosition(event?.clientX, MENU_WIDTH, window.innerWidth ?? MENU_WIDTH);
   const y = clampMenuPosition(event?.clientY, MENU_HEIGHT, window.innerHeight ?? MENU_HEIGHT);
   menu.style?.setProperty("--menu-x", `${x}px`);
@@ -99,8 +104,24 @@ function showRefreshMenu(event) {
 }
 
 function hideRefreshMenu() {
+  cancelRefreshMenuClose();
   const menu = refreshMenu();
   if (menu) menu.hidden = true;
+}
+
+function cancelRefreshMenuClose() {
+  if (refreshMenuCloseTimer == null) return;
+  clearTimeout(refreshMenuCloseTimer);
+  refreshMenuCloseTimer = null;
+}
+
+function scheduleRefreshMenuClose() {
+  cancelRefreshMenuClose();
+  refreshMenuCloseTimer = setTimeout(() => {
+    refreshMenuCloseTimer = null;
+    const menu = refreshMenu();
+    if (menu) menu.hidden = true;
+  }, MENU_CLOSE_GRACE_MS);
 }
 
 function bindRefreshMenu() {
@@ -176,6 +197,7 @@ function renderBar() {
   root.dataset.mode = vm.mode;
   root.dataset.limitOrder = vm.limitOrder.replace("_", "-");
   root.dataset.indicator = vm.indicatorStyle;
+  root.dataset.effect = vm.indicatorEffectStyle;
   root.dataset.ring = vm.ringOn ? "on" : "off";
   root.dataset.ringNumbers = vm.ringNumbersOn ? "on" : "off";
   root.dataset.numberOutline = vm.ringNumberOutlineOn ? "on" : "off";
@@ -183,10 +205,11 @@ function renderBar() {
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);
   root.style?.setProperty("--ring-thickness", `${vm.ringThicknessPx}px`);
   root.style?.setProperty("--ring-gap", `${vm.ringGapPx}px`);
-  root.style?.setProperty("--ring-center-gap", `${vm.ringCenterGapPx}px`);
   root.style?.setProperty("--ring-svg-stroke", vm.ringSvgStroke);
   root.style?.setProperty("--outer-radius", vm.outerRadius);
   root.style?.setProperty("--inner-radius", vm.innerRadius);
+  root.style?.setProperty("--quad-svg-stroke", vm.quadSvgStroke);
+  root.style?.setProperty("--quad-radius", vm.quadRadius);
   root.style?.setProperty("--ring-number-font-size", `${vm.ringNumberFontSizePx}px`);
   root.style?.setProperty("--ring-number-font-weight", String(vm.ringNumberFontWeight));
   root.style?.setProperty("--bar-text-font-size", `${vm.barTextFontSizePx}px`);

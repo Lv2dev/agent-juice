@@ -117,9 +117,40 @@ test("barToolViewModel uses distinct colors for 5h and weekly rings in the same 
     settings,
   );
 
-  assert.equal(vm.primary.color, "#22c55e");
-  assert.equal(vm.secondary.color, "#2563eb");
+  assert.equal(vm.primary.color, "#b7833a");
+  assert.equal(vm.secondary.color, "#a65f72");
   assert.notEqual(vm.primary.color, vm.secondary.color);
+});
+
+test("barToolViewModel distinguishes tool colors and supports usage display basis", () => {
+  const statuses = ["claude", "codex"].map((tool) => ({
+    tool,
+    captured_at: "2026-07-07T00:00:00Z",
+    primary: { used_percent: 20, resets_at: null },
+    secondary: { used_percent: 25, resets_at: null },
+    session: { active: true },
+  }));
+  const usedSettings = { ...settings, display_basis: "used" };
+  const claude = barToolViewModel(statuses, "claude", usedSettings);
+  const codex = barToolViewModel(statuses, "codex", usedSettings);
+
+  assert.equal(claude.primary.text, "5h 20%");
+  assert.equal(claude.primary.percent, 20);
+  assert.equal(claude.worst, "25");
+  assert.equal(claude.primary.color, "#b7833a");
+  assert.equal(claude.secondary.color, "#a65f72");
+  assert.equal(codex.primary.color, "#4f8a73");
+  assert.equal(codex.secondary.color, "#4f76a6");
+
+  const customCodex = barToolViewModel(statuses, "codex", {
+    ...usedSettings,
+    tool_colors: {
+      codex_primary: [0x12, 0x34, 0x56],
+      codex_secondary: [0x65, 0x43, 0x21],
+    },
+  });
+  assert.equal(customCodex.primary.color, "#123456");
+  assert.equal(customCodex.secondary.color, "#654321");
 });
 
 test("barToolViewModel localizes the weekly limit label", () => {
@@ -134,6 +165,7 @@ test("barViewModel normalizes mode and ring settings", () => {
     bar_mode: "compact",
     limit_order: "secondary_first",
     indicator_style: "bar",
+    indicator_effect_style: "glow",
     ring_on: false,
     ring_numbers_on: false,
     ring_number_outline_on: false,
@@ -141,7 +173,7 @@ test("barViewModel normalizes mode and ring settings", () => {
     ring_size_px: 34.5,
     ring_thickness_px: 6.5,
     ring_gap_px: 8.5,
-    ring_center_gap_px: 2.5,
+    ring_center_size_px: 18.5,
     ring_number_font_size_px: 10.5,
     ring_number_font_weight: 650,
     bar_text_font_size_px: 12.5,
@@ -150,6 +182,7 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(full.mode, "compact");
   assert.equal(full.limitOrder, "secondary_first");
   assert.equal(full.indicatorStyle, "bar");
+  assert.equal(full.indicatorEffectStyle, "glow");
   assert.equal(full.ringOn, false);
   assert.equal(full.ringNumbersOn, false);
   assert.equal(full.ringNumberOutlineOn, false);
@@ -157,24 +190,26 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(full.ringSizePx, 34.5);
   assert.equal(full.ringThicknessPx, 6.5);
   assert.equal(full.ringGapPx, 8.5);
-  assert.equal(full.ringCenterGapPx, 2.5);
+  assert.equal(full.ringCenterSizePx, 18.5);
   assert.equal(full.ringNumberFontSizePx, 10.5);
   assert.equal(full.ringNumberFontWeight, 650);
   assert.equal(full.barTextFontSizePx, 12.5);
   assert.equal(full.barTextFontWeight, 550);
+  assert.equal(full.displayBasis, "remaining");
   assert.equal(full.tools.length, 2);
 
   const fallback = barViewModel([], { ...settings, bar_mode: "unknown" });
   assert.equal(fallback.mode, "full");
   assert.equal(fallback.limitOrder, "primary_first");
   assert.equal(fallback.indicatorStyle, "ring");
+  assert.equal(fallback.indicatorEffectStyle, "flat");
   assert.equal(fallback.ringNumbersOn, true);
   assert.equal(fallback.ringNumberOutlineOn, true);
   assert.equal(fallback.ringNumberOutlineWidthPx, 1.2);
   assert.equal(fallback.ringSizePx, 36);
   assert.equal(fallback.ringThicknessPx, 4);
   assert.equal(fallback.ringGapPx, 6);
-  assert.equal(fallback.ringCenterGapPx, 0);
+  assert.equal(fallback.ringCenterSizePx, 16);
   assert.equal(fallback.ringNumberFontSizePx, 9);
   assert.equal(fallback.ringNumberFontWeight, 600);
   assert.equal(fallback.barTextFontSizePx, 11);
@@ -187,7 +222,8 @@ test("barViewModel clamps ring geometry settings", () => {
     ring_size_px: 99,
     ring_thickness_px: 99,
     ring_gap_px: -4,
-    ring_center_gap_px: 99,
+    ring_center_size_px: 99,
+    indicator_effect_style: "unknown",
     ring_number_outline_width_px: 99,
     ring_number_font_size_px: 99,
     ring_number_font_weight: 999,
@@ -198,7 +234,8 @@ test("barViewModel clamps ring geometry settings", () => {
   assert.equal(vm.ringSizePx, 44);
   assert.equal(vm.ringThicknessPx, 10);
   assert.equal(vm.ringGapPx, 2);
-  assert.equal(vm.ringCenterGapPx, 8);
+  assert.equal(vm.ringCenterSizePx, 32);
+  assert.equal(vm.indicatorEffectStyle, "flat");
   assert.equal(vm.ringNumberOutlineWidthPx, 4);
   assert.equal(vm.ringNumberFontSizePx, 16);
   assert.equal(vm.ringNumberFontWeight, 900);
@@ -222,7 +259,7 @@ test("barViewModel preserves valid ring geometry at one-decimal precision", () =
     ring_size_px: 34.5,
     ring_thickness_px: 6.5,
     ring_gap_px: 8.5,
-    ring_center_gap_px: 2.5,
+    ring_center_size_px: 18.5,
   });
   assert.deepEqual(
     {
@@ -230,7 +267,7 @@ test("barViewModel preserves valid ring geometry at one-decimal precision", () =
       outer: fractional.outerRadius,
       inner: fractional.innerRadius,
     },
-    { stroke: "11.6", outer: "44.2", inner: "19.6" },
+    { stroke: "11.6", outer: "44.2", inner: "32.6" },
   );
 });
 
@@ -239,7 +276,7 @@ test("barViewModel keeps dual-ring strokes disjoint across boundary and mode com
     ring_size_px: [20, 20.1, 36, 43.9, 44],
     ring_thickness_px: [1, 1.1, 4, 9.9, 10],
     ring_gap_px: [2, 2.1, 6, 13.9, 14],
-    ring_center_gap_px: [0, 0.1, 4, 7.9, 8],
+    ring_center_size_px: [4, 4.1, 16, 31.9, 32],
   };
   const modes = ["full", "compact", "dual", "quad"];
   const orders = ["primary_first", "secondary_first"];
@@ -250,7 +287,7 @@ test("barViewModel keeps dual-ring strokes disjoint across boundary and mode com
   for (const ring_size_px of values.ring_size_px) {
     for (const ring_thickness_px of values.ring_thickness_px) {
       for (const ring_gap_px of values.ring_gap_px) {
-        for (const ring_center_gap_px of values.ring_center_gap_px) {
+        for (const ring_center_size_px of values.ring_center_size_px) {
           for (const bar_mode of modes) {
             for (const limit_order of orders) {
               for (const indicator_style of indicatorStyles) {
@@ -262,11 +299,13 @@ test("barViewModel keeps dual-ring strokes disjoint across boundary and mode com
                   ring_size_px,
                   ring_thickness_px,
                   ring_gap_px,
-                  ring_center_gap_px,
+                  ring_center_size_px,
                 });
                 const stroke = Number(vm.ringSvgStroke);
                 const outer = Number(vm.outerRadius);
                 const inner = Number(vm.innerRadius);
+                const quadStroke = Number(vm.quadSvgStroke);
+                const quadRadius = Number(vm.quadRadius);
                 const label = JSON.stringify({
                   bar_mode,
                   limit_order,
@@ -274,17 +313,26 @@ test("barViewModel keeps dual-ring strokes disjoint across boundary and mode com
                   ring_size_px,
                   ring_thickness_px,
                   ring_gap_px,
-                  ring_center_gap_px,
+                  ring_center_size_px,
                 });
 
                 assert.match(vm.ringSvgStroke, oneDecimal, label);
                 assert.match(vm.outerRadius, oneDecimal, label);
                 assert.match(vm.innerRadius, oneDecimal, label);
+                assert.match(vm.quadSvgStroke, oneDecimal, label);
+                assert.match(vm.quadRadius, oneDecimal, label);
                 assert.ok(stroke > 0, label);
+                assert.ok(quadStroke > 0, label);
                 assert.ok(outer > inner, label);
                 assert.ok(outer + stroke / 2 <= 50 + epsilon, label);
                 assert.ok(inner - stroke / 2 >= -epsilon, label);
                 assert.ok(outer - stroke / 2 + epsilon >= inner + stroke / 2, label);
+                assert.ok(quadRadius + quadStroke / 2 <= 50 + epsilon, label);
+                assert.ok(quadRadius - quadStroke / 2 >= -epsilon, label);
+                const dualCenterPx = (inner - stroke / 2) * 2 * vm.ringSizePx / 100;
+                const quadCenterPx = (quadRadius - quadStroke / 2) * 2 * vm.ringSizePx / 100;
+                assert.ok(Math.abs(dualCenterPx - vm.ringCenterSizePx) <= 0.11, label);
+                assert.ok(Math.abs(quadCenterPx - vm.ringCenterSizePx) <= 0.11, label);
               }
             }
           }

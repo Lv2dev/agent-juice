@@ -2,7 +2,7 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{mpsc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 const CODEX_ACCOUNT_RESPONSE_ID: i64 = 2;
+static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 
 #[cfg(windows)]
 struct ProcessTree {
@@ -326,11 +327,81 @@ pub fn claude_usage_output(timeout: Duration) -> anyhow::Result<String> {
     claude_usage_output_with_command(claude_usage_command(), timeout)
 }
 
-fn claude_usage_output_with_command(
+pub fn claude_oauth_usage_response(timeout: Duration) -> anyhow::Result<String> {
+    let credentials_path = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?
+        .join(".claude")
+        .join(".credentials.json");
+    let credentials: Value = serde_json::from_str(&std::fs::read_to_string(credentials_path)?)?;
+    let token = credentials
+        .pointer("/claudeAiOauth/accessToken")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("Claude OAuth access token unavailable"))?;
+    let user_agent = claude_user_agent(timeout)?;
+    let config = claude_oauth_curl_config(token, user_agent, timeout);
+    command_output_with_input(
+        claude_oauth_curl_command(),
+        Some(config.as_bytes()),
+        timeout,
+        "Claude OAuth usage",
+    )
+}
+
+fn claude_user_agent(timeout: Duration) -> anyhow::Result<&'static str> {
+    if let Some(user_agent) = CLAUDE_USER_AGENT.get() {
+        return Ok(user_agent);
+    }
+
+    let output =
+        command_output_with_input(claude_version_command(), None, timeout, "Claude version")?;
+    let version = output
+        .split_whitespace()
+        .next()
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+        })
+        .ok_or_else(|| anyhow::anyhow!("Claude version output was not recognized"))?;
+    let _ = CLAUDE_USER_AGENT.set(format!("claude-code/{version}"));
+    CLAUDE_USER_AGENT
+        .get()
+        .map(String::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Claude user agent unavailable"))
+}
+
+fn claude_oauth_curl_config(token: &str, user_agent: &str, timeout: Duration) -> String {
+    format!(
+        "silent\nshow-error\nfail-with-body\nmax-time = \"{}\"\nurl = \"https://api.anthropic.com/api/oauth/usage\"\nheader = \"Authorization: Bearer {}\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\nheader = \"Content-Type: application/json\"\nuser-agent = \"{}\"\nheader = \"x-app: cli\"\n",
+        timeout.as_secs().max(1),
+        token,
+        user_agent,
+    )
+}
+
+fn claude_usage_output_with_command(command: Command, timeout: Duration) -> anyhow::Result<String> {
+    command_output_with_input(command, None, timeout, "Claude usage")
+}
+
+fn command_output_with_input(
     mut command: Command,
+    input: Option<&[u8]>,
     timeout: Duration,
+    label: &str,
 ) -> anyhow::Result<String> {
     let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -345,11 +416,20 @@ fn claude_usage_output_with_command(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow::anyhow!("Claude usage stdout unavailable"))?;
+        .ok_or_else(|| anyhow::anyhow!("{label} stdout unavailable"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| anyhow::anyhow!("Claude usage stderr unavailable"))?;
+        .ok_or_else(|| anyhow::anyhow!("{label} stderr unavailable"))?;
+
+    if let Some(input) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("{label} stdin unavailable"))?;
+        stdin.write_all(input)?;
+        stdin.flush()?;
+    }
     let (stdout_tx, stdout_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut output = Vec::new();
@@ -391,14 +471,14 @@ fn claude_usage_output_with_command(
         .map_err(|_| anyhow::anyhow!("Claude usage stderr did not close"))??;
 
     let Some(status) = status else {
-        anyhow::bail!("Claude usage command timed out");
+        anyhow::bail!("{label} command timed out");
     };
     if status.success() {
         return Ok(String::from_utf8_lossy(&stdout).into_owned());
     }
 
     let message = String::from_utf8_lossy(&stderr);
-    anyhow::bail!("Claude usage command failed: {}", message.trim());
+    anyhow::bail!("{label} command failed: {}", message.trim());
 }
 
 fn codex_app_server_command() -> Command {
@@ -455,6 +535,49 @@ fn claude_usage_command() -> Command {
     }
 }
 
+fn claude_oauth_curl_command() -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let curl_path = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("curl.exe");
+        let mut command = Command::new(curl_path);
+        command.args(["-q", "--config", "-"]);
+        command.creation_flags(0x08000000);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("curl");
+        command.args(["-q", "--config", "-"]);
+        command
+    }
+}
+
+fn claude_version_command() -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let mut command = Command::new("cmd");
+        command.args(["/C", "claude", "--version"]);
+        command.creation_flags(0x08000000);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("claude");
+        command.arg("--version");
+        command
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +593,49 @@ mod tests {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", exact_test, "--nocapture"]);
         command
+    }
+
+    #[test]
+    fn fake_stdin_reader_child() {
+        if std::env::var_os("AGENT_JUICE_FAKE_STDIN_READER").is_none() {
+            return;
+        }
+
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        println!("AJ_STDIN_LEN:{}", input.len());
+    }
+
+    #[test]
+    fn oauth_secret_is_sent_over_stdin_instead_of_process_arguments() {
+        let token = "fixture-secret";
+        let config = claude_oauth_curl_config(token, "claude-code/2.1.205", Duration::from_secs(5));
+        let command_line = format!("{:?}", claude_oauth_curl_command());
+        assert!(!command_line.contains(token));
+
+        let mut command = test_process("collector::tests::fake_stdin_reader_child");
+        command.env("AGENT_JUICE_FAKE_STDIN_READER", "1");
+        let output = command_output_with_input(
+            command,
+            Some(config.as_bytes()),
+            Duration::from_secs(2),
+            "test stdin",
+        )
+        .unwrap();
+        let length = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("AJ_STDIN_LEN:"))
+            .and_then(|value| value.parse::<usize>().ok());
+        assert_eq!(length, Some(config.len()));
+    }
+
+    #[test]
+    #[ignore = "requires a locally installed and logged-in Claude Code"]
+    fn live_claude_oauth_usage_round_trip() {
+        let response = claude_oauth_usage_response(Duration::from_secs(5)).unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert!(value.pointer("/five_hour/utilization").is_some());
+        assert!(value.pointer("/seven_day/utilization").is_some());
     }
 
     #[test]

@@ -10,6 +10,17 @@ fn worst_and_color_and_svg() {
     assert_eq!(color_for(80.0, 70.0, 90.0, Palette::Traffic), "#f59e0b");
     assert_eq!(color_for(95.0, 70.0, 90.0, Palette::Traffic), "#ef4444");
     assert_eq!(color_for(95.0, 70.0, 90.0, Palette::Cvd), "#cc79a7");
+    assert_eq!(color_for(50.0, 70.0, 90.0, Palette::Ocean), "#0f9fb5");
+    assert_eq!(color_for(80.0, 70.0, 90.0, Palette::Forest), "#b18432");
+    assert_eq!(color_for(95.0, 70.0, 90.0, Palette::Sunset), "#9658b3");
+    assert_eq!(
+        color_for(50.0, 70.0, 90.0, Palette::Mono([0x34, 0x56, 0x78])),
+        "#345678"
+    );
+    assert_eq!(
+        color_for(95.0, 70.0, 90.0, Palette::Mono([0x34, 0x56, 0x78])),
+        "#ef4444"
+    );
     assert_eq!(
         color_for(
             95.0,

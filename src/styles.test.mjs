@@ -43,13 +43,13 @@ function cssBlock(selector) {
 function markupSection(name) {
   const match = panelMarkup.match(
     new RegExp(
-      `<fieldset class="settings-section" data-settings-section="${name}">(?<body>[\\s\\S]*?)</fieldset>`,
+      `<fieldset class="settings-section(?: [^"]*)?" data-settings-section="${name}">(?<body>[\\s\\S]*?)</fieldset>`,
     ),
   );
   return match?.groups?.body ?? "";
 }
 
-test("styles define the BDO-lite surface tokens used by Juice", () => {
+test("styles define the restrained Quiet Glass surface tokens used by Juice", () => {
   for (const token of [
     "--glass",
     "--surface",
@@ -63,8 +63,8 @@ test("styles define the BDO-lite surface tokens used by Juice", () => {
   }
 
   const card = cssBlock(".tool-card");
-  assert.match(card, /backdrop-filter: blur\(18px\)/);
-  assert.match(card, /inset 0 1px 0 var\(--hi\)/);
+  assert.match(card, /backdrop-filter: blur\(12px\)/);
+  assert.doesNotMatch(card, /inset 0 1px 0 var\(--hi\)/);
   assert.match(card, /border-radius: var\(--radius\)/);
 });
 
@@ -77,7 +77,7 @@ test("usage cards share the same surface tint regardless of tool", () => {
   const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
   const codexCard = cssBlock('.tool-card[data-tool="codex"]');
 
-  assert.match(cardTint, /var\(--accent\)/);
+  assert.match(cardTint, /display: none/);
   assert.doesNotMatch(cardTint, /var\(--tool-glow\)/);
   assert.match(hover, /var\(--accent\)/);
   assert.doesNotMatch(hover, /var\(--tool-color\)/);
@@ -363,11 +363,11 @@ test("dual ring center number stays inside the ring hole", () => {
   const quadNumber = cssBlock(".quad-number");
   const shell = cssBlock(".bar-shell");
 
-  assert.match(shell, /--ring-center-gap: 0px/);
-  assert.match(shell, /--ring-visible-thickness:/);
   assert.match(shell, /--ring-svg-stroke:/);
   assert.match(shell, /--outer-radius:/);
   assert.match(shell, /--inner-radius:/);
+  assert.match(shell, /--quad-svg-stroke:/);
+  assert.match(shell, /--quad-radius:/);
   assert.match(ring, /width: var\(--ring-size\)/);
   assert.match(ring, /height: var\(--ring-size\)/);
   assert.match(ring, /flex-basis: var\(--ring-size\)/);
@@ -385,7 +385,8 @@ test("dual ring center number stays inside the ring hole", () => {
   assert.match(quadSvg, /position: absolute/);
   assert.match(quadNumber, /place-items: center/);
   assert.match(quadNumber, /inset: 0/);
-  assert.match(quadNumber, /transform: translateY/);
+  assert.doesNotMatch(quadNumber, /transform:/);
+  assert.match(quadNumber, /font-variant-numeric: tabular-nums/);
   assert.match(quadNumber, /font-size: var\(--ring-number-font-size\)/);
   assert.match(quadNumber, /font-weight: var\(--ring-number-font-weight\)/);
   assert.match(worst, /font-size: var\(--ring-number-font-size\)/);
@@ -393,7 +394,8 @@ test("dual ring center number stays inside the ring hole", () => {
   assert.match(worst, /inset: 0/);
   assert.match(worst, /display: grid/);
   assert.match(worst, /place-items: center/);
-  assert.match(worst, /transform: translateY/);
+  assert.doesNotMatch(worst, /transform:/);
+  assert.match(worst, /font-variant-numeric: tabular-nums/);
   assert.match(worst, /text-align: center/);
 });
 
@@ -401,6 +403,8 @@ test("taskbar ring markup uses SVG strokes instead of masked conic gradients", (
   assert.match(barMarkup, /class="ring-svg"/);
   assert.match(barMarkup, /class="ring-track outer-track"/);
   assert.match(barMarkup, /class="ring-arc outer-arc"/);
+  assert.match(barMarkup, /class="ring-effect ring-effect-shadow outer-effect"/);
+  assert.match(barMarkup, /class="ring-effect ring-effect-highlight inner-effect"/);
   assert.match(barMarkup, /class="quad-svg"/);
   assert.match(barMarkup, /class="ring-arc quad-arc"/);
   assert.doesNotMatch(cssBlock(".outer-ring"), /conic-gradient/);
@@ -440,13 +444,13 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="ring_thickness_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_gap_px"/);
   assert.match(panelMarkup, /name="ring_gap_px"[\s\S]*?step="0\.1"/);
-  assert.match(panelMarkup, /name="ring_center_gap_px"/);
-  assert.match(panelMarkup, /name="ring_center_gap_px"[\s\S]*?step="0\.1"/);
+  assert.match(panelMarkup, /name="ring_center_size_px"/);
+  assert.match(panelMarkup, /name="ring_center_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_number_font_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="bar_text_font_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_number_font_weight"/);
   assert.match(panelMarkup, /name="bar_text_font_weight"/);
-  assert.match(rustConfig, /ring_center_gap_px/);
+  assert.match(rustConfig, /ring_center_size_px/);
   assert.match(rustConfig, /ring_number_outline_width_px/);
   assert.match(numbersOff, /display: none/);
   assert.match(outlineOn, /text-shadow:/);
@@ -458,6 +462,7 @@ test("taskbar ring number visibility and outline are configurable", () => {
 test("taskbar indicator can switch from rings to stacked horizontal bars", () => {
   const bars = cssBlock(".bar-bars");
   const limitBar = cssBlock(".limit-bar");
+  const limitLayers = cssBlock(".limit-bar::before,\n.limit-bar::after");
   const indicatorBars = cssBlock('.bar-shell[data-indicator="bar"] .bar-bars');
   const hiddenRings = cssBlock('.bar-shell[data-indicator="bar"] .bar-ring,\n.bar-shell[data-indicator="bar"] .bar-quad');
   const primary = cssBlock(".limit-bar.primary-limit");
@@ -468,7 +473,8 @@ test("taskbar indicator can switch from rings to stacked horizontal bars", () =>
   assert.match(bars, /width: var\(--ring-size\)/);
   assert.match(bars, /gap: var\(--ring-gap\)/);
   assert.match(limitBar, /height: var\(--ring-thickness\)/);
-  assert.match(limitBar, /background: linear-gradient/);
+  assert.match(limitBar, /background: color-mix/);
+  assert.match(limitLayers, /background: var\(--limit-color\)/);
   assert.match(primary, /--limit-color: var\(--primary-color\)/);
   assert.match(primary, /--limit-percent: var\(--primary-percent\)/);
   assert.match(secondary, /--limit-color: var\(--secondary-color\)/);
@@ -547,7 +553,7 @@ test("styles include restrained panel motion with a reduced-motion escape hatch"
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("settings controls have modern glassy native-control replacements", () => {
+test("settings controls keep glass at the card level and use quiet flat rows", () => {
   const card = cssBlock(".settings-card");
   const cardTint = cssBlock(".settings-card::before");
   const toolTint = cssBlock(".tool-card::before");
@@ -582,18 +588,14 @@ test("settings controls have modern glassy native-control replacements", () => {
   const button = cssBlock("button");
   const buttonHover = cssBlock("button:hover:not(:disabled)");
 
-  assert.match(card, /backdrop-filter: blur\(18px\) saturate\(1\.08\)/);
-  assert.match(card, /var\(--surface\) 94%/);
+  assert.match(card, /backdrop-filter: blur\(12px\) saturate\(1\.04\)/);
+  assert.match(card, /var\(--surface\)/);
   assert.match(card, /var\(--shadow-soft\)/);
-  assert.match(card, /inset 0 1px 0 var\(--hi\)/);
+  assert.doesNotMatch(card, /inset 0 1px 0 var\(--hi\)/);
   assert.doesNotMatch(card, /var\(--glass\) 88%/);
   assert.doesNotMatch(card, /blur\(32px\)/);
-  assert.match(toolTint, /background: linear-gradient\(90deg/);
-  assert.match(toolTint, /opacity: 0\.34/);
-  assert.match(cardTint, /background: linear-gradient\(90deg/);
-  assert.match(cardTint, /color-mix\(in srgb, var\(--accent\) 14%, transparent\)/);
-  assert.match(cardTint, /opacity: 0\.34/);
-  assert.doesNotMatch(cardTint, /display: none/);
+  assert.match(toolTint, /display: none/);
+  assert.match(cardTint, /display: none/);
   assert.match(summaryAccent, /background: var\(--accent\)/);
   assert.doesNotMatch(summaryAccent, /var\(--accent-warm\)/);
   assert.match(form, /grid-template-columns: minmax\(0,\s*1fr\)/);
@@ -601,13 +603,13 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.doesNotMatch(section, /box-shadow:/);
   assert.doesNotMatch(legend, /position: sticky/);
   assert.doesNotMatch(legend, /z-index:/);
-  assert.match(rowSurface, /background: color-mix\(in srgb, var\(--surface\) 24%, transparent\)/);
-  assert.match(rowSurface, /border: 1px solid color-mix\(in srgb, var\(--line\) 42%, transparent\)/);
+  assert.match(rowSurface, /background: transparent/);
+  assert.match(rowSurface, /border-bottom: 1px solid/);
   assert.match(rowSurface, /box-shadow: none/);
   assert.doesNotMatch(rowSurface, /backdrop-filter/);
   assert.doesNotMatch(rowSurface, /inset 0 1px/);
   assert.match(select, /appearance: none/);
-  assert.match(select, /backdrop-filter: blur\(1[0-9]px\)/);
+  assert.doesNotMatch(select, /backdrop-filter/);
   assert.match(select, /box-shadow: none/);
   assert.doesNotMatch(select, /inset 0/);
   assert.match(range, /appearance: none/);
@@ -616,10 +618,10 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.match(range, /height: 24px/);
   assert.match(rangeTrack, /linear-gradient\(90deg/);
   assert.match(rangeTrack, /var\(--range-progress\)/);
-  assert.match(rangeTrack, /backdrop-filter: blur\(1[0-9]px\)/);
+  assert.doesNotMatch(rangeTrack, /backdrop-filter/);
   assert.match(rangeTrack, /box-shadow: none/);
   assert.doesNotMatch(rangeTrack, /inset 0/);
-  assert.match(thumb, /backdrop-filter: blur\(1[0-9]px\)/);
+  assert.doesNotMatch(thumb, /backdrop-filter/);
   assert.match(thumb, /box-shadow: none/);
   assert.doesNotMatch(thumb, /radial-gradient/);
   assert.doesNotMatch(thumb, /linear-gradient/);
@@ -627,7 +629,7 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.match(checkbox, /border-radius: 999px/);
   assert.match(checkbox, /--toggle-track-off:/);
   assert.match(checkbox, /--toggle-knob-off:/);
-  assert.match(checkbox, /backdrop-filter: blur\(1[0-9]px\)/);
+  assert.doesNotMatch(checkbox, /backdrop-filter/);
   assert.match(checkbox, /box-shadow: none/);
   assert.match(checkbox, /background: var\(--toggle-track-off\)/);
   assert.doesNotMatch(checkbox, /var\(--ok\)/);
@@ -649,7 +651,7 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.doesNotMatch(advanced, /box-shadow:/);
   assert.match(advancedSummary, /cursor:\s*pointer/);
   assert.match(advancedGrid, /display:\s*grid/);
-  assert.match(button, /backdrop-filter: blur\(1[0-9]px\)/);
+  assert.doesNotMatch(button, /backdrop-filter/);
   assert.match(button, /box-shadow: none/);
   assert.doesNotMatch(button, /linear-gradient/);
   assert.doesNotMatch(buttonHover, /transform:/);
@@ -657,29 +659,114 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.doesNotMatch(panelMarkup, />저장</);
 });
 
+test("palette picker exposes stable swatches and a clear selected state", () => {
+  const field = cssBlock(".palette-field");
+  const picker = cssBlock(".palette-picker");
+  const option = cssBlock(".palette-option");
+  const selected = cssBlock('.palette-option[aria-checked="true"]');
+  const sample = cssBlock(".palette-sample");
+
+  assert.match(field, /grid-column:\s*1 \/ -1/);
+  assert.match(picker, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(option, /min-height: 42px/);
+  assert.match(option, /background: transparent/);
+  assert.match(selected, /var\(--accent\)/);
+  assert.match(sample, /grid-template-columns: repeat\(3, 1fr\)/);
+  assert.match(css, /data-palette-value="mono"/);
+  assert.match(css, /--mono-swatch/);
+  assert.match(css, /data-palette-value="traffic"[\s\S]*--tool-claude-primary-swatch/);
+  assert.match(cssBlock('.palette-option[data-palette-value="traffic"] .palette-sample'), /repeat\(4, 1fr\)/);
+});
+
 test("settings form groups controls into logical sections without changing field names", () => {
   const sections = [
-    ...panelMarkup.matchAll(/<fieldset class="settings-section" data-settings-section="([^"]+)">/g),
+    ...panelMarkup.matchAll(/<fieldset class="settings-section(?: [^"]*)?" data-settings-section="([^"]+)">/g),
   ].map((match) => match[1]);
   const indicatorSection = markupSection("indicator");
 
-  assert.deepEqual(sections, ["appearance", "limits", "taskbar", "indicator", "system", "lab"]);
+  assert.deepEqual(sections, ["appearance", "limits", "taskbar", "indicator", "system", "update", "about"]);
   assert.match(panelMarkup, /<details class="settings-card" open>/);
 
   assert.match(markupSection("appearance"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="palette"/);
-  assert.match(markupSection("limits"), /name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"/);
-  assert.match(markupSection("limits"), /data-i18n="field\.remainingWarning"[\s\S]*data-i18n="field\.remainingDanger"[\s\S]*data-i18n="help\.remainingThresholds"/);
+  assert.match(markupSection("limits"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"/);
+  assert.match(markupSection("limits"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
-  assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"[\s\S]*<details class="settings-advanced" data-settings-advanced="indicator">/);
-  assert.doesNotMatch(indicatorSection, /<details class="settings-advanced"[^>]*open/);
+  assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"/);
+  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="typography" open>[\s\S]*name="ring_number_font_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
+  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">/);
   assert.match(indicatorSection, /<summary data-i18n="advanced\.indicator">고급 조정<\/summary>/);
-  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_number_outline_width_px"[\s\S]*name="ring_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
-  assert.match(markupSection("system"), /name="autostart_on"[\s\S]*data-action="restore-statusline"[\s\S]*id="settings-status"/);
-  assert.match(markupSection("lab"), /name="claude_usage_auto_refresh_lab_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
+  assert.match(indicatorSection, /name="indicator_effect_style"[\s\S]*data-effect-value="flat"[\s\S]*data-effect-value="breathe"/);
+  assert.match(indicatorSection, /name="ring_center_size_px"[\s\S]*<details class="settings-advanced" data-settings-advanced="typography"/);
+  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_number_outline_width_px"[\s\S]*name="ring_size_px"[\s\S]*name="ring_gap_px"[\s\S]*<\/details>/);
+  assert.match(markupSection("system"), /name="autostart_on"[\s\S]*data-action="restore-statusline"/);
+  assert.doesNotMatch(markupSection("system"), /id="settings-status"/);
+  assert.match(markupSection("update"), /name="update_check_on"[\s\S]*data-action="check-updates"[\s\S]*data-action="open-releases"[\s\S]*id="update-check-status"/);
+  assert.doesNotMatch(markupSection("about"), /name="update_check_on"|data-action="check-updates"/);
+  assert.match(panelMarkup, /<\/main>\s*<footer class="settings-footer" data-state="ready">[\s\S]*id="settings-status"/);
+  assert.match(cssBlock(".settings-footer"), /position: fixed/);
+  assert.match(cssBlock(".settings-footer"), /bottom: 10px/);
+  assert.match(markupSection("limits"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
+  assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
+  assert.doesNotMatch(panelMarkup, /claude_usage_auto_refresh_lab_on/);
+
+  const paletteOptions = [...markupSection("appearance").matchAll(/data-palette-value="([^"]+)"/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(paletteOptions, [
+    "traffic", "signal", "ocean", "forest", "sunset", "cvd", "cool", "mono", "custom",
+  ]);
+  assert.match(markupSection("appearance"), /role="radiogroup"[\s\S]*name="mono_color"[\s\S]*name="custom_safe"/);
+  assert.match(markupSection("appearance"), /data-tool-palette[\s\S]*name="claude_primary_color"[\s\S]*name="claude_secondary_color"[\s\S]*name="codex_primary_color"[\s\S]*name="codex_secondary_color"/);
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
-  assert.match(settingsJs, /setField\("claude_usage_auto_refresh_lab_on", state\.claudeUsageAutoRefreshLabOn\)/);
+  assert.match(settingsJs, /setField\("claude_account_auto_collect_on", state\.claudeAccountAutoCollectOn\)/);
+  assert.match(settingsJs, /setField\("update_check_on", state\.updateCheckOn\)/);
+});
+
+test("indicator effect presets are previewed, opt-in, and motion-safe", () => {
+  const indicatorSection = markupSection("indicator");
+  const effectValues = [...indicatorSection.matchAll(/data-effect-value="([^"]+)"/g)]
+    .map((match) => match[1]);
+  const flat = cssBlock('.bar-shell[data-effect="flat"] .ring-effect-shadow');
+  const soft = cssBlock('.bar-shell[data-effect="soft"] .ring-effect-shadow');
+  const depth = cssBlock('.bar-shell[data-effect="depth"] .ring-effect-shadow');
+  const glow = cssBlock('.bar-shell[data-effect="glow"] .ring-effect-shadow');
+  const breathe = cssBlock('.bar-shell[data-effect="breathe"] .bar-tool[data-state="live"] .ring-effect-shadow');
+
+  assert.deepEqual(effectValues, ["flat", "soft", "depth", "glow", "breathe"]);
+  assert.match(panelMarkup, /name="indicator_effect_style" value="flat"/);
+  assert.match(barMarkup, /data-effect="flat"/);
+  assert.equal(flat, "");
+  assert.match(soft, /opacity: 0\.24/);
+  assert.match(depth, /opacity: 0\.42/);
+  assert.match(glow, /stroke-width: calc\(var\(--effect-stroke\) \+ 7\)/);
+  assert.match(breathe, /animation: indicator-breathe 2\.8s/);
+  assert.doesNotMatch(`${soft}\n${depth}\n${glow}\n${breathe}`, /filter:/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*data-effect="breathe"[\s\S]*animation: none !important/);
+  assert.doesNotMatch(css, /data-state="stale"[^}]*indicator-breathe/);
+  assert.doesNotMatch(css, /data-state="empty"[^}]*indicator-breathe/);
+});
+
+test("about and update sections keep product copy separate from guarded update controls", () => {
+  const about = markupSection("about");
+  const update = markupSection("update");
+
+  assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="open-available-release"/);
+  assert.match(about, /Claude Code와 Codex의 5시간·주간 사용량/);
+  assert.match(about, /별도 Juice 서버에 저장하지 않습니다/);
+  assert.match(update, /name="update_check_on" checked/);
+  assert.match(update, /data-action="check-updates"/);
+  assert.match(update, /data-action="open-releases"/);
+  assert.doesNotMatch(about, /name="update_check_on"|data-action="check-updates"/);
+  assert.match(settingsJs, /invoke\("get_update_status"\)/);
+  assert.match(settingsJs, /invoke\("check_for_updates"\)/);
+  assert.match(settingsJs, /invoke\("open_release_page", \{ url:/);
+  assert.match(rustLib, /plugin\(tauri_plugin_notification::init\(\)\)/);
+  assert.match(rustLib, /spawn_update_check\(app\.handle\(\)\.clone\(\)\)/);
+  assert.match(rustLib, /ensure_panel_command\(window\.label\(\)\)\?/);
+  assert.doesNotMatch(tauriConfig.app.security.csp, /github\.com/);
+  assert.match(i18nJs, /"status\.updateFailed": "업데이트를 확인하지 못했습니다/);
+  assert.match(i18nJs, /"status\.updateFailed": "Could not check for updates/);
 });
 
 test("public README and release template are the only tracked markdown exceptions", (t) => {
@@ -706,12 +793,21 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.doesNotMatch(panelMarkup, />오래됨 기준</);
   assert.match(panelMarkup, />잔여량 경고</);
   assert.match(panelMarkup, />잔여량 위험</);
-  assert.match(panelMarkup, /data-i18n="help.remainingThresholds"/);
+  assert.match(panelMarkup, /name="display_basis"/);
+  assert.match(panelMarkup, /data-display-basis-copy="help"/);
   assert.match(i18nJs, /작업표시줄은 남은 사용량을 표시하므로/);
-  assert.match(limitsSection, /name="poll-output">2<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
+  assert.match(i18nJs, /표시 사용량이 이 값 이상이 되면/);
+  assert.match(limitsSection, /name="poll-output">60<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
   assert.match(limitsSection, /name="stale-output">90<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
+  const timingFields = [...limitsSection.matchAll(/<label class="field-with-help">/g)];
+  assert.equal(timingFields.length, 2);
+  assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.pollInterval"[\s\S]*data-i18n="help\.pollInterval"/);
+  assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.staleAfter"[\s\S]*data-i18n="help\.staleAfter"/);
+  assert.match(cssBlock(".field-grid label.field-with-help"), /grid-template-columns: minmax\(72px, 1fr\) 58px auto/);
+  assert.match(cssBlock(".field-grid label.field-with-help > span:first-child"), /white-space: nowrap/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
   assert.match(i18nJs, /마지막 기록 후 오래됨 표시까지/);
+  assert.match(i18nJs, /로컬 상태를 다시 읽는 간격/);
   assert.doesNotMatch(i18nJs, /마지막 기록이 몇 초 지나면 오래됨으로 표시할지/);
   assert.match(i18nJs, /"unit\.seconds": "초"/);
   assert.doesNotMatch(panelMarkup, />신선도</);
@@ -721,9 +817,9 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.doesNotMatch(i18nJs, /action\.connectClaude/);
   assert.match(panelMarkup, /data-action="restore-statusline"/);
   assert.doesNotMatch(settingsJs, /install_statusline/);
-  assert.match(panelMarkup, /data-settings-section="lab"/);
-  assert.match(i18nJs, /"section\.lab": "실험실"/);
-  assert.match(i18nJs, /Claude \/usage 자동 새로고침/);
+  assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
+  assert.doesNotMatch(i18nJs, /"section\.lab": "실험실"/);
+  assert.match(i18nJs, /Claude 계정 사용량 자동 수집/);
 });
 
 test("taskbar bar right click exposes a visible refresh action", () => {

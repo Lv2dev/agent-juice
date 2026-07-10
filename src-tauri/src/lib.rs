@@ -8,6 +8,7 @@ pub mod render;
 pub mod statusline;
 #[cfg(windows)]
 pub mod taskbar;
+pub mod update;
 
 use chrono::{DateTime, Utc};
 use config::Settings;
@@ -23,6 +24,7 @@ use tauri::{
     Emitter, Manager,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
+use tauri_plugin_notification::NotificationExt;
 
 const TASKBAR_DOCK_WIDTH: i32 = 260;
 const TASKBAR_DRAG_THRESHOLD_PX: i32 = 3;
@@ -34,6 +36,7 @@ const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 60;
 const CLAUDE_USAGE_TIMEOUT_SECS: u64 = 10;
 const TRAY_ID: &str = "juice";
 const TRAY_ICON_IDS: [&str; 1] = [TRAY_ID];
+const UPDATE_START_DELAY_SECS: u64 = 15;
 
 #[derive(Clone, serde::Serialize)]
 struct TaskbarDraggingPayload {
@@ -269,7 +272,7 @@ fn collect_representatives_runtime(
     } else {
         None
     };
-    let claude_usage = if force_claude_usage || settings.claude_usage_auto_refresh_lab_on {
+    let claude_usage = if force_claude_usage || settings.claude_account_auto_collect_on {
         collect_claude_usage_status(settings, &pc_id, now, force_claude_usage)
     } else {
         None
@@ -432,11 +435,28 @@ fn collect_claude_usage_status(
         CLAUDE_USAGE_CACHE_MIN_SECS,
         force,
         || {
-            let raw = collector::claude_usage_output(std::time::Duration::from_secs(
-                CLAUDE_USAGE_TIMEOUT_SECS,
-            ))
-            .ok()?;
-            adapters::claude::parse_usage_output(&raw, pc_id, &now.to_rfc3339()).ok()
+            let timeout = std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS);
+            let captured_at = now.to_rfc3339();
+            if let Ok(raw) = collector::claude_oauth_usage_response(timeout) {
+                if let Ok(status) =
+                    adapters::claude::parse_oauth_usage_response(&raw, pc_id, &captured_at)
+                {
+                    return Some(status);
+                }
+            }
+
+            let legacy = collector::claude_usage_output(timeout).ok();
+            if let Ok(raw) = collector::claude_oauth_usage_response(timeout) {
+                if let Ok(status) =
+                    adapters::claude::parse_oauth_usage_response(&raw, pc_id, &captured_at)
+                {
+                    return Some(status);
+                }
+            }
+
+            legacy.and_then(|raw| {
+                adapters::claude::parse_usage_output(&raw, pc_id, &captured_at).ok()
+            })
         },
     )?;
     derive_active(&mut status, settings.stale_after_secs, now);
@@ -448,9 +468,35 @@ fn merge_claude_usage_status(
     usage: Option<AgentStatus>,
 ) -> Option<AgentStatus> {
     match (statusline, usage) {
+        (Some(mut statusline), Some(usage))
+            if usage.session_id == "claude-oauth-usage" && !usage.approx =>
+        {
+            let exact_primary = usage
+                .primary
+                .as_ref()
+                .and_then(|limit| limit.used_percent)
+                .is_some();
+            let exact_secondary = usage
+                .secondary
+                .as_ref()
+                .and_then(|limit| limit.used_percent)
+                .is_some();
+            statusline.captured_at = usage.captured_at;
+            statusline.session.active = usage.session.active;
+            if exact_primary {
+                statusline.primary = usage.primary;
+            }
+            if exact_secondary {
+                statusline.secondary = usage.secondary;
+            }
+            if exact_primary && exact_secondary {
+                statusline.approx = false;
+            }
+            Some(statusline)
+        }
         (Some(mut statusline), Some(usage)) => {
-            merge_missing_limit_percent(&mut statusline.primary, usage.primary);
-            merge_missing_limit_percent(&mut statusline.secondary, usage.secondary);
+            merge_missing_limit(&mut statusline.primary, usage.primary);
+            merge_missing_limit(&mut statusline.secondary, usage.secondary);
             Some(statusline)
         }
         (Some(statusline), None) => Some(statusline),
@@ -459,13 +505,18 @@ fn merge_claude_usage_status(
     }
 }
 
-fn merge_missing_limit_percent(
+fn merge_missing_limit(
     statusline_limit: &mut Option<model::AccountLimit>,
     usage_limit: Option<model::AccountLimit>,
 ) {
     match (statusline_limit.as_mut(), usage_limit) {
-        (Some(statusline), Some(usage)) if statusline.used_percent.is_none() => {
-            statusline.used_percent = usage.used_percent;
+        (Some(statusline), Some(usage)) => {
+            if statusline.used_percent.is_none() {
+                statusline.used_percent = usage.used_percent;
+            }
+            if statusline.resets_at.is_none() {
+                statusline.resets_at = usage.resets_at;
+            }
         }
         (None, Some(usage)) => *statusline_limit = Some(usage),
         _ => {}
@@ -939,6 +990,129 @@ async fn refresh_status(
     let statuses = collect_representatives_off_thread(Settings::load(), true).await;
     let _ = app.emit("status-updated", &statuses);
     Ok(statuses)
+}
+
+fn update_error_result() -> update::UpdateCheckResult {
+    update::UpdateCheckResult {
+        status: "error".into(),
+        current_version: env!("CARGO_PKG_VERSION").into(),
+        latest_version: None,
+        release_url: None,
+        checked_at: None,
+        checked_now: false,
+        error: Some("check_failed".into()),
+    }
+}
+
+async fn run_update_check(force: bool) -> Result<update::UpdateCheckResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update::check_for_update(env!("CARGO_PKG_VERSION"), force)
+    })
+    .await
+    .map_err(|_| "update check task failed".to_string())?
+    .map_err(|_| "update check failed".to_string())
+}
+
+fn show_update_notification(app: &tauri::AppHandle, result: &update::UpdateCheckResult) {
+    if result.status != "update_available" {
+        return;
+    }
+    let Some(version) = result.latest_version.as_deref() else {
+        return;
+    };
+    if !update::claim_notification(version).unwrap_or(false) {
+        return;
+    }
+
+    let settings = Settings::load();
+    let (title, body) = if notification_uses_korean(&settings.language, system_ui_language()) {
+        (
+            "Juice 업데이트",
+            format!("Juice {version} 버전을 사용할 수 있습니다."),
+        )
+    } else {
+        ("Juice update", format!("Juice {version} is available."))
+    };
+    if let Err(err) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("[update] notification failed: {err}");
+    }
+}
+
+fn notification_uses_korean(language: &str, system_ui_language: u16) -> bool {
+    match language {
+        "ko" => true,
+        "en" => false,
+        _ => system_ui_language & 0x03ff == 0x0012,
+    }
+}
+
+fn system_ui_language() -> u16 {
+    #[cfg(windows)]
+    {
+        unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() }
+    }
+
+    #[cfg(not(windows))]
+    {
+        0x0409
+    }
+}
+
+fn spawn_update_check(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(UPDATE_START_DELAY_SECS)).await;
+        if !Settings::load().update_check_on {
+            return;
+        }
+        let Ok(result) = run_update_check(false).await else {
+            return;
+        };
+        show_update_notification(&app, &result);
+        let _ = app.emit("update-status", &result);
+    });
+}
+
+#[tauri::command]
+fn get_update_status(window: tauri::Window) -> Result<update::UpdateCheckResult, String> {
+    ensure_panel_command(window.label())?;
+    Ok(update::cached_result(env!("CARGO_PKG_VERSION")))
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<update::UpdateCheckResult, String> {
+    ensure_panel_command(window.label())?;
+    let result = run_update_check(true)
+        .await
+        .unwrap_or_else(|_| update_error_result());
+    let _ = app.emit("update-status", &result);
+    Ok(result)
+}
+
+#[tauri::command]
+fn open_release_page(window: tauri::Window, url: Option<String>) -> Result<(), String> {
+    ensure_panel_command(window.label())?;
+    let target = url.unwrap_or_else(|| update::releases_url().to_string());
+    if !update::is_release_url_allowed(&target) {
+        return Err("release URL is not allowed".into());
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(target)
+            .spawn()
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Err("opening the release page is Windows-only".into())
+    }
 }
 
 #[tauri::command]
@@ -1517,9 +1691,13 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
             refresh_status,
+            get_update_status,
+            check_for_updates,
+            open_release_page,
             get_settings,
             save_settings,
             move_taskbar_bar,
@@ -1544,6 +1722,7 @@ pub fn run() {
             spawn_status_loop(app.handle().clone());
             spawn_taskbar_drag_loop(app.handle().clone());
             spawn_taskbar_visibility_loop(app.handle().clone());
+            spawn_update_check(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -1576,6 +1755,14 @@ mod tests {
         assert_eq!(super::tray_pause_bar_menu_id(), "juice-pause-bars");
         assert_eq!(super::tray_resume_bar_menu_id(), "juice-resume-bars");
         assert_eq!(super::tray_quit_menu_id(), "juice-quit");
+    }
+
+    #[test]
+    fn update_notification_follows_explicit_or_system_ui_language() {
+        assert!(super::notification_uses_korean("ko", 0x0409));
+        assert!(!super::notification_uses_korean("en", 0x0412));
+        assert!(super::notification_uses_korean("system", 0x0412));
+        assert!(!super::notification_uses_korean("system", 0x0409));
     }
 
     #[test]
@@ -1706,12 +1893,12 @@ mod tests {
             primary: Some(AccountLimit {
                 label: "5h".into(),
                 used_percent: Some(12.0),
-                resets_at: None,
+                resets_at: Some("2026-07-09T15:00:00Z".into()),
             }),
             secondary: Some(AccountLimit {
                 label: "week".into(),
                 used_percent: Some(38.0),
-                resets_at: None,
+                resets_at: Some("2026-07-14T01:00:00Z".into()),
             }),
             session: SessionInfo {
                 active: true,
@@ -1727,6 +1914,10 @@ mod tests {
         assert_eq!(merged.session_id, "statusline");
         assert_eq!(merged.primary.as_ref().unwrap().used_percent, Some(12.0));
         assert_eq!(merged.secondary.as_ref().unwrap().used_percent, Some(38.0));
+        assert_eq!(
+            merged.primary.as_ref().unwrap().resets_at.as_deref(),
+            Some("2026-07-09T15:00:00Z")
+        );
 
         statusline.primary = Some(AccountLimit {
             label: "5h".into(),
@@ -1787,6 +1978,48 @@ mod tests {
             merged.primary.as_ref().unwrap().resets_at.as_deref(),
             Some("2026-07-09T15:00:00Z")
         );
+    }
+
+    #[test]
+    fn exact_claude_oauth_usage_overrides_stale_statusline_account_limits() {
+        let mut statusline = status_for_signature("statusline-stale");
+        statusline.captured_at = "2026-07-09T00:00:00Z".into();
+        statusline.session.active = false;
+        statusline.session.context_used_percent = Some(63.0);
+        statusline.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(0.0),
+            resets_at: None,
+        });
+        statusline.secondary = Some(AccountLimit {
+            label: "week".into(),
+            used_percent: Some(0.0),
+            resets_at: None,
+        });
+
+        let mut oauth = status_for_signature("claude-oauth-usage");
+        oauth.captured_at = "2026-07-10T03:00:00Z".into();
+        oauth.session.active = true;
+        oauth.session.context_used_percent = None;
+        oauth.approx = false;
+        oauth.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(78.0),
+            resets_at: Some("2026-07-10T04:50:00Z".into()),
+        });
+        oauth.secondary = Some(AccountLimit {
+            label: "week".into(),
+            used_percent: Some(10.0),
+            resets_at: Some("2026-07-16T12:00:00Z".into()),
+        });
+
+        let merged = super::merge_claude_usage_status(Some(statusline), Some(oauth)).unwrap();
+        assert_eq!(merged.captured_at, "2026-07-10T03:00:00Z");
+        assert!(merged.session.active);
+        assert_eq!(merged.session.context_used_percent, Some(63.0));
+        assert_eq!(merged.primary.as_ref().unwrap().used_percent, Some(78.0));
+        assert_eq!(merged.secondary.as_ref().unwrap().used_percent, Some(10.0));
+        assert!(!merged.approx);
     }
 
     #[test]
