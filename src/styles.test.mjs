@@ -694,8 +694,8 @@ test("public README and release template are the only tracked markdown exception
   assert.match(pushAllowlist, /\^\\.ai\//);
   assert.doesNotMatch(readme, /Claude 연결/);
   assert.doesNotMatch(readme, /Connect Claude/);
-  assert.match(readme, /Claude는 설치본 실행 시 자동 연결을 시도합니다/);
-  assert.match(readme, /the installed app attempts to connect automatically/);
+  assert.match(readme, /Juice 설치본은 시작할 때 Claude statusline 연결을 비파괴·멱등으로 시도합니다/);
+  assert.match(readme, /installed app attempts a non-destructive, idempotent Claude statusline connection/);
 });
 
 test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {

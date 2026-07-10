@@ -15,6 +15,12 @@ function cssToken(name) {
   return match?.[1] ?? "";
 }
 
+function pngDimensions(path) {
+  const buffer = readFileSync(path);
+  assert.equal(buffer.subarray(1, 4).toString("ascii"), "PNG", `${path} is not a PNG`);
+  return [buffer.readUInt32BE(16), buffer.readUInt32BE(20)];
+}
+
 test("app and tray icons use the same vertical capsule mark as the settings logo", () => {
   const script = String.raw`
 import json
@@ -120,7 +126,7 @@ print(json.dumps(checks))
   assert.ok(result.cornerAlphaMax < 8, `corner alpha ${result.cornerAlphaMax}`);
 });
 
-test("README opens with a horizontal Juice brand lockup", () => {
+test("README is product-focused and opens with the Juice brand lockup", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const brandPath = resolve(projectRoot, "docs/assets/juice-brand.svg");
 
@@ -134,21 +140,44 @@ test("README opens with a horizontal Juice brand lockup", () => {
   const brand = readFileSync(brandPath, "utf8");
   assert.match(brand, /<title id="title">Juice<\/title>/);
   assert.match(brand, /<text[^>]*>Juice<\/text>/);
+
+  for (const forbidden of [
+    "npm install",
+    "npm run tauri",
+    "node --test",
+    "cargo test",
+    "릴리즈 전에는 installer SHA256",
+    "Before every release",
+    "docs/assets/juice-preview.svg",
+  ]) {
+    assert.ok(!readme.includes(forbidden), `README still contains internal copy: ${forbidden}`);
+  }
+
+  assert.match(readme, /Claude `\/usage` 자동 새로고침/);
+  assert.match(readme, /기본값은 \*\*꺼짐\*\*/);
+  assert.match(readme, /statusline의 5시간\/주간 값이 있으면 덮어쓰지 않습니다/);
+  assert.match(readme, /`Claude \/usage` auto-refresh/);
+  assert.match(readme, /off by default/);
+  assert.match(readme, /never overwrites existing statusline limits/);
+  assert.match(readme, /4가지 바 모드/);
+  assert.match(readme, /four bar modes/);
 });
 
-test("README preview keeps all window controls inside the frame safe area", () => {
-  const preview = readFileSync(resolve(projectRoot, "docs/assets/juice-preview.svg"), "utf8");
-  const frameRight = 150 + 820;
-  const safeInset = 12;
-  const controls = preview.match(/<g id="window-controls">([\s\S]*?)<\/g>/)?.[1] ?? "";
-  const circles = [...controls.matchAll(/<circle cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/g)].map(
-    ([, cx, cy, radius]) => ({ cx: Number(cx), cy: Number(cy), radius: Number(radius) }),
-  );
+test("README uses current Tauri panel and taskbar capture assets", () => {
+  const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
+  const assets = new Map([
+    ["juice-panel-overview.png", [620, 720]],
+    ["juice-panel-settings-full.png", [620, 1473]],
+    ["juice-panel-taskbar.png", [620, 720]],
+    ["juice-panel-lab.png", [620, 720]],
+    ["juice-taskbar-modes.png", [760, 292]],
+  ]);
 
-  assert.equal(circles.length, 3);
-  for (const circle of circles) {
-    assert.ok(circle.cx + circle.radius <= frameRight - safeInset, `control exceeds right safe area: ${circle.cx}`);
-    assert.ok(circle.cy - circle.radius >= 66, `control exceeds top frame: ${circle.cy}`);
-    assert.ok(circle.cy + circle.radius <= 110, `control exceeds title bar: ${circle.cy}`);
+  for (const [name, dimensions] of assets) {
+    const path = resolve(projectRoot, `docs/assets/${name}`);
+    assert.ok(existsSync(path), `${name} is missing`);
+    assert.match(readme, new RegExp(`docs/assets/${name.replaceAll(".", "\\.")}`));
+    assert.deepEqual(pngDimensions(path), dimensions, `${name} dimensions changed`);
+    assert.ok(readFileSync(path).length > 10_000, `${name} is unexpectedly small`);
   }
 });
