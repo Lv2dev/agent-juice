@@ -11,7 +11,7 @@ const supabasePlan = existsSync(supabasePlanPath)
   : "";
 
 test("G4 Supabase plan pins transport and security boundary gates", (t) => {
-  if (!supabasePlan) t.skip("private .ai Supabase plan is unavailable");
+  if (!supabasePlan) return t.skip("private .ai Supabase plan is unavailable");
 
   assert.match(supabasePlan, /G4 착수 전 경계 게이트/);
   assert.match(supabasePlan, /대표값 전송 금지/);

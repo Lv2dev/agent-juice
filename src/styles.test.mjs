@@ -683,7 +683,7 @@ test("settings form groups controls into logical sections without changing field
 });
 
 test("public README and release template are the only tracked markdown exceptions", (t) => {
-  if (!pushAllowlist) t.skip("private .ai push allowlist is unavailable");
+  if (!pushAllowlist) return t.skip("private .ai push allowlist is unavailable");
 
   assert.match(gitignore, /\n!README\.md\n/);
   assert.match(gitignore, /\n!\.github\/\n/);
@@ -767,7 +767,7 @@ test("styles avoid decorative one-off effects and viewport font scaling", () => 
 });
 
 test("release installer verifier stops temporary app processes before cleanup", (t) => {
-  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+  if (!releaseVerifier) return t.skip("private .ai release verifier is unavailable");
 
   assert.match(releaseVerifier, /agent-juice-verify-install/);
   assert.match(releaseVerifier, /Stop-Process/);
@@ -775,7 +775,7 @@ test("release installer verifier stops temporary app processes before cleanup", 
 });
 
 test("release installer verifier selects the newest generated Juice installer", (t) => {
-  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+  if (!releaseVerifier) return t.skip("private .ai release verifier is unavailable");
 
   assert.match(releaseVerifier, /Get-ChildItem/);
   assert.match(releaseVerifier, /Juice_\*_x64-setup\.exe/);
@@ -784,7 +784,7 @@ test("release installer verifier selects the newest generated Juice installer", 
 });
 
 test("release installer verifier restores installer registry state after temp install checks", (t) => {
-  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+  if (!releaseVerifier) return t.skip("private .ai release verifier is unavailable");
 
   assert.match(releaseVerifier, /HKCU:\\Software\\pointi\\Juice/);
   assert.match(releaseVerifier, /HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Juice/);
@@ -794,7 +794,7 @@ test("release installer verifier restores installer registry state after temp in
 });
 
 test("release installer verifier protects real app processes, Run key, and shortcuts", (t) => {
-  if (!releaseVerifier) t.skip("private .ai release verifier is unavailable");
+  if (!releaseVerifier) return t.skip("private .ai release verifier is unavailable");
 
   assert.match(releaseVerifier, /Assert-NoNonTempAppProcess/);
   assert.match(releaseVerifier, /not under temp install dir/i);
@@ -806,7 +806,7 @@ test("release installer verifier protects real app processes, Run key, and short
 });
 
 test("taskbar native move verifier restores user settings after debug probes", (t) => {
-  if (!taskbarMoveVerifier) t.skip("private .ai taskbar verifier is unavailable");
+  if (!taskbarMoveVerifier) return t.skip("private .ai taskbar verifier is unavailable");
 
   assert.match(taskbarMoveVerifier, /settings\.json/);
   assert.match(taskbarMoveVerifier, /Backup-UserSettings/);
@@ -814,7 +814,7 @@ test("taskbar native move verifier restores user settings after debug probes", (
 });
 
 test("statusline bridge verifier uses an isolated data directory", (t) => {
-  if (!statuslineVerifier) t.skip("private .ai statusline verifier is unavailable");
+  if (!statuslineVerifier) return t.skip("private .ai statusline verifier is unavailable");
 
   assert.match(statuslineVerifier, /AGENT_JUICE_DATA_DIR/);
   assert.doesNotMatch(statuslineVerifier, /\$env:LOCALAPPDATA/);

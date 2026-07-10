@@ -580,7 +580,12 @@ test("bar render can show weekly limits before 5h without changing semantic limi
       core: {
         async invoke(command) {
           if (command === "get_settings") {
-            return { bar_mode: "quad", indicator_style: "bar", limit_order: "secondary_first" };
+            return {
+              bar_mode: "quad",
+              indicator_style: "bar",
+              limit_order: "secondary_first",
+              language: "ko",
+            };
           }
           if (command === "get_status") {
             return [

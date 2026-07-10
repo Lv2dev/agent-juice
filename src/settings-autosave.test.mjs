@@ -69,6 +69,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     bar_text_font_weight: makeField("500", "range", { min: "100", max: "900" }),
     "bar-text-font-weight-output": makeField("500"),
     autostart_on: makeField(true, "checkbox"),
+    language: makeField("ko"),
     theme: makeField("system"),
     font_mode: makeField("system"),
     claude_taskbar_offset_ratio: makeField("0.5"),
