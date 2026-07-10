@@ -105,8 +105,8 @@ test("viewModelForTool is null-safe and marks stale sessions", () => {
 
 test("viewModelForTool explains empty Claude state in the selected language", () => {
   const ko = viewModelForTool([], "claude", settings);
-  assert.equal(ko.emptyHint, "Claude 연결 후 Claude를 한 번 사용하면 표시됩니다");
+  assert.equal(ko.emptyHint, "Juice 실행 후 Claude를 한 번 사용하면 표시됩니다");
 
   const en = viewModelForTool([], "claude", { ...settings, language: "en" });
-  assert.equal(en.emptyHint, "Connect Claude, then use Claude once on this PC");
+  assert.equal(en.emptyHint, "Run Juice, then use Claude once on this PC");
 });

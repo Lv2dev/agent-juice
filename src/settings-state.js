@@ -9,6 +9,7 @@ const DEFAULT_RING = {
   thicknessPx: 4,
   gapPx: 6,
   centerGapPx: 0,
+  numberOutlineWidthPx: 1.2,
   numberFontSizePx: 9,
   numberFontWeight: 600,
   textFontSizePx: 11,
@@ -18,6 +19,18 @@ const DEFAULT_RING = {
 function numberOr(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function percentOr(value, fallback) {
+  return Math.min(100, Math.max(0, numberOr(value, fallback)));
+}
+
+function usedToRemainingThreshold(value, fallbackUsed) {
+  return 100 - percentOr(value, fallbackUsed);
+}
+
+function remainingToUsedThreshold(value, fallbackRemaining) {
+  return 100 - percentOr(value, fallbackRemaining);
 }
 
 function intOr(value, fallback) {
@@ -113,8 +126,8 @@ export function formStateFromSettings(settings = {}) {
 
   return {
     palette: palette.palette,
-    warnThreshold: numberOr(settings.warn_threshold, 70),
-    dangerThreshold: numberOr(settings.danger_threshold, 90),
+    warnThreshold: usedToRemainingThreshold(settings.warn_threshold, 70),
+    dangerThreshold: usedToRemainingThreshold(settings.danger_threshold, 90),
     pollIntervalSecs: intOr(settings.poll_interval_secs, 2),
     staleAfterSecs: intOr(settings.stale_after_secs, 90),
     barMode: settings.bar_mode || "full",
@@ -125,6 +138,12 @@ export function formStateFromSettings(settings = {}) {
     ringOn: settings.ring_on !== false,
     ringNumbersOn: boolOr(settings.ring_numbers_on, true),
     ringNumberOutlineOn: boolOr(settings.ring_number_outline_on, true),
+    ringNumberOutlineWidthPx: pxRangeOr(
+      settings.ring_number_outline_width_px,
+      DEFAULT_RING.numberOutlineWidthPx,
+      0,
+      4,
+    ),
     ringSizePx: pxRangeOr(settings.ring_size_px, DEFAULT_RING.sizePx, 20, 44),
     ringThicknessPx: pxRangeOr(settings.ring_thickness_px, DEFAULT_RING.thicknessPx, 1, 10),
     ringGapPx: pxRangeOr(settings.ring_gap_px, DEFAULT_RING.gapPx, 2, 14),
@@ -163,6 +182,10 @@ export function formStateFromSettings(settings = {}) {
     ),
     showClaude: settings.show_claude !== false,
     showCodex: settings.show_codex !== false,
+    claudeUsageAutoRefreshLabOn: boolOr(
+      settings.claude_usage_auto_refresh_lab_on,
+      false,
+    ),
     customSafe: palette.customSafe,
     customWarn: palette.customWarn,
     customDanger: palette.customDanger,
@@ -180,11 +203,16 @@ function entrySource(entries) {
 
 export function payloadFromEntries(entries) {
   const source = entrySource(entries);
+  const warnUsedThreshold = remainingToUsedThreshold(source.get("warn_threshold"), 30);
+  const dangerUsedThreshold = Math.max(
+    remainingToUsedThreshold(source.get("danger_threshold"), 10),
+    warnUsedThreshold,
+  );
 
   return {
     palette: String(source.get("palette") || "traffic"),
-    warn_threshold: numberOr(source.get("warn_threshold"), 70),
-    danger_threshold: numberOr(source.get("danger_threshold"), 90),
+    warn_threshold: warnUsedThreshold,
+    danger_threshold: dangerUsedThreshold,
     poll_interval_secs: intOr(source.get("poll_interval_secs"), 2),
     stale_after_secs: intOr(source.get("stale_after_secs"), 90),
     bar_mode: String(source.get("bar_mode") || "full"),
@@ -195,6 +223,12 @@ export function payloadFromEntries(entries) {
     ring_on: isChecked(source.get("ring_on")),
     ring_numbers_on: isChecked(source.get("ring_numbers_on")),
     ring_number_outline_on: isChecked(source.get("ring_number_outline_on")),
+    ring_number_outline_width_px: pxRangeOr(
+      source.get("ring_number_outline_width_px"),
+      DEFAULT_RING.numberOutlineWidthPx,
+      0,
+      4,
+    ),
     ring_size_px: pxRangeOr(source.get("ring_size_px"), DEFAULT_RING.sizePx, 20, 44),
     ring_thickness_px: pxRangeOr(source.get("ring_thickness_px"), DEFAULT_RING.thicknessPx, 1, 10),
     ring_gap_px: pxRangeOr(source.get("ring_gap_px"), DEFAULT_RING.gapPx, 2, 14),
@@ -233,6 +267,9 @@ export function payloadFromEntries(entries) {
     ),
     show_claude: isChecked(source.get("show_claude")),
     show_codex: isChecked(source.get("show_codex")),
+    claude_usage_auto_refresh_lab_on: isChecked(
+      source.get("claude_usage_auto_refresh_lab_on"),
+    ),
     custom_safe: String(source.get("custom_safe") || DEFAULT_CUSTOM.customSafe),
     custom_warn: String(source.get("custom_warn") || DEFAULT_CUSTOM.customWarn),
     custom_danger: String(source.get("custom_danger") || DEFAULT_CUSTOM.customDanger),

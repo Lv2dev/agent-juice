@@ -170,6 +170,7 @@ test("bar render applies ring number and geometry settings to the root", async (
               indicator_style: "bar",
               ring_numbers_on: false,
               ring_number_outline_on: true,
+              ring_number_outline_width_px: 1.4,
               ring_size_px: 34.5,
               ring_thickness_px: 6.5,
               ring_gap_px: 8.5,
@@ -204,9 +205,13 @@ test("bar render applies ring number and geometry settings to the root", async (
   assert.equal(root.dataset.indicator, "bar");
   assert.equal(root.dataset.ringNumbers, "off");
   assert.equal(root.dataset.numberOutline, "on");
+  assert.equal(root.style.getPropertyValue("--ring-number-outline-width"), "1.4px");
   assert.equal(root.style.getPropertyValue("--ring-size"), "34.5px");
   assert.equal(root.style.getPropertyValue("--ring-thickness"), "6.5px");
   assert.equal(root.style.getPropertyValue("--ring-gap"), "8.5px");
+  assert.equal(root.style.getPropertyValue("--ring-svg-stroke"), "18.8");
+  assert.equal(root.style.getPropertyValue("--outer-radius"), "40.6");
+  assert.equal(root.style.getPropertyValue("--inner-radius"), "15.9");
   assert.equal(root.style.getPropertyValue("--ring-number-font-size"), "10.5px");
   assert.equal(root.style.getPropertyValue("--ring-number-font-weight"), "650");
   assert.equal(root.style.getPropertyValue("--bar-text-font-size"), "12.5px");
@@ -550,9 +555,11 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(root.dataset.mode, "quad");
   assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#f59e0b");
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "43.2deg");
+  assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "12");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "12%");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#2563eb");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "212.4deg");
+  assert.equal(tools.claude.style.getPropertyValue("--secondary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
   assert.equal(tools.claude.textContentFor(".quad-primary-number"), "12");
   assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "59");
@@ -612,9 +619,11 @@ test("bar render can show weekly limits before 5h without changing semantic limi
   assert.equal(tools.claude.textContentFor(".secondary-text"), "5h 12%");
   assert.equal(tools.claude.style.getPropertyValue("--primary-color"), "#2563eb");
   assert.equal(tools.claude.style.getPropertyValue("--primary-arc"), "212.4deg");
+  assert.equal(tools.claude.style.getPropertyValue("--primary-dash"), "59");
   assert.equal(tools.claude.style.getPropertyValue("--primary-percent"), "59%");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-color"), "#f59e0b");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-arc"), "43.2deg");
+  assert.equal(tools.claude.style.getPropertyValue("--secondary-dash"), "12");
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "12%");
   assert.equal(tools.claude.textContentFor(".bar-worst"), "12");
   assert.equal(tools.claude.textContentFor(".quad-primary-number"), "59");

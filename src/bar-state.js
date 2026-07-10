@@ -98,6 +98,66 @@ function arcText(value) {
   return `${(Math.min(100, Math.max(0, number)) * 3.6).toFixed(1)}deg`;
 }
 
+function dashText(value) {
+  const number = finiteNumber(value);
+  if (number == null) return "0";
+  const clamped = Math.min(100, Math.max(0, number));
+  return Number.isInteger(clamped) ? String(clamped) : clamped.toFixed(1);
+}
+
+function geometryText(value) {
+  const rounded = geometryNumber(value);
+  return Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1);
+}
+
+function geometryNumber(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function ringSvgGeometry(sizePx, thicknessPx, gapPx, centerGapPx) {
+  const size = Math.max(1, sizePx);
+  const visibleThickness = Math.max(1, thicknessPx - centerGapPx);
+  const scale = 100 / size;
+  const requestedStroke = visibleThickness * scale;
+  const requestedOuterRadius = Math.max(requestedStroke / 2, 50 - requestedStroke / 2);
+  const requestedInnerRadius = Math.max(
+    requestedStroke / 2,
+    50 - gapPx * scale - requestedStroke / 2,
+  );
+  const roundedStroke = geometryNumber(requestedStroke);
+  const roundedOuterRadius = geometryNumber(requestedOuterRadius);
+  const roundedInnerRadius = geometryNumber(requestedInnerRadius);
+  const requestedGeometryIsValid =
+    roundedOuterRadius > roundedInnerRadius &&
+    roundedOuterRadius + roundedStroke / 2 <= 50 &&
+    roundedInnerRadius - roundedStroke / 2 >= 0 &&
+    roundedOuterRadius - roundedInnerRadius >= roundedStroke;
+
+  if (requestedGeometryIsValid) {
+    return {
+      ringSvgStroke: geometryText(requestedStroke),
+      outerRadius: geometryText(requestedOuterRadius),
+      innerRadius: geometryText(requestedInnerRadius),
+    };
+  }
+
+  const stroke = Math.min(24.9, roundedStroke);
+  const outerRadius = Math.floor((50 - stroke / 2) * 10) / 10;
+  const innerRadius = Math.max(
+    Math.ceil((stroke / 2) * 10) / 10,
+    Math.min(
+      geometryNumber(outerRadius - stroke),
+      geometryNumber(50 - gapPx * scale - stroke / 2),
+    ),
+  );
+
+  return {
+    ringSvgStroke: geometryText(stroke),
+    outerRadius: geometryText(outerRadius),
+    innerRadius: geometryText(innerRadius),
+  };
+}
+
 function shortReset(iso, now, language) {
   if (!iso) return "";
   const resetAt = Date.parse(iso);
@@ -118,6 +178,7 @@ function limitModel(labelKey, limit, settings, now, language, colorForLimit = co
     reset: shortReset(limit?.resets_at, now, language),
     color: colorForLimit(used, settings),
     arc: arcText(remaining),
+    dash: dashText(remaining),
   };
 }
 
@@ -176,6 +237,16 @@ function normalizeLimitOrder(value) {
 
 export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Date()) {
   const merged = { ...DEFAULT_SETTINGS, ...settings };
+  const ringSizePx = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
+  const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10);
+  const ringGapPx = numberRangeSetting(merged.ring_gap_px, 6, 2, 14);
+  const ringCenterGapPx = numberRangeSetting(merged.ring_center_gap_px, 0, 0, 8);
+  const svgGeometry = ringSvgGeometry(
+    ringSizePx,
+    ringThicknessPx,
+    ringGapPx,
+    ringCenterGapPx,
+  );
 
   return {
     mode: normalizeBarMode(merged.bar_mode),
@@ -184,10 +255,12 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
     ringOn: merged.ring_on !== false,
     ringNumbersOn: boolSetting(merged.ring_numbers_on, true),
     ringNumberOutlineOn: boolSetting(merged.ring_number_outline_on, true),
-    ringSizePx: numberRangeSetting(merged.ring_size_px, 36, 20, 44),
-    ringThicknessPx: numberRangeSetting(merged.ring_thickness_px, 4, 1, 10),
-    ringGapPx: numberRangeSetting(merged.ring_gap_px, 6, 2, 14),
-    ringCenterGapPx: numberRangeSetting(merged.ring_center_gap_px, 0, 0, 8),
+    ringNumberOutlineWidthPx: numberRangeSetting(merged.ring_number_outline_width_px, 1.2, 0, 4),
+    ringSizePx,
+    ringThicknessPx,
+    ringGapPx,
+    ringCenterGapPx,
+    ...svgGeometry,
     ringNumberFontSizePx: numberRangeSetting(merged.ring_number_font_size_px, 9, 6, 16),
     ringNumberFontWeight: intRangeSetting(merged.ring_number_font_weight, 600, 100, 900),
     barTextFontSizePx: numberRangeSetting(merged.bar_text_font_size_px, 11, 8, 16),

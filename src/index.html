@@ -169,31 +169,33 @@
           </fieldset>
 
           <fieldset class="settings-section" data-settings-section="limits">
-            <legend data-i18n="section.limits">임계값·수집</legend>
+            <legend data-i18n="section.limits">잔여량·수집</legend>
             <div class="settings-section-grid">
               <label class="range-row">
-                <span><span data-i18n="field.warning">경고</span> <output name="warn-output">70</output>%</span>
+                <span><span data-i18n="field.remainingWarning">잔여량 경고</span> <output name="warn-output">30</output>%</span>
                 <input
                   type="range"
                   name="warn_threshold"
                   min="0"
                   max="100"
                   step="1"
-                  value="70"
+                  value="30"
                 />
               </label>
 
               <label class="range-row">
-                <span><span data-i18n="field.danger">위험</span> <output name="danger-output">90</output>%</span>
+                <span><span data-i18n="field.remainingDanger">잔여량 위험</span> <output name="danger-output">10</output>%</span>
                 <input
                   type="range"
                   name="danger_threshold"
                   min="0"
                   max="100"
                   step="1"
-                  value="90"
+                  value="10"
                 />
               </label>
+
+              <small class="field-help threshold-help" data-i18n="help.remainingThresholds">작업표시줄은 남은 사용량을 표시하므로, 이 값 이하가 되면 경고/위험 색을 씁니다.</small>
 
               <div class="field-grid">
                 <label>
@@ -206,9 +208,10 @@
                     value="2"
                   />
                   <output name="poll-output">2</output>
+                  <span data-i18n="unit.seconds">초</span>
                 </label>
                 <label>
-                  <span data-i18n="field.staleAfter">오래됨 기준</span>
+                  <span data-i18n="field.staleAfter">오래됨</span>
                   <input
                     type="number"
                     name="stale_after_secs"
@@ -217,7 +220,8 @@
                     value="90"
                   />
                   <output name="stale-output">90</output>
-                  <small class="field-help" data-i18n="help.staleAfter">마지막 기록이 몇 초 지나면 오래됨으로 표시할지 정합니다.</small>
+                  <span data-i18n="unit.seconds">초</span>
+                  <small class="field-help" data-i18n="help.staleAfter">마지막 기록 후 오래됨 표시까지.</small>
                 </label>
               </div>
             </div>
@@ -295,6 +299,18 @@
               <details class="settings-advanced" data-settings-advanced="indicator">
                 <summary data-i18n="advanced.indicator">고급 조정</summary>
                 <div class="settings-advanced-grid">
+                  <label class="range-row">
+                    <span><span data-i18n="field.numberOutlineWidth">숫자 윤곽 두께</span> <output name="ring-number-outline-width-output">1.2</output>px</span>
+                    <input
+                      type="range"
+                      name="ring_number_outline_width_px"
+                      min="0"
+                      max="4"
+                      step="0.1"
+                      value="1.2"
+                    />
+                  </label>
+
                   <label class="range-row">
                     <span><span data-i18n="field.ringSize">원 크기</span> <output name="ring-size-output">36</output>px</span>
                     <input
@@ -404,11 +420,23 @@
               </label>
 
               <div class="button-row">
-                <button type="button" data-action="connect-statusline" data-i18n="action.connectClaude">Claude 연결</button>
                 <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
               </div>
 
               <p id="settings-status" class="settings-status"></p>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-section" data-settings-section="lab">
+            <legend data-i18n="section.lab">실험실</legend>
+            <div class="settings-section-grid">
+              <label class="toggle-row">
+                <input type="checkbox" name="claude_usage_auto_refresh_lab_on" />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.claudeUsageAutoRefresh">Claude /usage 자동 새로고침</span>
+                  <small class="field-help" data-i18n="help.claudeUsageAutoRefresh">수동 새로고침에서만 쓰던 Claude /usage 보조 조회를 수집주기에도 실행합니다.</small>
+                </span>
+              </label>
             </div>
           </fieldset>
 

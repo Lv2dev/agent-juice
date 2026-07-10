@@ -22,6 +22,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       ring_on: false,
       ring_numbers_on: false,
       ring_number_outline_on: true,
+      ring_number_outline_width_px: 1.4,
       ring_size_px: 34.5,
       ring_thickness_px: 6.5,
       ring_gap_px: 8.5,
@@ -39,11 +40,12 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       codex_taskbar_offset_ratio: 0.85,
       show_claude: false,
       show_codex: true,
+      claude_usage_auto_refresh_lab_on: true,
     }),
     {
       palette: "cvd",
-      warnThreshold: 60,
-      dangerThreshold: 92,
+      warnThreshold: 40,
+      dangerThreshold: 8,
       pollIntervalSecs: 4,
       staleAfterSecs: 100,
       barMode: "compact",
@@ -54,6 +56,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       ringOn: false,
       ringNumbersOn: false,
       ringNumberOutlineOn: true,
+      ringNumberOutlineWidthPx: 1.4,
       ringSizePx: 34.5,
       ringThicknessPx: 6.5,
       ringGapPx: 8.5,
@@ -70,6 +73,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       codexTaskbarOffsetRatio: 0.85,
       showClaude: false,
       showCodex: true,
+      claudeUsageAutoRefreshLabOn: true,
       customSafe: "#22c55e",
       customWarn: "#f59e0b",
       customDanger: "#ef4444",
@@ -89,8 +93,8 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
 test("payloadFromEntries creates save_settings input payload", () => {
   const payload = payloadFromEntries({
     palette: "custom",
-    warn_threshold: "72",
-    danger_threshold: "91",
+    warn_threshold: "28",
+    danger_threshold: "9",
     poll_interval_secs: "5",
     stale_after_secs: "80",
     bar_mode: "quad",
@@ -101,6 +105,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     ring_on: "on",
     ring_numbers_on: "on",
     ring_number_outline_on: "on",
+    ring_number_outline_width_px: "1.4",
     ring_size_px: "34.5",
     ring_thickness_px: "6.5",
     ring_gap_px: "8.5",
@@ -117,6 +122,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     codex_taskbar_offset_ratio: "0.75",
     show_claude: "on",
     show_codex: "on",
+    claude_usage_auto_refresh_lab_on: "on",
     custom_safe: "#112233",
     custom_warn: "#445566",
     custom_danger: "#778899",
@@ -136,6 +142,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     ring_on: true,
     ring_numbers_on: true,
     ring_number_outline_on: true,
+    ring_number_outline_width_px: 1.4,
     ring_size_px: 34.5,
     ring_thickness_px: 6.5,
     ring_gap_px: 8.5,
@@ -152,6 +159,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     codex_taskbar_offset_ratio: 0.75,
     show_claude: true,
     show_codex: true,
+    claude_usage_auto_refresh_lab_on: true,
     custom_safe: "#112233",
     custom_warn: "#445566",
     custom_danger: "#778899",
@@ -160,6 +168,8 @@ test("payloadFromEntries creates save_settings input payload", () => {
 
 test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).theme, "system");
+  assert.equal(formStateFromSettings({}).warnThreshold, 30);
+  assert.equal(formStateFromSettings({}).dangerThreshold, 10);
   assert.equal(formStateFromSettings({}).language, "system");
   assert.equal(formStateFromSettings({ language: "ko" }).language, "ko");
   assert.equal(formStateFromSettings({ language: "en" }).language, "en");
@@ -173,6 +183,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ limit_order: "unexpected" }).limitOrder, "primary_first");
   assert.equal(formStateFromSettings({}).ringNumbersOn, true);
   assert.equal(formStateFromSettings({}).ringNumberOutlineOn, true);
+  assert.equal(formStateFromSettings({}).ringNumberOutlineWidthPx, 1.2);
   assert.equal(formStateFromSettings({}).ringSizePx, 36);
   assert.equal(formStateFromSettings({}).ringThicknessPx, 4);
   assert.equal(formStateFromSettings({}).ringGapPx, 6);
@@ -187,6 +198,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ ring_gap_px: -1 }).ringGapPx, 2);
   assert.equal(formStateFromSettings({ ring_center_gap_px: 99 }).ringCenterGapPx, 8);
   assert.equal(formStateFromSettings({ ring_center_gap_px: -1 }).ringCenterGapPx, 0);
+  assert.equal(formStateFromSettings({ ring_number_outline_width_px: 99 }).ringNumberOutlineWidthPx, 4);
+  assert.equal(formStateFromSettings({ ring_number_outline_width_px: -1 }).ringNumberOutlineWidthPx, 0);
   assert.equal(formStateFromSettings({ ring_number_font_size_px: 99 }).ringNumberFontSizePx, 16);
   assert.equal(formStateFromSettings({ ring_number_font_weight: 999 }).ringNumberFontWeight, 900);
   assert.equal(formStateFromSettings({ bar_text_font_size_px: -1 }).barTextFontSizePx, 8);
@@ -197,8 +210,11 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ codex_taskbar_offset_ratio: -1 }).codexTaskbarOffsetRatio, 0);
   assert.equal(formStateFromSettings({}).showClaude, true);
   assert.equal(formStateFromSettings({}).showCodex, true);
+  assert.equal(formStateFromSettings({}).claudeUsageAutoRefreshLabOn, false);
 
   const payload = payloadFromEntries({
+    warn_threshold: "30",
+    danger_threshold: "10",
     theme: "unexpected",
     language: "unexpected",
     font_mode: "unexpected",
@@ -208,6 +224,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     ring_thickness_px: "99",
     ring_gap_px: "-1",
     ring_center_gap_px: "99",
+    ring_number_outline_width_px: "99",
     ring_number_font_size_px: "99",
     ring_number_font_weight: "999",
     bar_text_font_size_px: "-1",
@@ -217,6 +234,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   });
 
   assert.equal(payload.theme, "system");
+  assert.equal(payload.warn_threshold, 70);
+  assert.equal(payload.danger_threshold, 90);
   assert.equal(payload.language, "system");
   assert.equal(payload.font_mode, "system");
   assert.equal(payload.fullscreen_hide_on, false);
@@ -229,6 +248,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.ring_thickness_px, 10);
   assert.equal(payload.ring_gap_px, 2);
   assert.equal(payload.ring_center_gap_px, 8);
+  assert.equal(payload.ring_number_outline_width_px, 4);
   assert.equal(payload.ring_number_font_size_px, 16);
   assert.equal(payload.ring_number_font_weight, 900);
   assert.equal(payload.bar_text_font_size_px, 8);
@@ -237,5 +257,6 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.codex_taskbar_offset_ratio, 1);
   assert.equal(payload.show_claude, false);
   assert.equal(payload.show_codex, false);
+  assert.equal(payload.claude_usage_auto_refresh_lab_on, false);
   assert.equal("tool_gap_px" in payload, false);
 });

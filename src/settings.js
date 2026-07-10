@@ -8,6 +8,10 @@ const statusEl = document.querySelector("#settings-status");
 const customRow = document.querySelector("[data-custom-palette]");
 let autosaveTimer = null;
 let isHydrating = false;
+let hasLoadedSettings = false;
+let localRevision = 0;
+let savedRevision = 0;
+let saveQueue = Promise.resolve();
 
 function tauriApi() {
   return window.__TAURI__ ?? {};
@@ -63,6 +67,7 @@ function updateOutputs() {
     ["danger_threshold", "danger-output"],
     ["poll_interval_secs", "poll-output"],
     ["stale_after_secs", "stale-output"],
+    ["ring_number_outline_width_px", "ring-number-outline-width-output"],
     ["ring_size_px", "ring-size-output"],
     ["ring_thickness_px", "ring-thickness-output"],
     ["ring_gap_px", "ring-gap-output"],
@@ -103,6 +108,7 @@ function fillForm(settings) {
   setField("ring_on", state.ringOn);
   setField("ring_numbers_on", state.ringNumbersOn);
   setField("ring_number_outline_on", state.ringNumberOutlineOn);
+  setField("ring_number_outline_width_px", state.ringNumberOutlineWidthPx);
   setField("ring_size_px", state.ringSizePx);
   setField("ring_thickness_px", state.ringThicknessPx);
   setField("ring_gap_px", state.ringGapPx);
@@ -119,6 +125,7 @@ function fillForm(settings) {
   setField("codex_taskbar_offset_ratio", state.codexTaskbarOffsetRatio);
   setField("show_claude", state.showClaude);
   setField("show_codex", state.showCodex);
+  setField("claude_usage_auto_refresh_lab_on", state.claudeUsageAutoRefreshLabOn);
   setField("custom_safe", state.customSafe);
   setField("custom_warn", state.customWarn);
   setField("custom_danger", state.customDanger);
@@ -129,40 +136,48 @@ function fillForm(settings) {
   isHydrating = false;
 }
 
+function hydrateSettings(settings) {
+  fillForm(settings);
+  hasLoadedSettings = true;
+}
+
 async function loadSettings() {
   try {
     const settings = await invoke("get_settings");
-    fillForm(settings || {});
+    hydrateSettings(settings || {});
   } catch {
-    fillForm({});
+    hydrateSettings({});
   }
 }
 
-async function saveSettings() {
-  const input = payloadFromEntries(new FormData(form));
+async function saveSettings(input, revision) {
   const saved = await invoke("save_settings", { input });
+  if (revision !== localRevision) return;
+
   const next = saved || input;
+  savedRevision = revision;
   window.dispatchEvent(new CustomEvent("settings-updated", { detail: next }));
   fillForm(next);
   setStatus(t("status.saved", next));
 }
 
 function scheduleAutosave() {
-  if (isHydrating) return;
+  if (isHydrating || !hasLoadedSettings) return;
+  localRevision += 1;
   updateOutputs();
   setStatus(t("status.saving", currentLanguageSettings()));
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(() => {
-    saveSettings().catch((error) => setStatus(String(error)));
+    const revision = localRevision;
+    const input = payloadFromEntries(new FormData(form));
+    saveQueue = saveQueue.catch(() => {}).then(() => saveSettings(input, revision));
+    saveQueue.catch((error) => {
+      if (revision === localRevision) setStatus(String(error));
+    });
   }, 120);
 }
 
 async function runAction(action) {
-  if (action === "connect-statusline") {
-    await invoke("install_statusline");
-    setStatus(t("status.connected", currentLanguageSettings()));
-  }
-
   if (action === "restore-statusline") {
     await invoke("restore_statusline");
     setStatus(t("status.restored", currentLanguageSettings()));
@@ -175,8 +190,12 @@ async function bindSettingsUpdates() {
 
   try {
     await listen("settings-updated", (event) => {
-      if (event.payload && typeof event.payload === "object") {
-        fillForm(event.payload);
+      if (
+        localRevision === savedRevision &&
+        event.payload &&
+        typeof event.payload === "object"
+      ) {
+        hydrateSettings(event.payload);
       }
     });
   } catch {

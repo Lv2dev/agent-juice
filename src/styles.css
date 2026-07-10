@@ -428,11 +428,11 @@ h2 {
 }
 
 .claude-dot {
-  background: var(--accent);
+  background: #b7833a;
 }
 
 .codex-dot {
-  background: var(--accent);
+  background: #4f8a73;
 }
 
 .tool-card[data-state="live"] .tool-dot {
@@ -549,8 +549,14 @@ h2 {
   --ring-gap: 6px;
   --ring-center-gap: 0px;
   --ring-visible-thickness: max(1px, calc(var(--ring-thickness) - var(--ring-center-gap)));
+  --ring-svg-stroke: 11.1;
+  --outer-radius: 44.4;
+  --inner-radius: 27.8;
+  --ring-number-y-offset: 0.04em;
   --ring-number-font-size: 9px;
   --ring-number-font-weight: 600;
+  --ring-number-outline-width: 1.2px;
+  --ring-number-outline-color: rgba(255, 255, 255, 0.86);
   --bar-text-font-size: 11px;
   --bar-text-font-weight: 500;
   position: relative;
@@ -612,9 +618,11 @@ h2 {
 .bar-tool {
   --primary-color: var(--unknown);
   --primary-arc: 0deg;
+  --primary-dash: 0;
   --primary-percent: 0%;
   --secondary-color: var(--unknown);
   --secondary-arc: 0deg;
+  --secondary-dash: 0;
   --secondary-percent: 0%;
   --tool-brand: var(--accent);
   min-width: 0;
@@ -631,11 +639,11 @@ h2 {
 }
 
 .bar-tool[data-tool="claude"] {
-  --tool-brand: #c77b5a;
+  --tool-brand: #b7833a;
 }
 
 .bar-tool[data-tool="codex"] {
-  --tool-brand: #22c55e;
+  --tool-brand: #4f8a73;
 }
 
 .bar-tool[data-state="stale"],
@@ -652,48 +660,87 @@ h2 {
   place-items: center;
 }
 
-.outer-ring {
+.ring-svg {
   position: absolute;
   inset: 0;
-  border-radius: 999px;
-  background: conic-gradient(
-    var(--primary-color) 0 var(--primary-arc),
-    color-mix(in srgb, var(--text-faint) 26%, transparent) 0
-  );
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
-  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
-  box-shadow: none;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  shape-rendering: geometricPrecision;
+  transform: rotate(-90deg);
 }
 
-.outer-ring::after {
-  display: none;
-}
-
-.inner-ring {
+.quad-svg {
   position: absolute;
-  inset: var(--ring-gap);
-  border-radius: 999px;
-  background: conic-gradient(
-    var(--secondary-color) 0 var(--secondary-arc),
-    color-mix(in srgb, var(--text-faint) 26%, transparent) 0
-  );
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
-  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  shape-rendering: geometricPrecision;
+  transform: rotate(-90deg);
 }
 
-.inner-ring::after {
-  display: none;
+.ring-track {
+  --ring-radius: var(--outer-radius);
+  --ring-color: var(--unknown);
+  --ring-dash: 0;
+  r: var(--ring-radius);
+  fill: none;
+  stroke-width: var(--ring-svg-stroke);
+}
+
+.ring-track {
+  stroke: color-mix(in srgb, var(--tool-brand) 18%, var(--text-faint));
+}
+
+.ring-arc {
+  --ring-radius: var(--outer-radius);
+  --ring-color: var(--unknown);
+  --ring-dash: 0;
+  r: var(--ring-radius);
+  fill: none;
+  stroke-width: var(--ring-svg-stroke);
+  stroke: var(--ring-color);
+  stroke-linecap: round;
+  stroke-dasharray: var(--ring-dash) 100;
+  stroke-dashoffset: 0;
+}
+
+.outer-arc,
+.outer-track {
+  --ring-radius: var(--outer-radius);
+}
+
+.inner-arc,
+.inner-track {
+  --ring-radius: var(--inner-radius);
+}
+
+.outer-arc {
+  --ring-radius: var(--outer-radius);
+  --ring-color: var(--primary-color);
+  --ring-dash: var(--primary-dash);
+}
+
+.inner-arc {
+  --ring-radius: var(--inner-radius);
+  --ring-color: var(--secondary-color);
+  --ring-dash: var(--secondary-dash);
 }
 
 .bar-worst {
-  position: relative;
+  position: absolute;
+  inset: 0;
   z-index: 1;
-  min-width: 18px;
+  display: grid;
+  place-items: center;
   color: var(--text);
   font-size: var(--ring-number-font-size);
   line-height: 1;
   font-weight: var(--ring-number-font-weight);
   text-align: center;
+  text-rendering: geometricPrecision;
+  transform: translateY(var(--ring-number-y-offset));
 }
 
 .bar-quad {
@@ -709,6 +756,7 @@ h2 {
 .quad-ring {
   --quad-color: var(--unknown);
   --quad-arc: 0deg;
+  --quad-dash: 0;
   position: relative;
   display: grid;
   place-items: center;
@@ -718,23 +766,20 @@ h2 {
   border-radius: 999px;
 }
 
-.quad-ring::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: conic-gradient(
-    var(--quad-color) 0 var(--quad-arc),
-    color-mix(in srgb, var(--text-faint) 26%, transparent) 0
-  );
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
-  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ring-visible-thickness)), #000 0);
+.quad-track,
+.quad-arc {
+  --ring-radius: var(--outer-radius);
+}
+
+.quad-arc {
+  --ring-color: var(--quad-color);
+  --ring-dash: var(--quad-dash);
 }
 
 .quad-number {
-  position: relative;
+  position: absolute;
+  inset: 0;
   z-index: 1;
-  min-width: 18px;
   display: grid;
   place-items: center;
   color: var(--text);
@@ -742,16 +787,20 @@ h2 {
   line-height: 1;
   font-weight: var(--ring-number-font-weight);
   text-align: center;
+  text-rendering: geometricPrecision;
+  transform: translateY(var(--ring-number-y-offset));
 }
 
 .quad-primary {
   --quad-color: var(--primary-color);
   --quad-arc: var(--primary-arc);
+  --quad-dash: var(--primary-dash);
 }
 
 .quad-secondary {
   --quad-color: var(--secondary-color);
   --quad-arc: var(--secondary-arc);
+  --quad-dash: var(--secondary-dash);
 }
 
 .bar-bars {
@@ -808,7 +857,7 @@ h2 {
 }
 
 .bar-tool-name {
-  color: var(--text);
+  color: color-mix(in srgb, var(--tool-brand) 78%, var(--text));
   font-size: var(--bar-text-font-size);
   font-weight: var(--bar-text-font-weight);
 }
@@ -842,8 +891,16 @@ h2 {
 
 .bar-shell[data-number-outline="on"] .bar-worst,
 .bar-shell[data-number-outline="on"] .quad-number {
-  -webkit-text-stroke: 2px rgba(255, 255, 255, 0.82);
-  paint-order: stroke fill;
+  -webkit-font-smoothing: antialiased;
+  text-shadow:
+    0 var(--ring-number-outline-width) 0 var(--ring-number-outline-color),
+    0 calc(var(--ring-number-outline-width) * -1) 0 var(--ring-number-outline-color),
+    var(--ring-number-outline-width) 0 0 var(--ring-number-outline-color),
+    calc(var(--ring-number-outline-width) * -1) 0 0 var(--ring-number-outline-color),
+    var(--ring-number-outline-width) var(--ring-number-outline-width) 0 var(--ring-number-outline-color),
+    calc(var(--ring-number-outline-width) * -1) calc(var(--ring-number-outline-width) * -1) 0 var(--ring-number-outline-color),
+    calc(var(--ring-number-outline-width) * -1) var(--ring-number-outline-width) 0 var(--ring-number-outline-color),
+    var(--ring-number-outline-width) calc(var(--ring-number-outline-width) * -1) 0 var(--ring-number-outline-color);
 }
 
 .bar-shell[data-mode="full"] .bar-copy {
@@ -1111,7 +1168,7 @@ h2 {
 
 .field-row label,
 .range-row span,
-.toggle-row span,
+.toggle-row > span:not(.toggle-copy),
 .field-grid span,
 .swatch-row span,
 .settings-section legend {
@@ -1171,6 +1228,29 @@ input[type="number"] {
   color: var(--text-muted);
   font-size: 10.5px;
   line-height: 1.35;
+}
+
+.toggle-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  order: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.toggle-copy .field-help {
+  grid-column: auto;
+  width: auto;
+  margin-top: 0;
+  font-weight: 500;
+}
+
+.toggle-title {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 740;
 }
 
 input[type="range"] {
@@ -1237,7 +1317,7 @@ input[type="checkbox"]:checked::before {
   background: var(--toggle-knob-on);
 }
 
-.toggle-row span {
+.toggle-row > span:not(.toggle-copy) {
   order: 1;
 }
 

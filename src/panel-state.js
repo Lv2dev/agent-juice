@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS = {
   show_codex: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
+  ring_number_outline_width_px: 1.2,
   fullscreen_hide_on: true,
   indicator_style: "ring",
   ring_size_px: 36,

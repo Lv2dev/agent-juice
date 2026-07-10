@@ -27,6 +27,7 @@ function readOptional(path) {
   return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";
 }
 
+const readme = readOptional(resolve(here, "../README.md"));
 const pushAllowlist = readOptional(resolve(here, "../.ai/scripts/verify-git-push-allowlist.ps1"));
 const releaseVerifier = readOptional(resolve(here, "../.ai/scripts/verify-release-installer.ps1"));
 const taskbarMoveVerifier = readOptional(resolve(here, "../.ai/scripts/verify-taskbar-native-move.ps1"));
@@ -82,9 +83,9 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.doesNotMatch(hover, /var\(--tool-color\)/);
   assert.doesNotMatch(hover, /var\(--tool-glow\)/);
   assert.match(dot, /var\(--accent\)/);
-  assert.doesNotMatch(claudeDot, /accent-warm/);
-  assert.match(claudeDot, /var\(--accent\)/);
-  assert.match(codexDot, /var\(--accent\)/);
+  assert.match(claudeDot, /#b7833a/);
+  assert.match(codexDot, /#4f8a73/);
+  assert.notEqual(claudeDot, codexDot);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
 });
@@ -144,7 +145,8 @@ test("language selection is wired through settings and renderer translations", (
   assert.match(settingsJs, /applyTranslations/);
   assert.match(panelJs, /applyTranslations/);
   assert.match(i18nJs, /resolveLanguage/);
-  assert.match(i18nJs, /Connect Claude, then use Claude once on this PC/);
+  assert.match(i18nJs, /Run Juice, then use Claude once on this PC/);
+  assert.doesNotMatch(i18nJs, /Connect Claude, then use Claude once on this PC/);
 });
 
 test("styles keep the AppBar contract stable", () => {
@@ -351,33 +353,70 @@ test("taskbar overlay implements the four documented bar display modes", () => {
 test("dual ring center number stays inside the ring hole", () => {
   const ring = cssBlock('.bar-shell[data-mode="dual"] .bar-ring');
   const worst = cssBlock(".bar-worst");
-  const outer = cssBlock(".outer-ring");
-  const inner = cssBlock(".inner-ring");
+  const svg = cssBlock(".ring-svg");
+  const track = cssBlock(".ring-track");
+  const arc = cssBlock(".ring-arc");
+  const outerArc = cssBlock(".outer-arc");
+  const innerArc = cssBlock(".inner-arc");
   const quadRing = cssBlock(".quad-ring");
-  const quadRingBefore = cssBlock(".quad-ring::before");
+  const quadSvg = cssBlock(".quad-svg");
   const quadNumber = cssBlock(".quad-number");
   const shell = cssBlock(".bar-shell");
 
   assert.match(shell, /--ring-center-gap: 0px/);
   assert.match(shell, /--ring-visible-thickness:/);
+  assert.match(shell, /--ring-svg-stroke:/);
+  assert.match(shell, /--outer-radius:/);
+  assert.match(shell, /--inner-radius:/);
   assert.match(ring, /width: var\(--ring-size\)/);
   assert.match(ring, /height: var\(--ring-size\)/);
   assert.match(ring, /flex-basis: var\(--ring-size\)/);
-  assert.match(outer, /var\(--ring-visible-thickness\)/);
-  assert.match(inner, /inset: var\(--ring-gap\)/);
-  assert.match(inner, /var\(--ring-visible-thickness\)/);
+  assert.match(svg, /position: absolute/);
+  assert.match(svg, /overflow: visible/);
+  assert.match(svg, /shape-rendering: geometricPrecision/);
+  assert.match(track, /stroke-width: var\(--ring-svg-stroke\)/);
+  assert.match(arc, /stroke-linecap: round/);
+  assert.match(arc, /stroke-dasharray: var\(--ring-dash\) 100/);
+  assert.match(outerArc, /--ring-radius: var\(--outer-radius\)/);
+  assert.match(innerArc, /--ring-radius: var\(--inner-radius\)/);
   assert.match(quadRing, /width: var\(--ring-size\)/);
   assert.match(quadRing, /height: var\(--ring-size\)/);
   assert.match(quadRing, /position: relative/);
-  assert.match(quadRingBefore, /position: absolute/);
-  assert.match(quadRingBefore, /var\(--ring-visible-thickness\)/);
+  assert.match(quadSvg, /position: absolute/);
   assert.match(quadNumber, /place-items: center/);
+  assert.match(quadNumber, /inset: 0/);
+  assert.match(quadNumber, /transform: translateY/);
   assert.match(quadNumber, /font-size: var\(--ring-number-font-size\)/);
   assert.match(quadNumber, /font-weight: var\(--ring-number-font-weight\)/);
   assert.match(worst, /font-size: var\(--ring-number-font-size\)/);
   assert.match(worst, /font-weight: var\(--ring-number-font-weight\)/);
-  assert.match(worst, /min-width: 18px/);
+  assert.match(worst, /inset: 0/);
+  assert.match(worst, /display: grid/);
+  assert.match(worst, /place-items: center/);
+  assert.match(worst, /transform: translateY/);
   assert.match(worst, /text-align: center/);
+});
+
+test("taskbar ring markup uses SVG strokes instead of masked conic gradients", () => {
+  assert.match(barMarkup, /class="ring-svg"/);
+  assert.match(barMarkup, /class="ring-track outer-track"/);
+  assert.match(barMarkup, /class="ring-arc outer-arc"/);
+  assert.match(barMarkup, /class="quad-svg"/);
+  assert.match(barMarkup, /class="ring-arc quad-arc"/);
+  assert.doesNotMatch(cssBlock(".outer-ring"), /conic-gradient/);
+  assert.doesNotMatch(cssBlock(".inner-ring"), /conic-gradient/);
+  assert.equal(cssBlock(".quad-ring::before"), "");
+  assert.doesNotMatch(css, /-webkit-mask: radial-gradient/);
+  assert.doesNotMatch(css, /mask: radial-gradient/);
+});
+
+test("taskbar SVG ring strokes scale with the viewBox instead of screen pixels", () => {
+  const track = cssBlock(".ring-track");
+  const arc = cssBlock(".ring-arc");
+
+  assert.match(track, /stroke-width: var\(--ring-svg-stroke\)/);
+  assert.match(arc, /stroke-width: var\(--ring-svg-stroke\)/);
+  assert.doesNotMatch(`${track}\n${arc}`, /vector-effect:\s*non-scaling-stroke/);
 });
 
 test("taskbar ring number visibility and outline are configurable", () => {
@@ -395,6 +434,7 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(rustConfig, /limit_order/);
   assert.match(panelMarkup, /name="ring_numbers_on"/);
   assert.match(panelMarkup, /name="ring_number_outline_on"/);
+  assert.match(panelMarkup, /name="ring_number_outline_width_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_thickness_px"/);
   assert.match(panelMarkup, /name="ring_thickness_px"[\s\S]*?step="0\.1"/);
@@ -407,10 +447,12 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="ring_number_font_weight"/);
   assert.match(panelMarkup, /name="bar_text_font_weight"/);
   assert.match(rustConfig, /ring_center_gap_px/);
+  assert.match(rustConfig, /ring_number_outline_width_px/);
   assert.match(numbersOff, /display: none/);
-  assert.match(outlineOn, /-webkit-text-stroke:/);
-  assert.match(outlineOn, /paint-order: stroke fill/);
-  assert.doesNotMatch(outlineOn, /text-shadow:/);
+  assert.match(outlineOn, /text-shadow:/);
+  assert.match(outlineOn, /var\(--ring-number-outline-width\)/);
+  assert.doesNotMatch(outlineOn, /-webkit-text-stroke:/);
+  assert.doesNotMatch(outlineOn, /paint-order:/);
 });
 
 test("taskbar indicator can switch from rings to stacked horizontal bars", () => {
@@ -451,7 +493,7 @@ test("taskbar overlay only shows a move outline while dragging", () => {
   assert.match(dragging || rootDragging, /outline:/);
 });
 
-test("taskbar overlay has no blur, filter, text shadow, transition, or animation effects", () => {
+test("taskbar overlay base has no blur, filter, text shadow, transition, or animation effects", () => {
   const windowBlock = cssBlock(".bar-window");
   const shell = cssBlock(".bar-shell");
   const tool = cssBlock(".bar-tool");
@@ -459,9 +501,13 @@ test("taskbar overlay has no blur, filter, text shadow, transition, or animation
   const ring = cssBlock(".bar-ring");
   const quad = cssBlock(".bar-quad");
   const quadRing = cssBlock(".quad-ring");
-  const quadRingBefore = cssBlock(".quad-ring::before");
+  const ringSvg = cssBlock(".ring-svg");
+  const ringTrack = cssBlock(".ring-track");
+  const ringArc = cssBlock(".ring-arc");
+  const quadSvg = cssBlock(".quad-svg");
   const quadNumber = cssBlock(".quad-number");
   const worst = cssBlock(".bar-worst");
+  const outlineOn = cssBlock('.bar-shell[data-number-outline="on"] .bar-worst,\n.bar-shell[data-number-outline="on"] .quad-number');
   const barBlocks = [
     windowBlock,
     shell,
@@ -470,7 +516,10 @@ test("taskbar overlay has no blur, filter, text shadow, transition, or animation
     ring,
     quad,
     quadRing,
-    quadRingBefore,
+    ringSvg,
+    ringTrack,
+    ringArc,
+    quadSvg,
     quadNumber,
     worst,
   ].join("\n");
@@ -479,6 +528,7 @@ test("taskbar overlay has no blur, filter, text shadow, transition, or animation
   assert.doesNotMatch(barBlocks, /-webkit-backdrop-filter:/);
   assert.doesNotMatch(barBlocks, /filter:/);
   assert.doesNotMatch(barBlocks, /text-shadow:/);
+  assert.match(outlineOn, /text-shadow:/);
   assert.doesNotMatch(shell, /animation:/);
   assert.doesNotMatch(tool, /transition:/);
   assert.doesNotMatch(liveRing, /animation:/);
@@ -515,7 +565,9 @@ test("settings controls have modern glassy native-control replacements", () => {
   const checkedToggle = cssBlock('input[type="checkbox"]:checked');
   const checkedToggleKnob = cssBlock('input[type="checkbox"]:checked::before');
   const toggleInput = cssBlock('.toggle-row input[type="checkbox"]');
-  const toggleSpan = cssBlock(".toggle-row span");
+  const toggleSpan = cssBlock(".toggle-row > span:not(.toggle-copy)");
+  const toggleCopy = cssBlock(".toggle-copy");
+  const toggleTitle = cssBlock(".toggle-title");
   const advanced = cssBlock(".settings-advanced");
   const advancedSummary = cssBlock(".settings-advanced summary");
   const advancedGrid = cssBlock(".settings-advanced-grid");
@@ -587,6 +639,10 @@ test("settings controls have modern glassy native-control replacements", () => {
   assert.match(checkedToggleKnob, /background: var\(--toggle-knob-on\)/);
   assert.match(toggleInput, /order: 2/);
   assert.match(toggleSpan, /order: 1/);
+  assert.match(toggleCopy, /order: 1/);
+  assert.match(toggleCopy, /flex-direction: column/);
+  assert.match(toggleCopy, /align-items: flex-start/);
+  assert.match(toggleTitle, /font-weight: 740/);
   assert.match(advanced, /grid-column:\s*1 \/ -1/);
   assert.match(advanced, /border-top:/);
   assert.doesNotMatch(advanced, /background:/);
@@ -607,20 +663,23 @@ test("settings form groups controls into logical sections without changing field
   ].map((match) => match[1]);
   const indicatorSection = markupSection("indicator");
 
-  assert.deepEqual(sections, ["appearance", "limits", "taskbar", "indicator", "system"]);
+  assert.deepEqual(sections, ["appearance", "limits", "taskbar", "indicator", "system", "lab"]);
   assert.match(panelMarkup, /<details class="settings-card" open>/);
 
   assert.match(markupSection("appearance"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="palette"/);
   assert.match(markupSection("limits"), /name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"/);
+  assert.match(markupSection("limits"), /data-i18n="field\.remainingWarning"[\s\S]*data-i18n="field\.remainingDanger"[\s\S]*data-i18n="help\.remainingThresholds"/);
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
   assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"[\s\S]*<details class="settings-advanced" data-settings-advanced="indicator">/);
   assert.doesNotMatch(indicatorSection, /<details class="settings-advanced"[^>]*open/);
   assert.match(indicatorSection, /<summary data-i18n="advanced\.indicator">고급 조정<\/summary>/);
-  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
+  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_number_outline_width_px"[\s\S]*name="ring_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
   assert.match(markupSection("system"), /name="autostart_on"[\s\S]*data-action="restore-statusline"[\s\S]*id="settings-status"/);
+  assert.match(markupSection("lab"), /name="claude_usage_auto_refresh_lab_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
+  assert.match(settingsJs, /setField\("claude_usage_auto_refresh_lab_on", state\.claudeUsageAutoRefreshLabOn\)/);
 });
 
 test("public README and release template are the only tracked markdown exceptions", (t) => {
@@ -633,19 +692,38 @@ test("public README and release template are the only tracked markdown exception
   assert.match(pushAllowlist, /\.github\/RELEASE_TEMPLATE\.md/);
   assert.match(pushAllowlist, /'\\\.md\$'/);
   assert.match(pushAllowlist, /\^\\.ai\//);
+  assert.doesNotMatch(readme, /Claude 연결/);
+  assert.doesNotMatch(readme, /Connect Claude/);
+  assert.match(readme, /Claude는 설치본 실행 시 자동 연결을 시도합니다/);
+  assert.match(readme, /the installed app attempts to connect automatically/);
 });
 
-test("settings copy uses accurate collection timing labels and exposes Claude connect action", () => {
+test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {
+  const limitsSection = markupSection("limits");
+
   assert.match(panelMarkup, />수집주기</);
-  assert.match(panelMarkup, />오래됨 기준</);
+  assert.match(panelMarkup, />오래됨</);
+  assert.doesNotMatch(panelMarkup, />오래됨 기준</);
+  assert.match(panelMarkup, />잔여량 경고</);
+  assert.match(panelMarkup, />잔여량 위험</);
+  assert.match(panelMarkup, /data-i18n="help.remainingThresholds"/);
+  assert.match(i18nJs, /작업표시줄은 남은 사용량을 표시하므로/);
+  assert.match(limitsSection, /name="poll-output">2<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
+  assert.match(limitsSection, /name="stale-output">90<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
-  assert.match(i18nJs, /마지막 기록이 몇 초 지나면 오래됨으로 표시할지/);
+  assert.match(i18nJs, /마지막 기록 후 오래됨 표시까지/);
+  assert.doesNotMatch(i18nJs, /마지막 기록이 몇 초 지나면 오래됨으로 표시할지/);
+  assert.match(i18nJs, /"unit\.seconds": "초"/);
   assert.doesNotMatch(panelMarkup, />신선도</);
   assert.doesNotMatch(panelMarkup, /data-action="install-statusline"/);
-  assert.match(panelMarkup, /data-action="connect-statusline"/);
-  assert.match(panelMarkup, />Claude 연결</);
+  assert.doesNotMatch(panelMarkup, /data-action="connect-statusline"/);
+  assert.doesNotMatch(panelMarkup, />Claude 연결</);
+  assert.doesNotMatch(i18nJs, /action\.connectClaude/);
   assert.match(panelMarkup, /data-action="restore-statusline"/);
-  assert.match(settingsJs, /install_statusline/);
+  assert.doesNotMatch(settingsJs, /install_statusline/);
+  assert.match(panelMarkup, /data-settings-section="lab"/);
+  assert.match(i18nJs, /"section\.lab": "실험실"/);
+  assert.match(i18nJs, /Claude \/usage 자동 새로고침/);
 });
 
 test("taskbar bar right click exposes a visible refresh action", () => {
@@ -784,5 +862,5 @@ test("status refresh is available from panel and taskbar bars and periodic loop 
 
 test("taskbar movement is persisted only by the native drag loop final save", () => {
   assert.doesNotMatch(rustLib, /WindowEvent::Moved/);
-  assert.match(rustLib, /save_taskbar_offset_ratio\(&app, tool, ratio\)/);
+  assert.match(rustLib, /save_taskbar_drag_target\(&app, tool, &monitor_key, ratio\)/);
 });

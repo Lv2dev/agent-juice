@@ -124,9 +124,11 @@ function orderedLimits(vm, limitOrder) {
 function setDisplayLimitVars(scope, first, second) {
   scope.style?.setProperty("--primary-color", first.color);
   scope.style?.setProperty("--primary-arc", first.arc);
+  scope.style?.setProperty("--primary-dash", first.dash);
   scope.style?.setProperty("--primary-percent", `${first.percent ?? 0}%`);
   scope.style?.setProperty("--secondary-color", second.color);
   scope.style?.setProperty("--secondary-arc", second.arc);
+  scope.style?.setProperty("--secondary-dash", second.dash);
   scope.style?.setProperty("--secondary-percent", `${second.percent ?? 0}%`);
 }
 
@@ -177,10 +179,14 @@ function renderBar() {
   root.dataset.ring = vm.ringOn ? "on" : "off";
   root.dataset.ringNumbers = vm.ringNumbersOn ? "on" : "off";
   root.dataset.numberOutline = vm.ringNumberOutlineOn ? "on" : "off";
+  root.style?.setProperty("--ring-number-outline-width", `${vm.ringNumberOutlineWidthPx}px`);
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);
   root.style?.setProperty("--ring-thickness", `${vm.ringThicknessPx}px`);
   root.style?.setProperty("--ring-gap", `${vm.ringGapPx}px`);
   root.style?.setProperty("--ring-center-gap", `${vm.ringCenterGapPx}px`);
+  root.style?.setProperty("--ring-svg-stroke", vm.ringSvgStroke);
+  root.style?.setProperty("--outer-radius", vm.outerRadius);
+  root.style?.setProperty("--inner-radius", vm.innerRadius);
   root.style?.setProperty("--ring-number-font-size", `${vm.ringNumberFontSizePx}px`);
   root.style?.setProperty("--ring-number-font-weight", String(vm.ringNumberFontWeight));
   root.style?.setProperty("--bar-text-font-size", `${vm.barTextFontSizePx}px`);
