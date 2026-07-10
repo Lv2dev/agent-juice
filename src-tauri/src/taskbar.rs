@@ -22,6 +22,14 @@ pub struct DockRect {
     pub height: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskbarTarget {
+    pub key: String,
+    pub rect: DockRect,
+    pub monitor: DockRect,
+    pub primary: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowCoverageCandidate {
     pub hwnd: isize,
@@ -34,12 +42,16 @@ pub struct WindowCoverageCandidate {
 }
 
 #[cfg(windows)]
+#[derive(Clone)]
 pub struct ShellTaskbarWindow {
     pub hwnd: HWND,
     pub left: i32,
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
+    pub monitor: DockRect,
+    pub key: String,
+    pub primary: bool,
 }
 
 #[cfg(windows)]
@@ -89,8 +101,10 @@ pub fn rect_covers_work_area_without_covering_monitor(
 }
 
 pub fn window_coverage_is_ignored(class_name: &str, title: &str) -> bool {
-    matches!(class_name, "Progman" | "WorkerW" | "Shell_TrayWnd")
-        || (class_name == "CEF-OSC-WIDGET" && title == "NVIDIA GeForce Overlay")
+    matches!(
+        class_name,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    ) || (class_name == "CEF-OSC-WIDGET" && title == "NVIDIA GeForce Overlay")
 }
 
 pub fn visible_window_coverage(
@@ -501,6 +515,62 @@ fn offset_ratio_for_axis(
     Some(ratio_for_offset(offset, max_offset))
 }
 
+pub fn taskbar_monitor_key(monitor: DockRect) -> String {
+    format!(
+        "monitor:{},{},{},{}",
+        monitor.x, monitor.y, monitor.width, monitor.height
+    )
+}
+
+pub fn dock_rect_for_taskbar_target(
+    target: &TaskbarTarget,
+    desired_width: i32,
+    offset_ratio: f32,
+) -> Option<DockRect> {
+    dock_rect_for_taskbar_at_offset(
+        target.rect.x,
+        target.rect.y,
+        target.rect.x.checked_add(target.rect.width)?,
+        target.rect.y.checked_add(target.rect.height)?,
+        desired_width,
+        offset_ratio,
+    )
+}
+
+pub fn taskbar_target_by_key_or_primary<'a>(
+    targets: &'a [TaskbarTarget],
+    preferred_key: &str,
+) -> Option<&'a TaskbarTarget> {
+    targets
+        .iter()
+        .find(|target| !preferred_key.is_empty() && target.key == preferred_key)
+        .or_else(|| targets.iter().find(|target| target.primary))
+        .or_else(|| targets.first())
+}
+
+pub fn taskbar_target_for_point_or_key<'a>(
+    targets: &'a [TaskbarTarget],
+    point: (i32, i32),
+    preferred_key: &str,
+) -> Option<&'a TaskbarTarget> {
+    targets
+        .iter()
+        .find(|target| point_inside_dock_rect(target.monitor, point))
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| point_inside_dock_rect(target.rect, point))
+        })
+        .or_else(|| taskbar_target_by_key_or_primary(targets, preferred_key))
+}
+
+fn point_inside_dock_rect(rect: DockRect, point: (i32, i32)) -> bool {
+    point.0 >= rect.x
+        && point.0 < rect.x.saturating_add(rect.width)
+        && point.1 >= rect.y
+        && point.1 < rect.y.saturating_add(rect.height)
+}
+
 fn is_horizontal_taskbar(taskbar_width: i32, taskbar_height: i32) -> bool {
     taskbar_width >= taskbar_height
 }
@@ -509,27 +579,20 @@ fn is_horizontal_taskbar(taskbar_width: i32, taskbar_height: i32) -> bool {
 pub fn shell_taskbar_window() -> anyhow::Result<ShellTaskbarWindow> {
     unsafe {
         let hwnd = FindWindowW(w!("Shell_TrayWnd"), None)?;
-        let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect)?;
-        Ok(ShellTaskbarWindow {
-            hwnd,
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        })
+        shell_taskbar_window_from_hwnd(hwnd, true)
     }
 }
 
 #[cfg(windows)]
-pub fn shell_taskbar_monitor_rect() -> anyhow::Result<DockRect> {
+fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<ShellTaskbarWindow> {
     unsafe {
-        let taskbar = shell_taskbar_window()?;
-        let monitor = MonitorFromWindow(taskbar.hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect)?;
+
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if monitor.0.is_null() {
             return Err(anyhow::anyhow!("no monitor for Shell_TrayWnd"));
         }
-
         let mut monitor_info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -538,9 +601,71 @@ pub fn shell_taskbar_monitor_rect() -> anyhow::Result<DockRect> {
             return Err(anyhow::anyhow!("failed to read Shell_TrayWnd monitor"));
         }
 
-        rect_to_dock(monitor_info.rcMonitor)
-            .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd monitor rectangle"))
+        let monitor = rect_to_dock(monitor_info.rcMonitor)
+            .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd monitor rectangle"))?;
+        Ok(ShellTaskbarWindow {
+            hwnd,
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            monitor,
+            key: taskbar_monitor_key(monitor),
+            primary,
+        })
     }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn collect_shell_taskbar_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let class_name = window_class_name(hwnd);
+    if class_name != "Shell_TrayWnd" && class_name != "Shell_SecondaryTrayWnd" {
+        return BOOL(1);
+    }
+
+    let taskbars = &mut *(lparam.0 as *mut Vec<ShellTaskbarWindow>);
+    if taskbars.iter().any(|taskbar| taskbar.hwnd == hwnd) {
+        return BOOL(1);
+    }
+
+    if let Ok(taskbar) = shell_taskbar_window_from_hwnd(hwnd, class_name == "Shell_TrayWnd") {
+        taskbars.push(taskbar);
+    }
+    BOOL(1)
+}
+
+#[cfg(windows)]
+pub fn shell_taskbar_windows() -> anyhow::Result<Vec<ShellTaskbarWindow>> {
+    let mut taskbars = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(collect_shell_taskbar_window),
+            LPARAM(&mut taskbars as *mut _ as isize),
+        );
+    }
+
+    if taskbars.is_empty() {
+        taskbars.push(shell_taskbar_window()?);
+    }
+    taskbars.sort_by_key(|taskbar| (!taskbar.primary, taskbar.left, taskbar.top));
+    Ok(taskbars)
+}
+
+#[cfg(windows)]
+pub fn shell_taskbar_window_for_key(preferred_key: &str) -> anyhow::Result<ShellTaskbarWindow> {
+    let taskbars = shell_taskbar_windows()?;
+    taskbars
+        .iter()
+        .find(|taskbar| !preferred_key.is_empty() && taskbar.key == preferred_key)
+        .or_else(|| taskbars.iter().find(|taskbar| taskbar.primary))
+        .or_else(|| taskbars.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no shell taskbar windows found"))
+}
+
+#[cfg(windows)]
+pub fn shell_taskbar_monitor_rect() -> anyhow::Result<DockRect> {
+    Ok(shell_taskbar_window()?.monitor)
 }
 
 #[cfg(windows)]
@@ -600,4 +725,63 @@ pub fn shell_taskbar_drag_rect_at_point(
         (grab_offset_x, grab_offset_y),
     )
     .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd rectangle"))
+}
+
+#[cfg(windows)]
+pub fn shell_taskbar_drag_rect_at_point_for_key(
+    desired_width: i32,
+    pointer_screen_x: i32,
+    pointer_screen_y: i32,
+    grab_offset_x: i32,
+    grab_offset_y: i32,
+    preferred_key: &str,
+) -> anyhow::Result<(ShellTaskbarWindow, DockRect, f32)> {
+    let taskbars = shell_taskbar_windows()?;
+    let targets = taskbars
+        .iter()
+        .filter_map(|taskbar| {
+            Some(TaskbarTarget {
+                key: taskbar.key.clone(),
+                rect: DockRect {
+                    x: taskbar.left,
+                    y: taskbar.top,
+                    width: taskbar.right.checked_sub(taskbar.left)?,
+                    height: taskbar.bottom.checked_sub(taskbar.top)?,
+                },
+                monitor: taskbar.monitor,
+                primary: taskbar.primary,
+            })
+        })
+        .collect::<Vec<_>>();
+    let target = taskbar_target_for_point_or_key(
+        &targets,
+        (pointer_screen_x, pointer_screen_y),
+        preferred_key,
+    )
+    .ok_or_else(|| anyhow::anyhow!("no shell taskbar target found"))?;
+    let taskbar = taskbars
+        .iter()
+        .find(|taskbar| taskbar.key == target.key)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("selected shell taskbar vanished"))?;
+    let rect = DockRect {
+        x: taskbar.left,
+        y: taskbar.top,
+        width: taskbar
+            .right
+            .checked_sub(taskbar.left)
+            .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?,
+        height: taskbar
+            .bottom
+            .checked_sub(taskbar.top)
+            .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?,
+    };
+    let (dock, ratio) = dock_rect_for_taskbar_drag_at_point(
+        rect,
+        desired_width,
+        (pointer_screen_x, pointer_screen_y),
+        (grab_offset_x, grab_offset_y),
+    )
+    .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?;
+    Ok((taskbar, dock, ratio))
 }

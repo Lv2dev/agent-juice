@@ -8,6 +8,16 @@ fn iso(ts: Option<i64>) -> Option<String> {
         .map(|d| d.to_rfc3339())
 }
 
+fn iso_value(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Number(number) => iso(number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|v| v as i64))),
+        Value::String(raw) => valid_rfc3339(raw),
+        _ => None,
+    }
+}
+
 fn limit(rate_limits: &Value, key: &str, fallback: &str) -> Option<AccountLimit> {
     let window = rate_limits.get(key)?;
     let window_minutes = window
@@ -26,6 +36,89 @@ fn limit(rate_limits: &Value, key: &str, fallback: &str) -> Option<AccountLimit>
             .and_then(|value| value.as_f64())
             .map(|value| value as f32),
         resets_at: iso(window.get("resets_at").and_then(|value| value.as_i64())),
+    })
+}
+
+fn account_limit(rate_limits: &Value, key: &str) -> Option<AccountLimit> {
+    let window = rate_limits.get(key)?.as_object()?;
+    let window_minutes = window
+        .get("windowDurationMins")
+        .or_else(|| window.get("window_minutes"))
+        .and_then(|value| value.as_i64());
+    let label = match window_minutes {
+        Some(300) => "5h".to_string(),
+        Some(10_080) => "week".to_string(),
+        _ => return None,
+    };
+    let used_percent = window
+        .get("usedPercent")
+        .or_else(|| window.get("used_percent"))
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))?;
+
+    Some(AccountLimit {
+        label,
+        used_percent: Some(used_percent as f32),
+        resets_at: iso_value(window.get("resetsAt").or_else(|| window.get("resets_at"))),
+    })
+}
+
+fn account_rate_limits(root: &Value) -> Option<&Value> {
+    let result = root.get("result").unwrap_or(root);
+    if let Some(codex) = result
+        .pointer("/rateLimitsByLimitId/codex")
+        .filter(|value| value.is_object())
+    {
+        return Some(codex);
+    }
+
+    if let Some(by_id) = result
+        .get("rateLimitsByLimitId")
+        .and_then(|value| value.as_object())
+    {
+        if let Some((_, limits)) = by_id.iter().find(|(key, value)| {
+            key.starts_with("codex")
+                && value.is_object()
+                && (value.get("primary").is_some() || value.get("secondary").is_some())
+        }) {
+            return Some(limits);
+        }
+    }
+
+    result.get("rateLimits").filter(|value| value.is_object())
+}
+
+pub fn parse_account_rate_limits_response(
+    json: &str,
+    pc_id: &str,
+    captured_at: &str,
+) -> anyhow::Result<AgentStatus> {
+    let root: Value = serde_json::from_str(json)?;
+    if root.get("error").is_some() {
+        anyhow::bail!("codex account API returned an error");
+    }
+
+    let rate_limits =
+        account_rate_limits(&root).ok_or_else(|| anyhow::anyhow!("missing codex rate limits"))?;
+    let primary = account_limit(rate_limits, "primary")
+        .ok_or_else(|| anyhow::anyhow!("invalid primary codex limit"))?;
+    let secondary = account_limit(rate_limits, "secondary")
+        .ok_or_else(|| anyhow::anyhow!("invalid secondary codex limit"))?;
+
+    Ok(AgentStatus {
+        schema_version: SCHEMA_VERSION.into(),
+        pc_id: pc_id.into(),
+        tool: Tool::Codex,
+        session_id: "app-server-account".into(),
+        captured_at: captured_at.into(),
+        primary: Some(primary),
+        secondary: Some(secondary),
+        session: SessionInfo {
+            active: true,
+            context_used_percent: None,
+        },
+        cost_estimate_usd: None,
+        approx: false,
     })
 }
 

@@ -1,8 +1,10 @@
 use agent_juice::taskbar::{
     dock_rect_for_taskbar, dock_rect_for_taskbar_at_offset, dock_rect_for_taskbar_drag_at_point,
-    offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect, rect_covers_monitor,
-    rect_covers_work_area_without_covering_monitor, visible_window_coverage_on_monitor,
-    window_coverage_is_ignored, DockRect, WindowCoverageCandidate,
+    dock_rect_for_taskbar_target, offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect,
+    rect_covers_monitor, rect_covers_work_area_without_covering_monitor, taskbar_monitor_key,
+    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key,
+    visible_window_coverage_on_monitor, window_coverage_is_ignored, DockRect, TaskbarTarget,
+    WindowCoverageCandidate,
 };
 
 #[test]
@@ -420,4 +422,94 @@ fn coverage_ignores_nvidia_geforce_overlay_without_ignoring_real_fullscreen_wind
         "검은사막 - 524872"
     ));
     assert!(!window_coverage_is_ignored("Chrome_WidgetWin_1", "Codex"));
+}
+
+#[test]
+fn taskbar_target_selection_prefers_pointer_monitor_then_saved_key_then_primary() {
+    let primary_monitor = DockRect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let secondary_monitor = DockRect {
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+    };
+    let primary = TaskbarTarget {
+        key: taskbar_monitor_key(primary_monitor),
+        rect: DockRect {
+            x: 0,
+            y: 1040,
+            width: 1920,
+            height: 40,
+        },
+        monitor: primary_monitor,
+        primary: true,
+    };
+    let secondary = TaskbarTarget {
+        key: taskbar_monitor_key(secondary_monitor),
+        rect: DockRect {
+            x: 1920,
+            y: 1392,
+            width: 2560,
+            height: 48,
+        },
+        monitor: secondary_monitor,
+        primary: false,
+    };
+    let targets = [primary.clone(), secondary.clone()];
+
+    assert_eq!(
+        taskbar_target_for_point_or_key(&targets, (2200, 700), &primary.key)
+            .unwrap()
+            .key,
+        secondary.key
+    );
+    assert_eq!(
+        taskbar_target_for_point_or_key(&targets, (-100, -100), &secondary.key)
+            .unwrap()
+            .key,
+        secondary.key
+    );
+    assert_eq!(
+        taskbar_target_by_key_or_primary(&targets, "missing")
+            .unwrap()
+            .key,
+        primary.key
+    );
+}
+
+#[test]
+fn dock_rect_for_taskbar_target_uses_target_rect_not_primary_coordinates() {
+    let secondary = TaskbarTarget {
+        key: "monitor:1920,0,2560,1440".into(),
+        rect: DockRect {
+            x: 1920,
+            y: 1392,
+            width: 2560,
+            height: 48,
+        },
+        monitor: DockRect {
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        },
+        primary: false,
+    };
+
+    let rect = dock_rect_for_taskbar_target(&secondary, 260, 0.5).unwrap();
+
+    assert_eq!(
+        rect,
+        DockRect {
+            x: 3070,
+            y: 1392,
+            width: 260,
+            height: 48,
+        }
+    );
 }

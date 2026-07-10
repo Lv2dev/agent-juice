@@ -12,9 +12,10 @@ pub mod taskbar;
 use chrono::{DateTime, Utc};
 use config::Settings;
 use model::{AgentStatus, Tool};
+use once_cell::sync::Lazy;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Condvar, Mutex,
 };
 use tauri::{
     menu::MenuBuilder,
@@ -27,6 +28,10 @@ const TASKBAR_DOCK_WIDTH: i32 = 260;
 const TASKBAR_DRAG_THRESHOLD_PX: i32 = 3;
 const TASKBAR_TOOLS: [&str; 2] = ["claude", "codex"];
 const CODEX_REPRESENTATIVE_CANDIDATES: usize = 32;
+const CODEX_ACCOUNT_CACHE_MIN_SECS: i64 = 30;
+const CODEX_ACCOUNT_API_TIMEOUT_SECS: u64 = 5;
+const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 60;
+const CLAUDE_USAGE_TIMEOUT_SECS: u64 = 10;
 const TRAY_ID: &str = "juice";
 const TRAY_ICON_IDS: [&str; 1] = [TRAY_ID];
 
@@ -38,6 +43,72 @@ struct TaskbarDraggingPayload {
 
 #[derive(Default)]
 struct TaskbarPauseState(AtomicBool);
+
+#[derive(Clone)]
+struct CachedStatusAttempt {
+    attempted_at: DateTime<Utc>,
+    status: Option<AgentStatus>,
+}
+
+#[derive(Default)]
+struct CollectionFlight {
+    in_flight: bool,
+    in_flight_force: bool,
+    last_result: Vec<AgentStatus>,
+}
+
+#[derive(Default)]
+struct CollectionCoordinator {
+    state: Mutex<CollectionFlight>,
+    completed: Condvar,
+}
+
+impl CollectionCoordinator {
+    fn run(&self, force: bool, collect: impl FnOnce() -> Vec<AgentStatus>) -> Vec<AgentStatus> {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        loop {
+            if !state.in_flight {
+                state.in_flight = true;
+                state.in_flight_force = force;
+                break;
+            }
+
+            let joined_forced_collection = state.in_flight_force;
+            while state.in_flight {
+                state = self
+                    .completed
+                    .wait(state)
+                    .unwrap_or_else(|err| err.into_inner());
+            }
+            if !force || joined_forced_collection {
+                return state.last_result.clone();
+            }
+        }
+        drop(state);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect));
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.in_flight = false;
+        state.in_flight_force = false;
+        if let Ok(result) = &outcome {
+            state.last_result = result.clone();
+        }
+        self.completed.notify_all();
+        drop(state);
+
+        match outcome {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+static COLLECTION_COORDINATOR: Lazy<CollectionCoordinator> =
+    Lazy::new(CollectionCoordinator::default);
+static CODEX_ACCOUNT_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
+    Lazy::new(|| Mutex::new(None));
+static CLAUDE_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
+    Lazy::new(|| Mutex::new(None));
 
 pub fn tray_tooltip() -> &'static str {
     "Juice"
@@ -134,15 +205,91 @@ pub fn collect_all_from(
 }
 
 pub fn collect_representatives(settings: &Settings) -> Vec<AgentStatus> {
+    collect_representatives_with_options(settings, false, false)
+}
+
+fn collect_representatives_force(settings: &Settings) -> Vec<AgentStatus> {
+    collect_representatives_with_options(settings, true, true)
+}
+
+async fn collect_representatives_off_thread(settings: Settings, force: bool) -> Vec<AgentStatus> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        if force {
+            collect_representatives_force(&settings)
+        } else {
+            collect_representatives(&settings)
+        }
+    })
+    .await
+    {
+        Ok(statuses) => statuses,
+        Err(err) => {
+            eprintln!("[collector] blocking task failed: {err}");
+            Vec::new()
+        }
+    }
+}
+
+fn collect_representatives_with_options(
+    settings: &Settings,
+    force_codex_account: bool,
+    force_claude_usage: bool,
+) -> Vec<AgentStatus> {
     let data_dir = dirs::data_local_dir().map(|dir| dir.join("agent-juice"));
     let codex_sessions_dir = dirs::home_dir().map(|home| home.join(".codex").join("sessions"));
+    let now = Utc::now();
 
-    collect_representatives_from(
-        settings,
-        data_dir.as_deref(),
-        codex_sessions_dir.as_deref(),
-        Utc::now(),
-    )
+    COLLECTION_COORDINATOR.run(force_codex_account || force_claude_usage, || {
+        collect_representatives_runtime(
+            settings,
+            data_dir.as_deref(),
+            codex_sessions_dir.as_deref(),
+            now,
+            force_codex_account,
+            force_claude_usage,
+        )
+    })
+}
+
+fn collect_representatives_runtime(
+    settings: &Settings,
+    data_dir: Option<&std::path::Path>,
+    codex_sessions_dir: Option<&std::path::Path>,
+    now: DateTime<Utc>,
+    force_codex_account: bool,
+    force_claude_usage: bool,
+) -> Vec<AgentStatus> {
+    let pc_id = gethostname::gethostname().to_string_lossy().to_string();
+    let mut statuses = Vec::new();
+
+    let claude_status = if let Some(path) = latest_matching_file(data_dir, |name| {
+        name.starts_with("claude_last.") && name.ends_with(".json")
+    }) {
+        parse_claude_status_file(&path, settings, &pc_id, now)
+    } else {
+        None
+    };
+    let claude_usage = if force_claude_usage || settings.claude_usage_auto_refresh_lab_on {
+        collect_claude_usage_status(settings, &pc_id, now, force_claude_usage)
+    } else {
+        None
+    };
+    if let Some(status) = merge_claude_usage_status(claude_status, claude_usage) {
+        statuses.push(status);
+    }
+
+    if let Some(status) = collect_codex_account_status(settings, &pc_id, now, force_codex_account) {
+        statuses.push(status);
+    } else if let Some(sessions_dir) = codex_sessions_dir {
+        for path in collector::recent_rollouts(sessions_dir, CODEX_REPRESENTATIVE_CANDIDATES) {
+            if let Some(status) = parse_codex_status_file(&path, settings, &pc_id, now) {
+                statuses.push(status);
+                break;
+            }
+        }
+    }
+
+    latest_per_tool(&statuses)
 }
 
 pub fn collect_representatives_from(
@@ -222,6 +369,107 @@ fn parse_codex_status_file(
         adapters::codex::parse_token_count(&line, pc_id, &session_id, &captured_at).ok()?;
     derive_active(&mut status, settings.stale_after_secs, now);
     Some(status)
+}
+
+fn cached_status_attempt(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    now: DateTime<Utc>,
+    minimum_interval_secs: i64,
+    force: bool,
+    collect: impl FnOnce() -> Option<AgentStatus>,
+) -> Option<AgentStatus> {
+    if !force {
+        let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(cached) = cache.as_ref() {
+            let age = (now - cached.attempted_at).num_seconds();
+            if (0..minimum_interval_secs).contains(&age) {
+                return cached.status.clone();
+            }
+        }
+    }
+
+    let status = collect();
+    let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    *cache = Some(CachedStatusAttempt {
+        attempted_at: now,
+        status: status.clone(),
+    });
+    status
+}
+
+fn collect_codex_account_status(
+    settings: &Settings,
+    pc_id: &str,
+    now: DateTime<Utc>,
+    force: bool,
+) -> Option<AgentStatus> {
+    let mut status = cached_status_attempt(
+        &CODEX_ACCOUNT_CACHE,
+        now,
+        CODEX_ACCOUNT_CACHE_MIN_SECS,
+        force,
+        || {
+            let raw = collector::codex_account_rate_limits_response(
+                std::time::Duration::from_secs(CODEX_ACCOUNT_API_TIMEOUT_SECS),
+            )
+            .ok()?;
+            adapters::codex::parse_account_rate_limits_response(&raw, pc_id, &now.to_rfc3339()).ok()
+        },
+    )?;
+    derive_active(&mut status, settings.stale_after_secs, now);
+    Some(status)
+}
+
+fn collect_claude_usage_status(
+    settings: &Settings,
+    pc_id: &str,
+    now: DateTime<Utc>,
+    force: bool,
+) -> Option<AgentStatus> {
+    let mut status = cached_status_attempt(
+        &CLAUDE_USAGE_CACHE,
+        now,
+        CLAUDE_USAGE_CACHE_MIN_SECS,
+        force,
+        || {
+            let raw = collector::claude_usage_output(std::time::Duration::from_secs(
+                CLAUDE_USAGE_TIMEOUT_SECS,
+            ))
+            .ok()?;
+            adapters::claude::parse_usage_output(&raw, pc_id, &now.to_rfc3339()).ok()
+        },
+    )?;
+    derive_active(&mut status, settings.stale_after_secs, now);
+    Some(status)
+}
+
+fn merge_claude_usage_status(
+    statusline: Option<AgentStatus>,
+    usage: Option<AgentStatus>,
+) -> Option<AgentStatus> {
+    match (statusline, usage) {
+        (Some(mut statusline), Some(usage)) => {
+            merge_missing_limit_percent(&mut statusline.primary, usage.primary);
+            merge_missing_limit_percent(&mut statusline.secondary, usage.secondary);
+            Some(statusline)
+        }
+        (Some(statusline), None) => Some(statusline),
+        (None, Some(usage)) => Some(usage),
+        (None, None) => None,
+    }
+}
+
+fn merge_missing_limit_percent(
+    statusline_limit: &mut Option<model::AccountLimit>,
+    usage_limit: Option<model::AccountLimit>,
+) {
+    match (statusline_limit.as_mut(), usage_limit) {
+        (Some(statusline), Some(usage)) if statusline.used_percent.is_none() => {
+            statusline.used_percent = usage.used_percent;
+        }
+        (None, Some(usage)) => *statusline_limit = Some(usage),
+        _ => {}
+    }
 }
 
 pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
@@ -362,13 +610,11 @@ fn spawn_status_loop(handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             let settings = Settings::load();
-            let representatives = collect_representatives(&settings);
+            let interval_secs = settings.poll_interval_secs.max(1);
+            let representatives = collect_representatives_off_thread(settings, false).await;
 
             let _ = handle.emit("status-updated", &representatives);
-            tokio::time::sleep(std::time::Duration::from_secs(
-                settings.poll_interval_secs.max(1),
-            ))
-            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
         }
     });
 }
@@ -406,9 +652,28 @@ fn set_taskbar_offset_ratio(settings: &mut Settings, tool: &str, ratio: f32) {
     }
 }
 
-fn position_taskbar_bar<R: tauri::Runtime>(
+fn taskbar_monitor_key<'a>(settings: &'a Settings, tool: &str) -> &'a str {
+    match normalize_taskbar_tool(tool) {
+        Some("claude") => &settings.claude_taskbar_monitor_key,
+        Some("codex") => &settings.codex_taskbar_monitor_key,
+        _ => "",
+    }
+}
+
+fn set_taskbar_target(settings: &mut Settings, tool: &str, monitor_key: &str, ratio: f32) {
+    set_taskbar_offset_ratio(settings, tool, ratio);
+    match normalize_taskbar_tool(tool) {
+        Some("claude") => settings.claude_taskbar_monitor_key = monitor_key.to_string(),
+        Some("codex") => settings.codex_taskbar_monitor_key = monitor_key.to_string(),
+        _ => {}
+    }
+}
+
+#[cfg(windows)]
+fn position_taskbar_bar_on_taskbar<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     tool: &str,
+    taskbar: &taskbar::ShellTaskbarWindow,
     rect: taskbar::DockRect,
 ) -> anyhow::Result<()> {
     let label = taskbar_bar_label(tool).ok_or_else(|| anyhow::anyhow!("unknown taskbar tool"))?;
@@ -416,25 +681,8 @@ fn position_taskbar_bar<R: tauri::Runtime>(
         .get_webview_window(label)
         .ok_or_else(|| anyhow::anyhow!("no {label} window"))?;
 
-    #[cfg(windows)]
-    {
-        apply_taskbar_owned_bar(&window, rect)?;
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    {
-        window.show()?;
-        window.set_position(tauri::PhysicalPosition {
-            x: rect.x,
-            y: rect.y,
-        })?;
-        window.set_size(tauri::PhysicalSize {
-            width: rect.width as u32,
-            height: rect.height as u32,
-        })?;
-        Ok(())
-    }
+    apply_taskbar_owned_bar(&window, taskbar.hwnd, rect)?;
+    Ok(())
 }
 
 fn taskbar_tool_enabled(settings: &Settings, tool: &str) -> bool {
@@ -555,14 +803,14 @@ fn taskbar_bar_hwnds<R: tauri::Runtime>(
 }
 
 #[cfg(windows)]
-fn taskbar_hide_window_state<R: tauri::Runtime>(
+fn taskbar_hide_window_state_for_monitor<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     settings: &Settings,
+    monitor: taskbar::DockRect,
 ) -> (bool, bool) {
     let excluded = taskbar_bar_hwnds(manager);
-    let (fullscreen_present, maximized_present) = taskbar::shell_taskbar_monitor_rect()
-        .map(|monitor| taskbar::visible_windows_coverage_on_monitor(&excluded, monitor))
-        .unwrap_or_else(|_| taskbar::visible_windows_coverage(&excluded));
+    let (fullscreen_present, maximized_present) =
+        taskbar::visible_windows_coverage_on_monitor(&excluded, monitor);
     let fullscreen_active = settings.fullscreen_hide_on && fullscreen_present;
     let maximized_active = settings.maximized_hide_on && maximized_present;
     (fullscreen_active, maximized_active)
@@ -587,6 +835,7 @@ fn bar_overlay_window_style(current: isize) -> isize {
 #[cfg(windows)]
 fn apply_taskbar_owned_bar<R: tauri::Runtime>(
     window: &tauri::WebviewWindow<R>,
+    owner_hwnd: windows::Win32::Foundation::HWND,
     rect: taskbar::DockRect,
 ) -> anyhow::Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -594,7 +843,6 @@ fn apply_taskbar_owned_bar<R: tauri::Runtime>(
         GWL_STYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     };
 
-    let taskbar = taskbar::shell_taskbar_window()?;
     let hwnd = window.hwnd()?;
     unsafe {
         let current_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -603,7 +851,7 @@ fn apply_taskbar_owned_bar<R: tauri::Runtime>(
         let current_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         SetWindowLongPtrW(hwnd, GWL_STYLE, bar_overlay_window_style(current_style));
 
-        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, taskbar.hwnd.0 as isize);
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner_hwnd.0 as isize);
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -624,9 +872,19 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
 
     #[cfg(windows)]
     {
-        let (fullscreen_active, maximized_active) = taskbar_hide_window_state(app, settings);
         let taskbar_paused = taskbar_bars_paused(app);
         for tool in TASKBAR_TOOLS {
+            let width = match taskbar_dock_width(settings, tool) {
+                Some(width) => width,
+                None => {
+                    hide_taskbar_bar(app, tool);
+                    continue;
+                }
+            };
+            let taskbar =
+                taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(settings, tool))?;
+            let (fullscreen_active, maximized_active) =
+                taskbar_hide_window_state_for_monitor(app, settings, taskbar.monitor);
             if !should_show_taskbar_bar_with_pause(
                 settings,
                 tool,
@@ -638,11 +896,24 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
                 continue;
             }
 
-            let width = taskbar_dock_width(settings, tool)
-                .ok_or_else(|| anyhow::anyhow!("taskbar bar is hidden"))?;
-            let rect =
-                taskbar::shell_taskbar_dock_rect(width, taskbar_offset_ratio(settings, tool))?;
-            position_taskbar_bar(app, tool, rect)?;
+            let target = taskbar::TaskbarTarget {
+                key: taskbar.key.clone(),
+                rect: taskbar::DockRect {
+                    x: taskbar.left,
+                    y: taskbar.top,
+                    width: taskbar.right - taskbar.left,
+                    height: taskbar.bottom - taskbar.top,
+                },
+                monitor: taskbar.monitor,
+                primary: taskbar.primary,
+            };
+            let rect = taskbar::dock_rect_for_taskbar_target(
+                &target,
+                width,
+                taskbar_offset_ratio(settings, tool),
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid shell taskbar rectangle"))?;
+            position_taskbar_bar_on_taskbar(app, tool, &taskbar, rect)?;
         }
         Ok(())
     }
@@ -655,17 +926,17 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
 }
 
 #[tauri::command]
-fn get_status() -> Vec<AgentStatus> {
-    collect_representatives(&Settings::load())
+async fn get_status() -> Vec<AgentStatus> {
+    collect_representatives_off_thread(Settings::load(), false).await
 }
 
 #[tauri::command]
-fn refresh_status(
+async fn refresh_status(
     window: tauri::Window,
     app: tauri::AppHandle,
 ) -> Result<Vec<AgentStatus>, String> {
     ensure_status_refresh_command(window.label())?;
-    let statuses = collect_representatives(&Settings::load());
+    let statuses = collect_representatives_off_thread(Settings::load(), true).await;
     let _ = app.emit("status-updated", &statuses);
     Ok(statuses)
 }
@@ -682,8 +953,15 @@ fn save_settings(
     input: config::SettingsInput,
 ) -> Result<Settings, String> {
     ensure_panel_command(window.label())?;
-    let settings = Settings::from_input(input);
-    settings.save().map_err(|err| err.to_string())?;
+    let mut requested = Settings::from_input(input);
+    let settings = Settings::update(move |current| {
+        requested.claude_taskbar_offset_ratio = current.claude_taskbar_offset_ratio;
+        requested.codex_taskbar_offset_ratio = current.codex_taskbar_offset_ratio;
+        requested.claude_taskbar_monitor_key = current.claude_taskbar_monitor_key.clone();
+        requested.codex_taskbar_monitor_key = current.codex_taskbar_monitor_key.clone();
+        *current = requested;
+    })
+    .map_err(|err| err.to_string())?;
     if let Err(err) = apply_taskbar_dock(&app, &settings) {
         eprintln!("[taskbar] reposition failed: {err}");
     }
@@ -710,13 +988,28 @@ fn move_taskbar_bar(
             normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
         let width = taskbar_dock_width(&settings, tool)
             .ok_or_else(|| "taskbar bar is hidden".to_string())?;
-        let (rect, ratio) = taskbar::shell_taskbar_drag_rect(width, screen_x, grab_offset_x)
+        let taskbar = taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool))
             .map_err(|err| err.to_string())?;
-        position_taskbar_bar(&app, tool, rect).map_err(|err| err.to_string())?;
-        set_taskbar_offset_ratio(&mut settings, tool, ratio);
+        let (rect, ratio) = taskbar::dock_rect_for_taskbar_drag(
+            taskbar.left,
+            taskbar.top,
+            taskbar.right,
+            taskbar.bottom,
+            width,
+            screen_x,
+            grab_offset_x,
+        )
+        .ok_or_else(|| "invalid shell taskbar rectangle".to_string())?;
+        position_taskbar_bar_on_taskbar(&app, tool, &taskbar, rect)
+            .map_err(|err| err.to_string())?;
         if persist {
-            settings.save().map_err(|err| err.to_string())?;
+            settings = Settings::update(|current| {
+                set_taskbar_target(current, tool, &taskbar.key, ratio);
+            })
+            .map_err(|err| err.to_string())?;
             let _ = app.emit("settings-updated", &settings);
+        } else {
+            set_taskbar_target(&mut settings, tool, &taskbar.key, ratio);
         }
         Ok(settings)
     }
@@ -806,9 +1099,19 @@ fn apply_taskbar_dock<R: tauri::Runtime>(
 ) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
-        let (fullscreen_active, maximized_active) = taskbar_hide_window_state(manager, settings);
         let taskbar_paused = taskbar_bars_paused(manager);
         for tool in TASKBAR_TOOLS {
+            let width = match taskbar_dock_width(settings, tool) {
+                Some(width) => width,
+                None => {
+                    hide_taskbar_bar(manager, tool);
+                    continue;
+                }
+            };
+            let taskbar =
+                taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(settings, tool))?;
+            let (fullscreen_active, maximized_active) =
+                taskbar_hide_window_state_for_monitor(manager, settings, taskbar.monitor);
             if !should_show_taskbar_bar_with_pause(
                 settings,
                 tool,
@@ -820,11 +1123,24 @@ fn apply_taskbar_dock<R: tauri::Runtime>(
                 continue;
             }
 
-            let width = taskbar_dock_width(settings, tool)
-                .ok_or_else(|| anyhow::anyhow!("taskbar bar is hidden"))?;
-            let rect =
-                taskbar::shell_taskbar_dock_rect(width, taskbar_offset_ratio(settings, tool))?;
-            position_taskbar_bar(manager, tool, rect)?;
+            let target = taskbar::TaskbarTarget {
+                key: taskbar.key.clone(),
+                rect: taskbar::DockRect {
+                    x: taskbar.left,
+                    y: taskbar.top,
+                    width: taskbar.right - taskbar.left,
+                    height: taskbar.bottom - taskbar.top,
+                },
+                monitor: taskbar.monitor,
+                primary: taskbar.primary,
+            };
+            let rect = taskbar::dock_rect_for_taskbar_target(
+                &target,
+                width,
+                taskbar_offset_ratio(settings, tool),
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid shell taskbar rectangle"))?;
+            position_taskbar_bar_on_taskbar(manager, tool, &taskbar, rect)?;
         }
         Ok(())
     }
@@ -837,14 +1153,15 @@ fn apply_taskbar_dock<R: tauri::Runtime>(
 }
 
 #[cfg(windows)]
-fn save_taskbar_offset_ratio(app: &tauri::AppHandle, tool: &str, ratio: f32) -> anyhow::Result<()> {
-    let mut settings = Settings::load();
-    if (taskbar_offset_ratio(&settings, tool) - ratio).abs() < 0.001 {
-        return Ok(());
-    }
-
-    set_taskbar_offset_ratio(&mut settings, tool, ratio);
-    settings.save()?;
+fn save_taskbar_drag_target(
+    app: &tauri::AppHandle,
+    tool: &str,
+    monitor_key: &str,
+    ratio: f32,
+) -> anyhow::Result<()> {
+    let settings = Settings::update(|current| {
+        set_taskbar_target(current, tool, monitor_key, ratio);
+    })?;
     let _ = app.emit("settings-updated", &settings);
     Ok(())
 }
@@ -874,31 +1191,16 @@ fn current_bar_drag_start(
     point: windows::Win32::Foundation::POINT,
 ) -> Option<(&'static str, i32, i32, i32)> {
     let settings = Settings::load();
-    let (fullscreen_active, maximized_active) = taskbar_hide_window_state(app, &settings);
     let taskbar_paused = taskbar_bars_paused(app);
 
     if let Some(tool) = taskbar_tool_at_point(app, point) {
-        return current_bar_drag_start_for_tool(
-            app,
-            &settings,
-            tool,
-            point,
-            fullscreen_active,
-            maximized_active,
-            taskbar_paused,
-        );
+        return current_bar_drag_start_for_tool(app, &settings, tool, point, taskbar_paused);
     }
 
     for tool in TASKBAR_TOOLS.iter().rev().copied() {
-        if let Some(start) = current_bar_drag_start_for_tool(
-            app,
-            &settings,
-            tool,
-            point,
-            fullscreen_active,
-            maximized_active,
-            taskbar_paused,
-        ) {
+        if let Some(start) =
+            current_bar_drag_start_for_tool(app, &settings, tool, point, taskbar_paused)
+        {
             return Some(start);
         }
     }
@@ -911,10 +1213,12 @@ fn current_bar_drag_start_for_tool(
     settings: &Settings,
     tool: &'static str,
     point: windows::Win32::Foundation::POINT,
-    fullscreen_active: bool,
-    maximized_active: bool,
     taskbar_paused: bool,
 ) -> Option<(&'static str, i32, i32, i32)> {
+    let taskbar =
+        taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(settings, tool)).ok()?;
+    let (fullscreen_active, maximized_active) =
+        taskbar_hide_window_state_for_monitor(app, settings, taskbar.monitor);
     if !should_show_taskbar_bar_with_pause(
         settings,
         tool,
@@ -930,16 +1234,9 @@ fn current_bar_drag_start_for_tool(
         return None;
     }
 
-    let taskbar = taskbar::shell_taskbar_window().ok()?;
-    let taskbar_width = taskbar.right.checked_sub(taskbar.left)?;
-    let taskbar_height = taskbar.bottom.checked_sub(taskbar.top)?;
     let bar_width = rect.right.checked_sub(rect.left).unwrap_or(1).max(1);
     let bar_height = rect.bottom.checked_sub(rect.top).unwrap_or(1).max(1);
-    let desired_length = if taskbar_width >= taskbar_height {
-        bar_width
-    } else {
-        bar_height
-    };
+    let desired_length = bar_width.max(bar_height);
 
     Some((
         tool,
@@ -1020,6 +1317,7 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
             let mut start_x: Option<i32> = None;
             let mut start_y: Option<i32> = None;
             let mut last_ratio: Option<f32> = None;
+            let mut last_monitor_key: Option<String> = None;
             let mut emitted_dragging = false;
 
             loop {
@@ -1037,6 +1335,7 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                         start_x = point.map(|point| point.x);
                         start_y = point.map(|point| point.y);
                         last_ratio = None;
+                        last_monitor_key = None;
                     }
 
                     if let (
@@ -1069,21 +1368,30 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                             );
                             emitted_dragging = true;
                         }
-                        if let Ok((rect, ratio)) = taskbar::shell_taskbar_drag_rect_at_point(
-                            length,
-                            point.x,
-                            point.y,
-                            grab_offset_x,
-                            grab_offset_y,
-                        ) {
-                            if position_taskbar_bar(&app, tool, rect).is_ok() {
+                        let settings = Settings::load();
+                        let preferred_key = taskbar_monitor_key(&settings, tool).to_string();
+                        if let Ok((taskbar, rect, ratio)) =
+                            taskbar::shell_taskbar_drag_rect_at_point_for_key(
+                                length,
+                                point.x,
+                                point.y,
+                                grab_offset_x,
+                                grab_offset_y,
+                                &preferred_key,
+                            )
+                        {
+                            if position_taskbar_bar_on_taskbar(&app, tool, &taskbar, rect).is_ok() {
                                 last_ratio = Some(ratio);
+                                last_monitor_key = Some(taskbar.key);
                             }
                         }
                     }
                 } else if was_down {
-                    if let (Some(tool), Some(ratio)) = (drag_tool, last_ratio.take()) {
-                        if let Err(err) = save_taskbar_offset_ratio(&app, tool, ratio) {
+                    if let (Some(tool), Some(ratio), Some(monitor_key)) =
+                        (drag_tool, last_ratio.take(), last_monitor_key.take())
+                    {
+                        if let Err(err) = save_taskbar_drag_target(&app, tool, &monitor_key, ratio)
+                        {
                             eprintln!("[taskbar] save dragged {tool} bar position failed: {err}");
                         }
                     }
@@ -1105,6 +1413,7 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                     drag_length = None;
                     start_x = None;
                     start_y = None;
+                    last_monitor_key = None;
                 }
 
                 was_down = down;
@@ -1382,6 +1691,268 @@ mod tests {
 
         let png = super::tray_png_for_status(&status, &Settings::default()).unwrap();
         assert!(png.len() > 8 && &png[1..4] == b"PNG");
+    }
+
+    #[test]
+    fn claude_usage_merge_fills_missing_limits_without_overwriting_statusline_limits() {
+        let mut statusline = status_for_signature("statusline");
+
+        let usage = AgentStatus {
+            schema_version: "agent_status.v1".into(),
+            pc_id: "PC".into(),
+            tool: Tool::Claude,
+            session_id: "claude-usage".into(),
+            captured_at: "2026-07-09T12:00:00Z".into(),
+            primary: Some(AccountLimit {
+                label: "5h".into(),
+                used_percent: Some(12.0),
+                resets_at: None,
+            }),
+            secondary: Some(AccountLimit {
+                label: "week".into(),
+                used_percent: Some(38.0),
+                resets_at: None,
+            }),
+            session: SessionInfo {
+                active: true,
+                context_used_percent: None,
+            },
+            cost_estimate_usd: None,
+            approx: true,
+        };
+
+        let merged =
+            super::merge_claude_usage_status(Some(statusline.clone()), Some(usage.clone()))
+                .unwrap();
+        assert_eq!(merged.session_id, "statusline");
+        assert_eq!(merged.primary.as_ref().unwrap().used_percent, Some(12.0));
+        assert_eq!(merged.secondary.as_ref().unwrap().used_percent, Some(38.0));
+
+        statusline.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(77.0),
+            resets_at: Some("2026-07-09T15:00:00Z".into()),
+        });
+        statusline.secondary = Some(AccountLimit {
+            label: "week".into(),
+            used_percent: Some(55.0),
+            resets_at: Some("2026-07-14T01:00:00Z".into()),
+        });
+        let preserved =
+            super::merge_claude_usage_status(Some(statusline), Some(usage.clone())).unwrap();
+        assert_eq!(
+            preserved.secondary.as_ref().unwrap().used_percent,
+            Some(55.0)
+        );
+        assert_eq!(preserved.primary.as_ref().unwrap().used_percent, Some(77.0));
+
+        let usage_only = super::merge_claude_usage_status(None, Some(usage)).unwrap();
+        assert_eq!(usage_only.session_id, "claude-usage");
+        assert_eq!(
+            usage_only.primary.as_ref().unwrap().used_percent,
+            Some(12.0)
+        );
+        assert_eq!(
+            usage_only.secondary.as_ref().unwrap().used_percent,
+            Some(38.0)
+        );
+    }
+
+    #[test]
+    fn claude_usage_merge_preserves_statusline_freshness_and_reset_metadata() {
+        let mut statusline = status_for_signature("statusline-stale");
+        statusline.captured_at = "2026-07-09T00:00:00Z".into();
+        statusline.session.active = false;
+        statusline.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: None,
+            resets_at: Some("2026-07-09T15:00:00Z".into()),
+        });
+
+        let mut usage = status_for_signature("claude-usage");
+        usage.captured_at = "2026-07-10T00:00:00Z".into();
+        usage.session.active = true;
+        usage.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(24.0),
+            resets_at: None,
+        });
+
+        let merged = super::merge_claude_usage_status(Some(statusline), Some(usage)).unwrap();
+
+        assert_eq!(merged.captured_at, "2026-07-09T00:00:00Z");
+        assert!(!merged.session.active);
+        assert_eq!(merged.primary.as_ref().unwrap().used_percent, Some(24.0));
+        assert_eq!(
+            merged.primary.as_ref().unwrap().resets_at.as_deref(),
+            Some("2026-07-09T15:00:00Z")
+        );
+    }
+
+    #[test]
+    fn failed_collection_attempt_is_cached_but_force_bypasses_it() {
+        use chrono::{Duration, TimeZone, Utc};
+        use std::sync::{atomic::AtomicUsize, Mutex};
+
+        let cache = Mutex::new(None);
+        let attempts = AtomicUsize::new(0);
+        let now = Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap();
+
+        let first = super::cached_status_attempt(&cache, now, 30, false, || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
+        let cached =
+            super::cached_status_attempt(&cache, now + Duration::seconds(1), 30, false, || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(status_for_signature("should-not-run"))
+            });
+        let forced =
+            super::cached_status_attempt(&cache, now + Duration::seconds(1), 30, true, || {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(status_for_signature("forced"))
+            });
+
+        assert!(first.is_none());
+        assert!(cached.is_none());
+        assert_eq!(forced.unwrap().session_id, "forced");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn overlapping_collection_requests_share_one_result() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
+        };
+
+        const THREADS: usize = 8;
+        let coordinator = Arc::new(super::CollectionCoordinator::default());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+
+        for _ in 0..THREADS {
+            let coordinator = Arc::clone(&coordinator);
+            let barrier = Arc::clone(&barrier);
+            let attempts = Arc::clone(&attempts);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                coordinator.run(false, || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    vec![status_for_signature("shared")]
+                })
+            }));
+        }
+
+        for worker in workers {
+            let result = worker.join().unwrap();
+            assert_eq!(result[0].session_id, "shared");
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn forced_collection_runs_after_an_overlapping_normal_collection() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Barrier,
+        };
+
+        let coordinator = Arc::new(super::CollectionCoordinator::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Barrier::new(2));
+        let (started_tx, started_rx) = mpsc::channel();
+
+        let normal_coordinator = Arc::clone(&coordinator);
+        let normal_attempts = Arc::clone(&attempts);
+        let normal_release = Arc::clone(&release);
+        let normal = std::thread::spawn(move || {
+            normal_coordinator.run(false, || {
+                normal_attempts.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                normal_release.wait();
+                vec![status_for_signature("normal")]
+            })
+        });
+        started_rx.recv().unwrap();
+
+        let forced_coordinator = Arc::clone(&coordinator);
+        let forced_attempts = Arc::clone(&attempts);
+        let forced = std::thread::spawn(move || {
+            forced_coordinator.run(true, || {
+                forced_attempts.fetch_add(1, Ordering::SeqCst);
+                vec![status_for_signature("forced")]
+            })
+        });
+        release.wait();
+
+        assert_eq!(normal.join().unwrap()[0].session_id, "normal");
+        assert_eq!(forced.join().unwrap()[0].session_id, "forced");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn panel_save_and_native_drag_preserve_each_others_settings() {
+        use std::sync::{Arc, Barrier};
+
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-settings-race-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        Settings::default().save_to(&path).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let panel_path = path.clone();
+        let panel_barrier = Arc::clone(&barrier);
+        let panel = std::thread::spawn(move || {
+            panel_barrier.wait();
+            Settings::update_at(&panel_path, |current| {
+                let claude_monitor = current.claude_taskbar_monitor_key.clone();
+                let codex_monitor = current.codex_taskbar_monitor_key.clone();
+                let claude_offset = current.claude_taskbar_offset_ratio;
+                let codex_offset = current.codex_taskbar_offset_ratio;
+                let requested = Settings {
+                    theme: "dark".into(),
+                    claude_taskbar_offset_ratio: claude_offset,
+                    codex_taskbar_offset_ratio: codex_offset,
+                    claude_taskbar_monitor_key: claude_monitor,
+                    codex_taskbar_monitor_key: codex_monitor,
+                    ..Settings::default()
+                };
+                *current = requested;
+            })
+            .unwrap();
+        });
+        let drag_path = path.clone();
+        let drag_barrier = Arc::clone(&barrier);
+        let drag = std::thread::spawn(move || {
+            drag_barrier.wait();
+            Settings::update_at(&drag_path, |current| {
+                current.codex_taskbar_monitor_key = "monitor:secondary".into();
+                current.codex_taskbar_offset_ratio = 0.8;
+            })
+            .unwrap();
+        });
+
+        panel.join().unwrap();
+        drag.join().unwrap();
+        let saved = Settings::load_from(&path);
+        assert_eq!(saved.theme, "dark");
+        assert_eq!(saved.codex_taskbar_monitor_key, "monitor:secondary");
+        assert_eq!(saved.codex_taskbar_offset_ratio, 0.8);
+
+        let temp_files = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".aj-tmp"))
+            .count();
+        assert_eq!(temp_files, 0);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

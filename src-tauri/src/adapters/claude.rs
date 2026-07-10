@@ -33,6 +33,11 @@ struct StatusLine {
     cost: Option<Cost>,
 }
 
+#[derive(Deserialize)]
+struct UsageResult {
+    result: Option<String>,
+}
+
 fn iso(ts: Option<i64>) -> Option<String> {
     ts.and_then(|t| Utc.timestamp_opt(t, 0).single())
         .map(|d| d.to_rfc3339())
@@ -69,6 +74,64 @@ pub fn parse(json: &str, pc_id: &str, captured_at: &str) -> anyhow::Result<Agent
             context_used_percent: status.context_window.and_then(|c| c.used_percentage),
         },
         cost_estimate_usd: status.cost.and_then(|c| c.total_cost_usd),
+        approx: true,
+    })
+}
+
+fn usage_text(raw: &str) -> String {
+    serde_json::from_str::<UsageResult>(raw)
+        .ok()
+        .and_then(|usage| usage.result)
+        .unwrap_or_else(|| raw.to_string())
+}
+
+fn percent_after_prefix(text: &str, prefix: &str) -> Option<f32> {
+    text.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(prefix)?;
+        let percent = rest.split('%').next()?.trim();
+        percent.parse::<f32>().ok()
+    })
+}
+
+fn current_session_percent(text: &str) -> Option<f32> {
+    percent_after_prefix(text, "Current session:")
+}
+
+fn current_week_percent(text: &str) -> Option<f32> {
+    percent_after_prefix(text, "Current week (all models):")
+}
+
+pub fn parse_usage_output(
+    raw: &str,
+    pc_id: &str,
+    captured_at: &str,
+) -> anyhow::Result<AgentStatus> {
+    let text = usage_text(raw);
+    let session_percent = current_session_percent(&text);
+    let week_percent = current_week_percent(&text)
+        .ok_or_else(|| anyhow::anyhow!("Claude usage output has no current week percent"))?;
+
+    Ok(AgentStatus {
+        schema_version: SCHEMA_VERSION.into(),
+        pc_id: pc_id.into(),
+        tool: Tool::Claude,
+        session_id: "claude-usage".into(),
+        captured_at: captured_at.into(),
+        primary: session_percent.map(|used_percent| AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(used_percent),
+            resets_at: None,
+        }),
+        secondary: Some(AccountLimit {
+            label: "week".into(),
+            used_percent: Some(week_percent),
+            resets_at: None,
+        }),
+        session: SessionInfo {
+            active: true,
+            context_used_percent: None,
+        },
+        cost_estimate_usd: None,
         approx: true,
     })
 }

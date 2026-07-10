@@ -1,7 +1,17 @@
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
 use crate::render::Palette;
+
+static SETTINGS_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -31,6 +41,8 @@ pub struct Settings {
     pub ring_numbers_on: bool,
     #[serde(default = "default_ring_number_outline_on")]
     pub ring_number_outline_on: bool,
+    #[serde(default = "default_ring_number_outline_width_px")]
+    pub ring_number_outline_width_px: f32,
     #[serde(default = "default_ring_size_px")]
     pub ring_size_px: f32,
     #[serde(default = "default_ring_thickness_px")]
@@ -61,10 +73,16 @@ pub struct Settings {
     pub claude_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub codex_taskbar_offset_ratio: f32,
+    #[serde(default)]
+    pub claude_taskbar_monitor_key: String,
+    #[serde(default)]
+    pub codex_taskbar_monitor_key: String,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
+    #[serde(default)]
+    pub claude_usage_auto_refresh_lab_on: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -95,6 +113,8 @@ pub struct SettingsInput {
     pub ring_numbers_on: bool,
     #[serde(default = "default_ring_number_outline_on")]
     pub ring_number_outline_on: bool,
+    #[serde(default = "default_ring_number_outline_width_px")]
+    pub ring_number_outline_width_px: f32,
     #[serde(default = "default_ring_size_px")]
     pub ring_size_px: f32,
     #[serde(default = "default_ring_thickness_px")]
@@ -125,10 +145,16 @@ pub struct SettingsInput {
     pub claude_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub codex_taskbar_offset_ratio: f32,
+    #[serde(default)]
+    pub claude_taskbar_monitor_key: String,
+    #[serde(default)]
+    pub codex_taskbar_monitor_key: String,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
+    #[serde(default)]
+    pub claude_usage_auto_refresh_lab_on: bool,
     #[serde(default)]
     pub custom_safe: Option<String>,
     #[serde(default)]
@@ -197,6 +223,10 @@ fn default_ring_numbers_on() -> bool {
 
 fn default_ring_number_outline_on() -> bool {
     true
+}
+
+fn default_ring_number_outline_width_px() -> f32 {
+    1.2
 }
 
 fn default_ring_size_px() -> f32 {
@@ -271,6 +301,7 @@ impl Default for Settings {
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
+            ring_number_outline_width_px: default_ring_number_outline_width_px(),
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
@@ -286,8 +317,11 @@ impl Default for Settings {
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            claude_taskbar_monitor_key: String::new(),
+            codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            claude_usage_auto_refresh_lab_on: false,
         }
     }
 }
@@ -308,6 +342,7 @@ impl Default for SettingsInput {
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
+            ring_number_outline_width_px: default_ring_number_outline_width_px(),
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
@@ -323,8 +358,11 @@ impl Default for SettingsInput {
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            claude_taskbar_monitor_key: String::new(),
+            codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            claude_usage_auto_refresh_lab_on: false,
             custom_safe: None,
             custom_warn: None,
             custom_danger: None,
@@ -368,6 +406,21 @@ impl Settings {
         self.save_to(&path)
     }
 
+    pub(crate) fn update(mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("no settings path"))?;
+        Self::update_at(&path, mutator)
+    }
+
+    pub(crate) fn update_at(path: &Path, mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+        let _guard = SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut settings = Self::load_from(path);
+        mutator(&mut settings);
+        settings.save_to(path)?;
+        Ok(settings)
+    }
+
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -391,6 +444,7 @@ impl Settings {
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
+            ring_number_outline_width_px: default_ring_number_outline_width_px(),
             ring_size_px: default_ring_size_px(),
             ring_thickness_px: default_ring_thickness_px(),
             ring_gap_px: default_ring_gap_px(),
@@ -406,8 +460,11 @@ impl Settings {
             taskbar_offset_ratio: default_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            claude_taskbar_monitor_key: String::new(),
+            codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            claude_usage_auto_refresh_lab_on: false,
             custom_safe: None,
             custom_warn: None,
             custom_danger: None,
@@ -431,6 +488,9 @@ impl Settings {
             ring_on: input.ring_on,
             ring_numbers_on: input.ring_numbers_on,
             ring_number_outline_on: input.ring_number_outline_on,
+            ring_number_outline_width_px: clamp_ring_number_outline_width(
+                input.ring_number_outline_width_px,
+            ),
             ring_size_px: clamp_px(input.ring_size_px, default_ring_size_px(), 20.0, 44.0),
             ring_thickness_px: clamp_ring_thickness(input.ring_thickness_px),
             ring_gap_px: clamp_ring_gap(input.ring_gap_px),
@@ -456,8 +516,11 @@ impl Settings {
             taskbar_offset_ratio: clamp_ratio(input.taskbar_offset_ratio),
             claude_taskbar_offset_ratio: clamp_ratio(input.claude_taskbar_offset_ratio),
             codex_taskbar_offset_ratio: clamp_ratio(input.codex_taskbar_offset_ratio),
+            claude_taskbar_monitor_key: input.claude_taskbar_monitor_key,
+            codex_taskbar_monitor_key: input.codex_taskbar_monitor_key,
             show_claude: input.show_claude,
             show_codex: input.show_codex,
+            claude_usage_auto_refresh_lab_on: input.claude_usage_auto_refresh_lab_on,
         }
     }
 
@@ -488,6 +551,8 @@ impl Settings {
         self.ring_thickness_px = clamp_ring_thickness(self.ring_thickness_px);
         self.ring_gap_px = clamp_ring_gap(self.ring_gap_px);
         self.ring_center_gap_px = clamp_ring_center_gap(self.ring_center_gap_px);
+        self.ring_number_outline_width_px =
+            clamp_ring_number_outline_width(self.ring_number_outline_width_px);
         self.ring_number_font_size_px = clamp_px(
             self.ring_number_font_size_px,
             default_ring_number_font_size_px(),
@@ -761,6 +826,10 @@ fn clamp_ring_center_gap(value: f32) -> f32 {
     clamp_px(value, default_ring_center_gap_px(), 0.0, 8.0)
 }
 
+fn clamp_ring_number_outline_width(value: f32) -> f32 {
+    clamp_px(value, default_ring_number_outline_width_px(), 0.0, 4.0)
+}
+
 fn json_has_field(value: &serde_json::Value, key: &str) -> bool {
     value
         .as_object()
@@ -800,13 +869,23 @@ fn parse_hex_rgb(value: Option<&str>) -> Option<[u8; 3]> {
 }
 
 fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("aj-tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent-juice");
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.{}.{}.aj-tmp",
+        std::process::id(),
+        sequence
+    ));
     std::fs::write(&tmp, contents)?;
-    if !path.exists() {
-        return std::fs::rename(&tmp, path);
-    }
-
-    match replace_existing_file(path, &tmp) {
+    let result = if path.exists() {
+        replace_existing_file(path, &tmp)
+    } else {
+        std::fs::rename(&tmp, path)
+    };
+    match result {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = std::fs::remove_file(&tmp);

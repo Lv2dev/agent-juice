@@ -43,6 +43,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         ring_on: false,
         ring_numbers_on: false,
         ring_number_outline_on: true,
+        ring_number_outline_width_px: 1.4,
         ring_size_px: 34.5,
         ring_thickness_px: 6.5,
         ring_gap_px: 8.5,
@@ -58,8 +59,11 @@ fn settings_roundtrip_and_legacy_defaults() {
         taskbar_offset_ratio: 0.25,
         claude_taskbar_offset_ratio: 0.15,
         codex_taskbar_offset_ratio: 0.85,
+        claude_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
+        codex_taskbar_monitor_key: "monitor:1920,0,2560,1440".into(),
         show_claude: false,
         show_codex: true,
+        claude_usage_auto_refresh_lab_on: true,
     };
 
     settings.save_to(&path).unwrap();
@@ -78,6 +82,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(!loaded.ring_on);
     assert!(!loaded.ring_numbers_on);
     assert!(loaded.ring_number_outline_on);
+    assert_eq!(loaded.ring_number_outline_width_px, 1.4);
     assert_eq!(loaded.ring_size_px, 34.5);
     assert_eq!(loaded.ring_thickness_px, 6.5);
     assert_eq!(loaded.ring_gap_px, 8.5);
@@ -93,8 +98,11 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.taskbar_offset_ratio, 0.5);
     assert_eq!(loaded.claude_taskbar_offset_ratio, 0.15);
     assert_eq!(loaded.codex_taskbar_offset_ratio, 0.85);
+    assert_eq!(loaded.claude_taskbar_monitor_key, "monitor:0,0,1920,1080");
+    assert_eq!(loaded.codex_taskbar_monitor_key, "monitor:1920,0,2560,1440");
     assert!(!loaded.show_claude);
     assert!(loaded.show_codex);
+    assert!(loaded.claude_usage_auto_refresh_lab_on);
 
     fs::write(
         &path,
@@ -114,6 +122,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(legacy.ring_on);
     assert!(legacy.ring_numbers_on);
     assert!(legacy.ring_number_outline_on);
+    assert_eq!(legacy.ring_number_outline_width_px, 1.2);
     assert_eq!(legacy.ring_size_px, 36.0);
     assert_eq!(legacy.ring_thickness_px, 4.0);
     assert_eq!(legacy.ring_gap_px, 6.0);
@@ -129,8 +138,11 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.taskbar_offset_ratio, 0.3);
     assert_eq!(legacy.claude_taskbar_offset_ratio, 0.3);
     assert_eq!(legacy.codex_taskbar_offset_ratio, 0.3);
+    assert_eq!(legacy.claude_taskbar_monitor_key, "");
+    assert_eq!(legacy.codex_taskbar_monitor_key, "");
     assert!(legacy.show_claude);
     assert!(legacy.show_codex);
+    assert!(!legacy.claude_usage_auto_refresh_lab_on);
 }
 
 #[test]
@@ -270,6 +282,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         ring_on: false,
         ring_numbers_on: false,
         ring_number_outline_on: true,
+        ring_number_outline_width_px: 1.4,
         ring_size_px: 34.5,
         ring_thickness_px: 6.5,
         ring_gap_px: 8.5,
@@ -285,8 +298,11 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         taskbar_offset_ratio: 1.25,
         claude_taskbar_offset_ratio: -0.25,
         codex_taskbar_offset_ratio: 1.25,
+        claude_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
+        codex_taskbar_monitor_key: "monitor:1920,0,2560,1440".into(),
         show_claude: false,
         show_codex: true,
+        claude_usage_auto_refresh_lab_on: true,
         custom_safe: Some("#112233".into()),
         custom_warn: Some("#445566".into()),
         custom_danger: Some("#778899".into()),
@@ -310,6 +326,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(!settings.ring_on);
     assert!(!settings.ring_numbers_on);
     assert!(settings.ring_number_outline_on);
+    assert_eq!(settings.ring_number_outline_width_px, 1.4);
     assert_eq!(settings.ring_size_px, 34.5);
     assert_eq!(settings.ring_thickness_px, 6.5);
     assert_eq!(settings.ring_gap_px, 8.5);
@@ -325,8 +342,14 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.taskbar_offset_ratio, 1.0);
     assert_eq!(settings.claude_taskbar_offset_ratio, 0.0);
     assert_eq!(settings.codex_taskbar_offset_ratio, 1.0);
+    assert_eq!(settings.claude_taskbar_monitor_key, "monitor:0,0,1920,1080");
+    assert_eq!(
+        settings.codex_taskbar_monitor_key,
+        "monitor:1920,0,2560,1440"
+    );
     assert!(!settings.show_claude);
     assert!(settings.show_codex);
+    assert!(settings.claude_usage_auto_refresh_lab_on);
 }
 
 #[test]
@@ -341,6 +364,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
         ring_thickness_px: 99.0,
         ring_gap_px: 1.0,
         ring_center_gap_px: 99.0,
+        ring_number_outline_width_px: 99.0,
         ring_number_font_size_px: 99.0,
         ring_number_font_weight: 999,
         bar_text_font_size_px: -1.0,
@@ -364,6 +388,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.ring_thickness_px, 10.0);
     assert_eq!(settings.ring_gap_px, 2.0);
     assert_eq!(settings.ring_center_gap_px, 8.0);
+    assert_eq!(settings.ring_number_outline_width_px, 4.0);
     assert_eq!(settings.ring_number_font_size_px, 16.0);
     assert_eq!(settings.ring_number_font_weight, 900);
     assert_eq!(settings.bar_text_font_size_px, 8.0);
@@ -373,4 +398,5 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.codex_taskbar_offset_ratio, 1.0);
     assert!(settings.show_claude);
     assert!(settings.show_codex);
+    assert!(!settings.claude_usage_auto_refresh_lab_on);
 }
