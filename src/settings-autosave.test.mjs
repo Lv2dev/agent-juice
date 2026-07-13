@@ -85,6 +85,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     bar_text_font_size_px: makeField("11", "range", { min: "8", max: "16" }),
     "bar-text-font-size-output": makeField("11"),
     bar_text_font_weight: makeField("500", "range", { min: "100", max: "900" }),
+    bar_content_gap_px: makeField("4", "range", { min: "0", max: "24" }),
     "bar-text-font-weight-output": makeField("500"),
     autostart_on: makeField(true, "checkbox"),
     update_check_on: makeField(true, "checkbox"),
@@ -105,6 +106,9 @@ test("settings form auto-saves changed values without a submit button", async ()
     codex_primary_color: makeField("#2fac7d", "color"),
     codex_secondary_color: makeField("#4d86d6", "color"),
   };
+  const ringSizeEditor = makeField("36", "number", {
+    dataset: { rangeNumberFor: "ring_size_px" },
+  });
   const form = {
     elements: {
       namedItem(name) {
@@ -113,6 +117,9 @@ test("settings form auto-saves changed values without a submit button", async ()
     },
     addEventListener(name, handler) {
       listeners[name] = handler;
+    },
+    querySelectorAll(selector) {
+      return selector === "[data-range-number-for]" ? [ringSizeEditor] : [];
     },
   };
 
@@ -191,6 +198,12 @@ test("settings form auto-saves changed values without a submit button", async ()
   fields.claude_primary_color.value = "#123456";
   fields.display_basis.value = "used";
   listeners.input?.({ target: fields.display_basis });
+  ringSizeEditor.value = "";
+  listeners.change?.({ type: "change", target: ringSizeEditor });
+  assert.equal(ringSizeEditor.value, "36");
+  ringSizeEditor.value = "40.5";
+  listeners.input?.({ type: "input", target: ringSizeEditor });
+  assert.equal(fields.ring_size_px.value, "40.5");
   fields.theme.value = "dark";
   listeners.input?.({ target: { ...fields.theme, name: "theme" } });
   assert.equal(global.document.documentElement.dataset.theme, "dark");
@@ -212,7 +225,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].ring_numbers_on, true);
   assert.equal(savedInputs[0].ring_number_outline_on, true);
   assert.equal(savedInputs[0].ring_number_outline_width_px, 1.2);
-  assert.equal(savedInputs[0].ring_size_px, 36);
+  assert.equal(savedInputs[0].ring_size_px, 40.5);
   assert.equal(savedInputs[0].ring_thickness_px, 4);
   assert.equal(savedInputs[0].ring_gap_px, 6);
   assert.equal(savedInputs[0].ring_center_size_px, 16);
@@ -220,6 +233,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].ring_number_font_weight, 600);
   assert.equal(savedInputs[0].bar_text_font_size_px, 11);
   assert.equal(savedInputs[0].bar_text_font_weight, 500);
+  assert.equal(savedInputs[0].bar_content_gap_px, 14);
   assert.equal(savedInputs[0].update_check_on, true);
   assert.equal(savedInputs[0].claude_primary_color, "#123456");
   assert.equal(savedInputs[0].claude_secondary_color, "#d36b86");
@@ -336,6 +350,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     bar_text_font_size_px: makeField("11", "range", { min: "8", max: "16" }),
     "bar-text-font-size-output": makeField("11"),
     bar_text_font_weight: makeField("500", "range", { min: "100", max: "900" }),
+    bar_content_gap_px: makeField("4", "range", { min: "0", max: "24" }),
     "bar-text-font-weight-output": makeField("500"),
     autostart_on: makeField(true, "checkbox"),
     update_check_on: makeField(true, "checkbox"),

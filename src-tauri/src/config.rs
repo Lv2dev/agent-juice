@@ -95,6 +95,8 @@ pub struct Settings {
     pub bar_text_font_size_px: f32,
     #[serde(default = "default_bar_text_font_weight")]
     pub bar_text_font_weight: i32,
+    #[serde(default = "default_bar_content_gap_px")]
+    pub bar_content_gap_px: f32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
     #[serde(default = "default_update_check_on")]
@@ -178,6 +180,8 @@ pub struct SettingsInput {
     pub bar_text_font_size_px: f32,
     #[serde(default = "default_bar_text_font_weight")]
     pub bar_text_font_weight: i32,
+    #[serde(default = "default_bar_content_gap_px")]
+    pub bar_content_gap_px: f32,
     #[serde(default = "default_autostart_on")]
     pub autostart_on: bool,
     #[serde(default = "default_update_check_on")]
@@ -381,6 +385,10 @@ fn default_bar_text_font_weight() -> i32 {
     500
 }
 
+fn default_bar_content_gap_px() -> f32 {
+    14.0
+}
+
 fn default_autostart_on() -> bool {
     true
 }
@@ -442,6 +450,7 @@ impl Default for Settings {
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
+            bar_content_gap_px: default_bar_content_gap_px(),
             autostart_on: default_autostart_on(),
             update_check_on: default_update_check_on(),
             language: default_language(),
@@ -487,6 +496,7 @@ impl Default for SettingsInput {
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
+            bar_content_gap_px: default_bar_content_gap_px(),
             autostart_on: default_autostart_on(),
             update_check_on: default_update_check_on(),
             language: default_language(),
@@ -666,6 +676,7 @@ impl Settings {
             ring_number_font_weight: default_ring_number_font_weight(),
             bar_text_font_size_px: default_bar_text_font_size_px(),
             bar_text_font_weight: default_bar_text_font_weight(),
+            bar_content_gap_px: default_bar_content_gap_px(),
             autostart_on: default_autostart_on(),
             update_check_on: default_update_check_on(),
             language: default_language(),
@@ -733,6 +744,12 @@ impl Settings {
                 16.0,
             ),
             bar_text_font_weight: clamp_font_weight(input.bar_text_font_weight),
+            bar_content_gap_px: clamp_px(
+                input.bar_content_gap_px,
+                default_bar_content_gap_px(),
+                0.0,
+                24.0,
+            ),
             autostart_on: input.autostart_on,
             update_check_on: input.update_check_on,
             language: normalize_language(&input.language).into(),
@@ -833,6 +850,12 @@ impl Settings {
             16.0,
         );
         self.bar_text_font_weight = clamp_font_weight(self.bar_text_font_weight);
+        self.bar_content_gap_px = clamp_px(
+            self.bar_content_gap_px,
+            default_bar_content_gap_px(),
+            0.0,
+            24.0,
+        );
     }
 
     pub fn install_statusline_wrap(bridge_abs: &str) -> anyhow::Result<()> {

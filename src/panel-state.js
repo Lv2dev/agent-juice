@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS = {
   ring_number_font_weight: 600,
   bar_text_font_size_px: 11,
   bar_text_font_weight: 500,
+  bar_content_gap_px: 14,
   update_check_on: true,
 };
 

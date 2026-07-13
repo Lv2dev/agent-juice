@@ -401,6 +401,9 @@ test("taskbar overlay implements the four documented bar display modes", () => {
   const quadCopy = cssBlock('.bar-shell[data-mode="quad"] .bar-copy,\n.bar-shell[data-mode="quad"] .bar-ring');
   const ringOff = cssBlock('.bar-shell[data-ring="off"][data-mode="full"] .bar-ring,\n.bar-shell[data-ring="off"][data-mode="compact"] .bar-ring');
   const textModeTool = cssBlock('.bar-shell[data-mode="full"] .bar-tool,\n.bar-shell[data-mode="compact"] .bar-tool');
+  const horizontalTextModeTool = cssBlock('.bar-shell[data-taskbar-orientation="horizontal"][data-mode="full"] .bar-tool,\n.bar-shell[data-taskbar-orientation="horizontal"][data-mode="compact"] .bar-tool');
+  const fullCopy = cssBlock('.bar-shell[data-mode="full"] .bar-copy');
+  const compactCopy = cssBlock('.bar-shell[data-mode="compact"] .bar-copy');
   const dualTool = cssBlock('.bar-shell[data-mode="dual"] .bar-tool');
   const quadTool = cssBlock('.bar-shell[data-mode="quad"] .bar-tool');
   const indicatorOnlyShell = cssBlock('.bar-shell[data-mode="dual"],\n.bar-shell[data-mode="quad"]');
@@ -416,15 +419,38 @@ test("taskbar overlay implements the four documented bar display modes", () => {
   assert.match(quadSecondary, /--quad-color: var\(--secondary-color\)/);
   assert.match(ringOff, /display: none/);
   assert.equal(cssBlock('.bar-shell[data-ring="off"] .bar-ring'), "");
-  assert.match(textModeTool, /justify-content: center/);
+  assert.match(textModeTool, /padding-inline: 0/);
+  assert.match(textModeTool, /justify-content: flex-start/);
+  assert.match(fullCopy, /flex: 0 0 auto/);
+  assert.match(fullCopy, /grid-template-columns: max-content max-content max-content/);
+  assert.match(fullCopy, /column-gap: 6px/);
+  assert.match(compactCopy, /flex: 0 0 auto/);
+  assert.match(compactCopy, /grid-template-columns: max-content max-content/);
+  assert.match(compactCopy, /column-gap: 6px/);
+  assert.match(horizontalTextModeTool, /width: max-content/);
+  assert.match(horizontalTextModeTool, /overflow: visible/);
   for (const block of [dualTool, quadTool]) {
     assert.match(block, /justify-content: flex-start/);
   }
   assert.match(cssBlock(".bar-shell"), /padding: 0;/);
+  assert.match(cssBlock(".bar-shell"), /--bar-content-gap: 14px/);
   assert.match(cssBlock(".bar-tool"), /padding: 0 0\.5px/);
+  assert.match(cssBlock(".bar-tool"), /gap: var\(--bar-content-gap\)/);
   assert.equal(indicatorOnlyShell, "");
   assert.doesNotMatch(dualTool, /padding:/);
   assert.doesNotMatch(quadTool, /padding:/);
+});
+
+test("taskbar orientation is explicit so short horizontal bars stay vertically centered", () => {
+  const verticalShell = cssBlock('.bar-shell[data-taskbar-orientation="vertical"]');
+  const verticalTool = cssBlock('.bar-shell[data-taskbar-orientation="vertical"] .bar-tool');
+  const verticalQuad = cssBlock('.bar-shell[data-taskbar-orientation="vertical"] .bar-quad');
+
+  assert.match(barMarkup, /data-taskbar-orientation="horizontal"/);
+  assert.doesNotMatch(css, /@media\s*\(orientation:\s*portrait\)/);
+  assert.match(verticalShell, /grid-auto-flow: row/);
+  assert.match(verticalTool, /flex-direction: column/);
+  assert.match(verticalQuad, /flex-direction: column/);
 });
 
 test("dual ring center number stays inside the ring hole", () => {
@@ -525,10 +551,28 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="ring_center_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="ring_number_font_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="bar_text_font_size_px"[\s\S]*?step="0\.1"/);
+  assert.match(panelMarkup, /name="bar_content_gap_px"[\s\S]*?min="0"[\s\S]*?max="24"[\s\S]*?step="0\.1"/);
+  assert.match(panelMarkup, /name="bar_content_gap_px"[\s\S]*?value="14"/);
+  assert.equal((panelMarkup.match(/data-range-number-for=/g) ?? []).length, 10);
+  for (const name of [
+    "ring_center_size_px",
+    "ring_number_font_size_px",
+    "ring_number_font_weight",
+    "bar_text_font_size_px",
+    "bar_text_font_weight",
+    "bar_content_gap_px",
+    "ring_number_outline_width_px",
+    "ring_size_px",
+    "ring_thickness_px",
+    "ring_gap_px",
+  ]) {
+    assert.match(panelMarkup, new RegExp(`data-range-number-for="${name}"`));
+  }
   assert.match(panelMarkup, /name="ring_number_font_weight"/);
   assert.match(panelMarkup, /name="bar_text_font_weight"/);
   assert.match(rustConfig, /ring_center_size_px/);
   assert.match(rustConfig, /ring_number_outline_width_px/);
+  assert.match(rustConfig, /bar_content_gap_px/);
   assert.match(numbersOff, /display: none/);
   assert.match(outlineOn, /text-shadow:/);
   assert.match(outlineOn, /var\(--ring-number-outline-width\)/);
@@ -1138,7 +1182,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.5"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.6"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {
