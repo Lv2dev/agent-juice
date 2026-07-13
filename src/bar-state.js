@@ -286,6 +286,7 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
     ringNumberFontWeight: intRangeSetting(merged.ring_number_font_weight, 600, 100, 900),
     barTextFontSizePx: numberRangeSetting(merged.bar_text_font_size_px, 11, 8, 16),
     barTextFontWeight: intRangeSetting(merged.bar_text_font_weight, 500, 100, 900),
+    barContentGapPx: numberRangeSetting(merged.bar_content_gap_px, 14, 0, 24),
     tools: TOOLS.filter((tool) => toolEnabled(merged, tool)).map((tool) =>
       barToolViewModel(statuses, tool, merged, now),
     ),

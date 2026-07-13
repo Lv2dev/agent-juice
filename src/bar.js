@@ -10,8 +10,11 @@ let statusEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
 let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
+let contentWidthSyncTimer = null;
+let lastRequestedContentWidth = "";
 const TOOLS = ["claude", "codex"];
 
 function currentWindowTool() {
@@ -36,6 +39,7 @@ let refreshMenuCloseTimer = null;
 let refreshMenuState = MENU_STATES.CLOSED;
 let refreshMenuRequest = 0;
 let refreshMenuDesiredOpen = false;
+let taskbarOrientationRequest = 0;
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
@@ -125,6 +129,7 @@ async function showRefreshMenu(event) {
         if (!refreshMenuDesiredOpen) {
           setRefreshMenuState(MENU_STATES.CLOSED);
           syncNativeTooltip();
+          scheduleTaskbarContentWidthSync();
         }
       }
       return;
@@ -144,6 +149,7 @@ async function showRefreshMenu(event) {
     await setNativeMenuOpen(false).catch(() => false);
     setRefreshMenuState(MENU_STATES.CLOSED);
     syncNativeTooltip();
+    scheduleTaskbarContentWidthSync();
   }
 }
 
@@ -161,10 +167,12 @@ function hideRefreshMenu() {
         if (request !== refreshMenuRequest || refreshMenuDesiredOpen) return;
         setRefreshMenuState(MENU_STATES.CLOSED);
         syncNativeTooltip();
+        scheduleTaskbarContentWidthSync();
       })
       .catch(() => {});
   } else {
     setRefreshMenuState(MENU_STATES.CLOSED);
+    scheduleTaskbarContentWidthSync();
   }
 }
 
@@ -266,6 +274,47 @@ function renderTool(vm, limitOrder) {
   }
 }
 
+function scheduleTaskbarContentWidthSync() {
+  if (!CURRENT_TOOL || !tauriApi().core?.invoke) return;
+  const root = document.querySelector("#bar");
+  const item = toolElement(CURRENT_TOOL);
+  const mode = root?.dataset?.mode;
+  if (
+    !root ||
+    !item ||
+    item.hidden ||
+    root.dataset.taskbarOrientation !== "horizontal" ||
+    refreshMenuState !== MENU_STATES.CLOSED ||
+    !["full", "compact"].includes(mode) ||
+    (typeof item.getBoundingClientRect !== "function" && !(Number(item.scrollWidth) > 0))
+  ) {
+    return;
+  }
+
+  clearTimeout(contentWidthSyncTimer);
+  contentWidthSyncTimer = setTimeout(() => {
+    contentWidthSyncTimer = null;
+    if (
+      item.hidden ||
+      root.dataset.taskbarOrientation !== "horizontal" ||
+      refreshMenuState !== MENU_STATES.CLOSED ||
+      !["full", "compact"].includes(mode)
+    ) {
+      return;
+    }
+
+    const rectWidth = Number(item.getBoundingClientRect?.().width) || 0;
+    const width = Math.ceil(Math.max(rectWidth, Number(item.scrollWidth) || 0));
+    if (!Number.isFinite(width) || width < 1 || width > 1024) return;
+    const requestKey = `${mode}:${width}`;
+    if (requestKey === lastRequestedContentWidth) return;
+    lastRequestedContentWidth = requestKey;
+    void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width }).catch(() => {
+      if (lastRequestedContentWidth === requestKey) lastRequestedContentWidth = "";
+    });
+  }, CONTENT_WIDTH_SYNC_DELAY_MS);
+}
+
 function syncNativeTooltip() {
   if (refreshMenuState !== MENU_STATES.CLOSED || !pendingNativeTooltip) return;
   const { tool, text } = pendingNativeTooltip;
@@ -303,6 +352,7 @@ function renderBar() {
   root.style?.setProperty("--ring-number-font-weight", String(vm.ringNumberFontWeight));
   root.style?.setProperty("--bar-text-font-size", `${vm.barTextFontSizePx}px`);
   root.style?.setProperty("--bar-text-font-weight", String(vm.barTextFontWeight));
+  root.style?.setProperty("--bar-content-gap", `${vm.barContentGapPx}px`);
   delete root.dataset.tool;
   root.dataset.currentTool = CURRENT_TOOL ?? "all";
   for (const tool of TOOLS) {
@@ -313,6 +363,7 @@ function renderBar() {
     if (CURRENT_TOOL && tool.tool !== CURRENT_TOOL) continue;
     renderTool(tool, vm.limitOrder);
   }
+  scheduleTaskbarContentWidthSync();
 }
 
 function setDragging(payload) {
@@ -349,11 +400,34 @@ async function loadSettings() {
   }
 }
 
+async function loadTaskbarOrientation() {
+  const root = document.querySelector("#bar");
+  if (!root) return;
+
+  const requestGeneration = ++taskbarOrientationRequest;
+  if (!CURRENT_TOOL) {
+    root.dataset.taskbarOrientation = "horizontal";
+    return;
+  }
+
+  try {
+    const orientation = await invoke("get_taskbar_orientation", { tool: CURRENT_TOOL });
+    if (taskbarOrientationRequest !== requestGeneration) return;
+    root.dataset.taskbarOrientation = orientation === "vertical" ? "vertical" : "horizontal";
+    scheduleTaskbarContentWidthSync();
+  } catch {
+    if (taskbarOrientationRequest !== requestGeneration) return;
+    root.dataset.taskbarOrientation = "horizontal";
+    scheduleTaskbarContentWidthSync();
+  }
+}
+
 function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer) return;
   snapshotFallbackTimer = setInterval(() => {
     void loadSettings().then(renderBar);
     void loadStatus();
+    void loadTaskbarOrientation();
   }, 30_000);
   snapshotFallbackTimer?.unref?.();
 }
@@ -394,6 +468,7 @@ function bindEvents() {
         applyFont(settings);
         applyTranslations(settings);
         renderBar();
+        void loadTaskbarOrientation();
       }
     });
     void listenWithRetry(listen, "taskbar-dragging-updated", (event) => {
@@ -420,7 +495,7 @@ async function bootstrap() {
   bindRefreshMenu();
   renderBar();
   bindEvents();
-  await Promise.all([loadSettings(), loadStatus()]);
+  await Promise.all([loadSettings(), loadStatus(), loadTaskbarOrientation()]);
   renderBar();
 }
 

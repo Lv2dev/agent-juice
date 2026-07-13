@@ -163,6 +163,110 @@ test("bar render uses the current window tool and does not apply configured gap"
   delete global.document;
 });
 
+test("bar loads the selected shell taskbar orientation instead of inferring it from viewport shape", async () => {
+  const root = { dataset: {} };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+  const calls = [];
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          if (command === "get_settings") return {};
+          if (command === "get_status") return [];
+          if (command === "get_taskbar_orientation") return "vertical";
+          return null;
+        },
+      },
+      event: {
+        async listen() {},
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-taskbar-orientation`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(root.dataset.taskbarOrientation, "vertical");
+  assert.deepEqual(
+    calls.find(({ command }) => command === "get_taskbar_orientation"),
+    { command: "get_taskbar_orientation", args: { tool: "codex" } },
+  );
+  delete global.window;
+  delete global.document;
+});
+
+test("full bar reports packed content width once after horizontal rendering", async () => {
+  const root = { dataset: {} };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+  tools.codex.scrollWidth = 187;
+  tools.codex.getBoundingClientRect = () => ({ width: 186.2 });
+  const calls = [];
+  const eventHandlers = {};
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          if (command === "get_settings") return { bar_mode: "full" };
+          if (command === "get_status") return [];
+          if (command === "get_taskbar_orientation") return "horizontal";
+          return null;
+        },
+      },
+      event: {
+        async listen(name, handler) {
+          eventHandlers[name] = handler;
+        },
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-content-width`);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(
+    calls.filter(({ command }) => command === "set_taskbar_content_width"),
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 187 } }],
+  );
+
+  eventHandlers["status-updated"]?.({ payload: [] });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(
+    calls.filter(({ command }) => command === "set_taskbar_content_width").length,
+    1,
+  );
+  delete global.window;
+  delete global.document;
+});
+
 test("bar render applies ring number and geometry settings to the root", async () => {
   const rootStyleProps = new Map();
   const root = {
@@ -201,6 +305,7 @@ test("bar render applies ring number and geometry settings to the root", async (
               ring_number_font_weight: 650,
               bar_text_font_size_px: 12.5,
               bar_text_font_weight: 550,
+              bar_content_gap_px: 3.5,
             };
           }
           if (command === "get_status") return [];
@@ -242,6 +347,7 @@ test("bar render applies ring number and geometry settings to the root", async (
   assert.equal(root.style.getPropertyValue("--ring-number-font-weight"), "650");
   assert.equal(root.style.getPropertyValue("--bar-text-font-size"), "12.5px");
   assert.equal(root.style.getPropertyValue("--bar-text-font-weight"), "550");
+  assert.equal(root.style.getPropertyValue("--bar-content-gap"), "3.5px");
   delete global.window;
   delete global.document;
 });

@@ -423,7 +423,12 @@
               </label>
 
               <label class="range-row center-size-row">
-                <span><span data-i18n="field.centerSize">중앙 공간 지름</span> <output name="ring-center-size-output">16</output>px</span>
+                <span data-i18n="field.centerSize">중앙 공간 지름</span>
+                <span class="range-value-editor">
+                  <output name="ring-center-size-output" hidden>16</output>
+                  <input type="number" data-range-number-for="ring_center_size_px" min="4" max="32" step="0.1" value="16" />
+                  <span class="range-unit">px</span>
+                </span>
                 <input
                   type="range"
                   name="ring_center_size_px"
@@ -438,7 +443,12 @@
                 <summary data-i18n="advanced.typography">글자 조정</summary>
                 <div class="settings-advanced-grid">
                   <label class="range-row">
-                    <span><span data-i18n="field.ringNumberSize">원 안 숫자 크기</span> <output name="ring-number-font-size-output">9</output>px</span>
+                    <span data-i18n="field.ringNumberSize">원 안 숫자 크기</span>
+                    <span class="range-value-editor">
+                      <output name="ring-number-font-size-output" hidden>9</output>
+                      <input type="number" data-range-number-for="ring_number_font_size_px" min="6" max="16" step="0.1" value="9" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="ring_number_font_size_px"
@@ -450,7 +460,11 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.ringNumberWeight">원 안 숫자 굵기</span> <output name="ring-number-font-weight-output">600</output></span>
+                    <span data-i18n="field.ringNumberWeight">원 안 숫자 굵기</span>
+                    <span class="range-value-editor">
+                      <output name="ring-number-font-weight-output" hidden>600</output>
+                      <input type="number" data-range-number-for="ring_number_font_weight" min="100" max="900" step="50" value="600" />
+                    </span>
                     <input
                       type="range"
                       name="ring_number_font_weight"
@@ -462,7 +476,12 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.infoTextSize">바깥 정보 글자 크기</span> <output name="bar-text-font-size-output">11</output>px</span>
+                    <span data-i18n="field.infoTextSize">바깥 정보 글자 크기</span>
+                    <span class="range-value-editor">
+                      <output name="bar-text-font-size-output" hidden>11</output>
+                      <input type="number" data-range-number-for="bar_text_font_size_px" min="8" max="16" step="0.1" value="11" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="bar_text_font_size_px"
@@ -474,7 +493,11 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.infoTextWeight">바깥 정보 글자 굵기</span> <output name="bar-text-font-weight-output">500</output></span>
+                    <span data-i18n="field.infoTextWeight">바깥 정보 글자 굵기</span>
+                    <span class="range-value-editor">
+                      <output name="bar-text-font-weight-output" hidden>500</output>
+                      <input type="number" data-range-number-for="bar_text_font_weight" min="100" max="900" step="50" value="500" />
+                    </span>
                     <input
                       type="range"
                       name="bar_text_font_weight"
@@ -484,6 +507,23 @@
                       value="500"
                     />
                   </label>
+
+                  <label class="range-row">
+                    <span data-i18n="field.barContentGap">표시기-정보 간격</span>
+                    <span class="range-value-editor">
+                      <output name="bar-content-gap-output" hidden>14</output>
+                      <input type="number" data-range-number-for="bar_content_gap_px" min="0" max="24" step="0.1" value="14" />
+                      <span class="range-unit">px</span>
+                    </span>
+                    <input
+                      type="range"
+                      name="bar_content_gap_px"
+                      min="0"
+                      max="24"
+                      step="0.1"
+                      value="14"
+                    />
+                  </label>
                 </div>
               </details>
 
@@ -491,7 +531,12 @@
                 <summary data-i18n="advanced.indicator">고급 조정</summary>
                 <div class="settings-advanced-grid">
                   <label class="range-row">
-                    <span><span data-i18n="field.numberOutlineWidth">숫자 윤곽 두께</span> <output name="ring-number-outline-width-output">1.2</output>px</span>
+                    <span data-i18n="field.numberOutlineWidth">숫자 윤곽 두께</span>
+                    <span class="range-value-editor">
+                      <output name="ring-number-outline-width-output" hidden>1.2</output>
+                      <input type="number" data-range-number-for="ring_number_outline_width_px" min="0" max="4" step="0.1" value="1.2" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="ring_number_outline_width_px"
@@ -503,7 +548,12 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.ringSize">원 크기</span> <output name="ring-size-output">36</output>px</span>
+                    <span data-i18n="field.ringSize">원 크기</span>
+                    <span class="range-value-editor">
+                      <output name="ring-size-output" hidden>36</output>
+                      <input type="number" data-range-number-for="ring_size_px" min="20" max="44" step="0.1" value="36" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="ring_size_px"
@@ -515,7 +565,12 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.ringThickness">링 두께</span> <output name="ring-thickness-output">4</output>px</span>
+                    <span data-i18n="field.ringThickness">링 두께</span>
+                    <span class="range-value-editor">
+                      <output name="ring-thickness-output" hidden>4</output>
+                      <input type="number" data-range-number-for="ring_thickness_px" min="1" max="10" step="0.1" value="4" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="ring_thickness_px"
@@ -527,7 +582,12 @@
                   </label>
 
                   <label class="range-row">
-                    <span><span data-i18n="field.ringGap">링 간격</span> <output name="ring-gap-output">6</output>px</span>
+                    <span data-i18n="field.ringGap">링 간격</span>
+                    <span class="range-value-editor">
+                      <output name="ring-gap-output" hidden>6</output>
+                      <input type="number" data-range-number-for="ring_gap_px" min="2" max="14" step="0.1" value="6" />
+                      <span class="range-unit">px</span>
+                    </span>
                     <input
                       type="range"
                       name="ring_gap_px"

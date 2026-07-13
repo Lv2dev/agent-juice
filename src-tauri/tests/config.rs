@@ -155,6 +155,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         ring_number_font_weight: 650,
         bar_text_font_size_px: 12.5,
         bar_text_font_weight: 550,
+        bar_content_gap_px: 3.5,
         autostart_on: false,
         update_check_on: false,
         language: "en".into(),
@@ -199,6 +200,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.ring_number_font_weight, 650);
     assert_eq!(loaded.bar_text_font_size_px, 12.5);
     assert_eq!(loaded.bar_text_font_weight, 550);
+    assert_eq!(loaded.bar_content_gap_px, 3.5);
     assert!(!loaded.autostart_on);
     assert!(!loaded.update_check_on);
     assert_eq!(loaded.language, "en");
@@ -244,6 +246,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.ring_number_font_weight, 600);
     assert_eq!(legacy.bar_text_font_size_px, 11.0);
     assert_eq!(legacy.bar_text_font_weight, 500);
+    assert_eq!(legacy.bar_content_gap_px, 14.0);
     assert!(legacy.autostart_on);
     assert_eq!(legacy.language, "system");
     assert_eq!(legacy.theme, "system");
@@ -657,6 +660,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         ring_number_font_weight: 650,
         bar_text_font_size_px: 12.5,
         bar_text_font_weight: 550,
+        bar_content_gap_px: 3.5,
         autostart_on: false,
         update_check_on: false,
         language: "ko".into(),
@@ -719,6 +723,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.ring_number_font_weight, 650);
     assert_eq!(settings.bar_text_font_size_px, 12.5);
     assert_eq!(settings.bar_text_font_weight, 550);
+    assert_eq!(settings.bar_content_gap_px, 3.5);
     assert!(!settings.autostart_on);
     assert!(!settings.update_check_on);
     assert_eq!(settings.language, "ko");
@@ -779,6 +784,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
         ring_number_font_weight: 999,
         bar_text_font_size_px: -1.0,
         bar_text_font_weight: 999,
+        bar_content_gap_px: 99.0,
         taskbar_offset_ratio: -0.5,
         claude_taskbar_offset_ratio: -0.5,
         codex_taskbar_offset_ratio: 2.0,
@@ -805,6 +811,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.ring_number_font_weight, 900);
     assert_eq!(settings.bar_text_font_size_px, 8.0);
     assert_eq!(settings.bar_text_font_weight, 900);
+    assert_eq!(settings.bar_content_gap_px, 24.0);
     assert_eq!(settings.taskbar_offset_ratio, 0.0);
     assert_eq!(settings.claude_taskbar_offset_ratio, 0.0);
     assert_eq!(settings.codex_taskbar_offset_ratio, 1.0);

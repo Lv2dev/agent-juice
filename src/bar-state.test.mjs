@@ -227,6 +227,7 @@ test("barViewModel normalizes mode and ring settings", () => {
     ring_number_font_weight: 650,
     bar_text_font_size_px: 12.5,
     bar_text_font_weight: 550,
+    bar_content_gap_px: 3.5,
   });
   assert.equal(full.mode, "compact");
   assert.equal(full.fullResetTimeOn, true);
@@ -245,6 +246,7 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(full.ringNumberFontWeight, 650);
   assert.equal(full.barTextFontSizePx, 12.5);
   assert.equal(full.barTextFontWeight, 550);
+  assert.equal(full.barContentGapPx, 3.5);
   assert.equal(full.displayBasis, "remaining");
   assert.equal(full.tools.length, 2);
 
@@ -269,6 +271,7 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(fallback.ringNumberFontWeight, 600);
   assert.equal(fallback.barTextFontSizePx, 11);
   assert.equal(fallback.barTextFontWeight, 500);
+  assert.equal(fallback.barContentGapPx, 14);
 });
 
 test("barViewModel clamps ring geometry settings", () => {
@@ -284,6 +287,7 @@ test("barViewModel clamps ring geometry settings", () => {
     ring_number_font_weight: 999,
     bar_text_font_size_px: -1,
     bar_text_font_weight: 999,
+    bar_content_gap_px: 99,
   });
 
   assert.equal(vm.ringSizePx, 44);
@@ -296,6 +300,7 @@ test("barViewModel clamps ring geometry settings", () => {
   assert.equal(vm.ringNumberFontWeight, 900);
   assert.equal(vm.barTextFontSizePx, 8);
   assert.equal(vm.barTextFontWeight, 900);
+  assert.equal(vm.barContentGapPx, 24);
 });
 
 test("barViewModel preserves valid ring geometry at one-decimal precision", () => {
@@ -404,7 +409,7 @@ test("barViewModel preserves every documented taskbar bar mode", () => {
   }
 });
 
-test("barViewModel filters hidden tools without exposing a gap setting", () => {
+test("barViewModel filters hidden tools without restoring the removed tool-to-tool gap", () => {
   const codexOnly = barViewModel([], {
     ...settings,
     show_claude: false,

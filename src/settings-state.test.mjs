@@ -34,6 +34,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       ring_number_font_weight: 650,
       bar_text_font_size_px: 12.5,
       bar_text_font_weight: 550,
+      bar_content_gap_px: 3.5,
       autostart_on: false,
       update_check_on: false,
       language: "en",
@@ -78,6 +79,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       ringNumberFontWeight: 650,
       barTextFontSizePx: 12.5,
       barTextFontWeight: 550,
+      barContentGapPx: 3.5,
       autostartOn: false,
       updateCheckOn: false,
       language: "en",
@@ -140,6 +142,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     ring_number_font_weight: "650",
     bar_text_font_size_px: "12.5",
     bar_text_font_weight: "550",
+    bar_content_gap_px: "3.5",
     autostart_on: "on",
     update_check_on: "on",
     language: "en",
@@ -186,6 +189,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     ring_number_font_weight: 650,
     bar_text_font_size_px: 12.5,
     bar_text_font_weight: 550,
+    bar_content_gap_px: 3.5,
     autostart_on: true,
     update_check_on: true,
     language: "en",
@@ -243,6 +247,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).ringNumberFontWeight, 600);
   assert.equal(formStateFromSettings({}).barTextFontSizePx, 11);
   assert.equal(formStateFromSettings({}).barTextFontWeight, 500);
+  assert.equal(formStateFromSettings({}).barContentGapPx, 14);
   assert.equal(formStateFromSettings({ indicator_style: "unexpected" }).indicatorStyle, "ring");
   assert.equal(formStateFromSettings({ ring_size_px: 99 }).ringSizePx, 44);
   assert.equal(formStateFromSettings({ ring_thickness_px: 99 }).ringThicknessPx, 10);
@@ -255,6 +260,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ ring_number_font_weight: 999 }).ringNumberFontWeight, 900);
   assert.equal(formStateFromSettings({ bar_text_font_size_px: -1 }).barTextFontSizePx, 8);
   assert.equal(formStateFromSettings({ bar_text_font_weight: 999 }).barTextFontWeight, 900);
+  assert.equal(formStateFromSettings({ bar_content_gap_px: 99 }).barContentGapPx, 24);
+  assert.equal(formStateFromSettings({ bar_content_gap_px: -1 }).barContentGapPx, 0);
   assert.equal(formStateFromSettings({ taskbar_offset_ratio: 0.2 }).claudeTaskbarOffsetRatio, 0.2);
   assert.equal(formStateFromSettings({ taskbar_offset_ratio: 0.2 }).codexTaskbarOffsetRatio, 0.2);
   assert.equal(formStateFromSettings({ claude_taskbar_offset_ratio: 2 }).claudeTaskbarOffsetRatio, 1);
@@ -292,6 +299,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     ring_number_font_weight: "999",
     bar_text_font_size_px: "-1",
     bar_text_font_weight: "999",
+    bar_content_gap_px: "99",
     claude_taskbar_offset_ratio: "-1",
     codex_taskbar_offset_ratio: "2",
   });
@@ -319,6 +327,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.ring_number_font_weight, 900);
   assert.equal(payload.bar_text_font_size_px, 8);
   assert.equal(payload.bar_text_font_weight, 900);
+  assert.equal(payload.bar_content_gap_px, 24);
   assert.equal(payload.claude_taskbar_offset_ratio, 0);
   assert.equal(payload.codex_taskbar_offset_ratio, 1);
   assert.equal(payload.show_claude, false);

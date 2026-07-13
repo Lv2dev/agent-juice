@@ -162,6 +162,40 @@ function transformThresholdInputs(nextBasis) {
   currentDisplayBasis = nextBasis;
 }
 
+function syncRangeFromNumberEditor(editor, commit = false) {
+  const fieldName = editor?.dataset?.rangeNumberFor;
+  const field = fieldName ? form?.elements?.namedItem(fieldName) : null;
+  const rawValue = String(editor?.value ?? "").trim();
+  const value = Number(rawValue);
+  if (!field) return false;
+  if (!rawValue || !Number.isFinite(value)) {
+    if (commit) editor.value = field.value;
+    return false;
+  }
+
+  const min = Number(field.min);
+  const max = Number(field.max);
+  if (!commit && ((Number.isFinite(min) && value < min) || (Number.isFinite(max) && value > max))) {
+    return false;
+  }
+
+  const clamped = Math.min(
+    Number.isFinite(max) ? max : value,
+    Math.max(Number.isFinite(min) ? min : value, value),
+  );
+  field.value = String(clamped);
+  if (commit) editor.value = field.value;
+  return true;
+}
+
+function syncRangeNumberEditors() {
+  for (const editor of form?.querySelectorAll?.("[data-range-number-for]") ?? []) {
+    const field = form.elements.namedItem(editor.dataset.rangeNumberFor);
+    if (!field) continue;
+    editor.value = field.value;
+  }
+}
+
 function updateOutputs() {
   if (!form) return;
   const pairs = [
@@ -178,6 +212,7 @@ function updateOutputs() {
     ["ring_number_font_weight", "ring-number-font-weight-output"],
     ["bar_text_font_size_px", "bar-text-font-size-output"],
     ["bar_text_font_weight", "bar-text-font-weight-output"],
+    ["bar_content_gap_px", "bar-content-gap-output"],
   ];
 
   for (const [fieldName, outputName] of pairs) {
@@ -186,6 +221,7 @@ function updateOutputs() {
     if (field && output) output.value = field.value;
     updateRangeProgress(field);
   }
+  syncRangeNumberEditors();
 
   const palette = form.elements.namedItem("palette")?.value ?? "traffic";
   if (customRow) customRow.hidden = palette !== "custom";
@@ -272,6 +308,7 @@ function fillForm(settings) {
   setField("ring_number_font_weight", state.ringNumberFontWeight);
   setField("bar_text_font_size_px", state.barTextFontSizePx);
   setField("bar_text_font_weight", state.barTextFontWeight);
+  setField("bar_content_gap_px", state.barContentGapPx);
   setField("autostart_on", state.autostartOn);
   setField("update_check_on", state.updateCheckOn);
   setField("language", state.language);
@@ -409,6 +446,9 @@ function scheduleAutosave() {
 }
 
 function handleSettingsMutation(event) {
+  if (event?.target?.dataset?.rangeNumberFor) {
+    if (!syncRangeFromNumberEditor(event.target, event.type === "change")) return;
+  }
   if (event?.target?.name === "display_basis") {
     transformThresholdInputs(displayBasis(event.target.value));
   }

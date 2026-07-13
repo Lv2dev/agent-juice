@@ -31,6 +31,7 @@ const TASKBAR_DOCK_PADDING: f32 = 0.0;
 const TASKBAR_FULL_TEXT_BUDGET: f32 = 179.0;
 const TASKBAR_FULL_RESET_TEXT_BUDGET: f32 = 276.0;
 const TASKBAR_COMPACT_TEXT_BUDGET: f32 = 135.0;
+const TASKBAR_CONTENT_GAP_BASE: f32 = 6.0;
 const TASKBAR_QUAD_GAP: f32 = 7.0;
 const TASKBAR_INDICATOR_HORIZONTAL_PADDING: f32 = 1.0;
 const TASKBAR_MENU_WIDTH: i32 = 96;
@@ -79,6 +80,19 @@ struct TaskbarDragState(AtomicBool);
 
 #[derive(Default)]
 struct TaskbarTooltipTextState(Mutex<std::collections::HashMap<&'static str, String>>);
+
+#[derive(Clone, Debug, PartialEq)]
+struct TaskbarContentLayout {
+    mode: String,
+    width: i32,
+    ratio: Option<f32>,
+}
+
+#[derive(Default)]
+struct TaskbarContentLayoutState {
+    claude: Mutex<Option<TaskbarContentLayout>>,
+    codex: Mutex<Option<TaskbarContentLayout>>,
+}
 
 #[derive(Default)]
 struct TaskbarShutdownState(AtomicBool);
@@ -1216,8 +1230,14 @@ fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
 
     let ring_size = settings.ring_size_px.clamp(20.0, 44.0);
     let text_scale = settings.bar_text_font_size_px.clamp(8.0, 16.0) / 11.0;
+    let content_gap_delta = settings.bar_content_gap_px.clamp(0.0, 24.0) - TASKBAR_CONTENT_GAP_BASE;
     let width = match settings.bar_mode.as_str() {
-        "compact" => ring_size + TASKBAR_DOCK_PADDING + TASKBAR_COMPACT_TEXT_BUDGET * text_scale,
+        "compact" => {
+            ring_size
+                + TASKBAR_DOCK_PADDING
+                + TASKBAR_COMPACT_TEXT_BUDGET * text_scale
+                + content_gap_delta
+        }
         "dual" => ring_size + TASKBAR_INDICATOR_HORIZONTAL_PADDING,
         "quad" if settings.indicator_style == "bar" => {
             ring_size + TASKBAR_INDICATOR_HORIZONTAL_PADDING
@@ -1229,11 +1249,87 @@ fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
             } else {
                 TASKBAR_FULL_TEXT_BUDGET
             };
-            ring_size + TASKBAR_DOCK_PADDING + text_budget * text_scale
+            ring_size + TASKBAR_DOCK_PADDING + text_budget * text_scale + content_gap_delta
         }
     };
 
     Some(width.ceil() as i32)
+}
+
+fn taskbar_content_width_for_mode(
+    mode: &str,
+    layout: Option<&TaskbarContentLayout>,
+) -> Option<i32> {
+    if !matches!(mode, "full" | "compact") {
+        return None;
+    }
+    layout
+        .filter(|layout| layout.mode == mode)
+        .map(|layout| layout.width)
+}
+
+fn taskbar_content_layout_slot<'a>(
+    state: &'a TaskbarContentLayoutState,
+    tool: &str,
+) -> Option<&'a Mutex<Option<TaskbarContentLayout>>> {
+    match normalize_taskbar_tool(tool)? {
+        "claude" => Some(&state.claude),
+        "codex" => Some(&state.codex),
+        _ => None,
+    }
+}
+
+fn taskbar_content_layout<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    settings: &Settings,
+    tool: &str,
+) -> Option<TaskbarContentLayout> {
+    let state = manager.try_state::<TaskbarContentLayoutState>()?;
+    let layout = taskbar_content_layout_slot(&state, tool)?
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()?;
+    taskbar_content_width_for_mode(&settings.bar_mode, Some(&layout)).map(|_| layout)
+}
+
+fn set_taskbar_content_layout<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    layout: Option<TaskbarContentLayout>,
+) -> Option<TaskbarContentLayout> {
+    let state = manager.try_state::<TaskbarContentLayoutState>()?;
+    let slot = taskbar_content_layout_slot(&state, tool)?;
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    std::mem::replace(&mut *current, layout)
+}
+
+fn set_taskbar_content_layout_ratio<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    ratio: f32,
+) {
+    let Some(state) = manager.try_state::<TaskbarContentLayoutState>() else {
+        return;
+    };
+    let Some(slot) = taskbar_content_layout_slot(&state, tool) else {
+        return;
+    };
+    if let Some(layout) = slot.lock().unwrap_or_else(|err| err.into_inner()).as_mut() {
+        layout.ratio = Some(ratio.clamp(0.0, 1.0));
+    };
+}
+
+fn taskbar_dock_width_for_manager<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    settings: &Settings,
+    tool: &str,
+) -> Option<i32> {
+    let fallback = taskbar_dock_width(settings, tool)?;
+    Some(
+        taskbar_content_layout(manager, settings, tool)
+            .map(|layout| layout.width)
+            .unwrap_or(fallback),
+    )
 }
 
 fn taskbar_width_with_menu(width: i32, menu_open: bool) -> i32 {
@@ -1386,7 +1482,9 @@ fn taskbar_layout_ratio<R: tauri::Runtime>(
         let layout = *target.lock().unwrap_or_else(|err| err.into_inner());
         layout.open.then_some(layout.ratio).flatten()
     });
-    menu_ratio.unwrap_or_else(|| taskbar_offset_ratio(settings, tool))
+    menu_ratio
+        .or_else(|| taskbar_content_layout(manager, settings, tool).and_then(|layout| layout.ratio))
+        .unwrap_or_else(|| taskbar_offset_ratio(settings, tool))
 }
 
 fn pause_taskbar_bars_for_manager<R: tauri::Runtime>(manager: &impl tauri::Manager<R>) {
@@ -1617,7 +1715,7 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
     {
         let taskbar_paused = taskbar_bars_paused(app);
         for tool in TASKBAR_TOOLS {
-            let width = match taskbar_dock_width(settings, tool) {
+            let width = match taskbar_dock_width_for_manager(app, settings, tool) {
                 Some(width) => width,
                 None => {
                     hide_taskbar_bar(app, tool);
@@ -1654,7 +1752,7 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
             let rect = taskbar::dock_rect_for_taskbar_target(
                 &target,
                 width,
-                taskbar_offset_ratio(settings, tool),
+                taskbar_layout_ratio(app, settings, tool),
             )
             .ok_or_else(|| anyhow::anyhow!("invalid shell taskbar rectangle"))?;
             position_taskbar_bar_on_taskbar(app, tool, &taskbar, rect)?;
@@ -1931,8 +2029,8 @@ fn preserve_taskbar_leading_edges(
 ) {
     for tool in TASKBAR_TOOLS {
         let (Some(current_length), Some(requested_length)) = (
-            taskbar_dock_width(current, tool),
-            taskbar_dock_width(requested, tool),
+            taskbar_dock_width_for_manager(app, current, tool),
+            taskbar_dock_width_for_manager(app, requested, tool),
         ) else {
             continue;
         };
@@ -1984,7 +2082,7 @@ fn move_taskbar_bar(
     {
         let tool =
             normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
-        let width = taskbar_dock_width(&settings, tool)
+        let width = taskbar_dock_width_for_manager(&app, &settings, tool)
             .ok_or_else(|| "taskbar bar is hidden".to_string())?;
         let taskbar = taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool))
             .map_err(|err| err.to_string())?;
@@ -2010,6 +2108,7 @@ fn move_taskbar_bar(
         } else {
             set_taskbar_target(&mut settings, tool, &taskbar.key, ratio);
         }
+        set_taskbar_content_layout_ratio(&app, tool, ratio);
         Ok(settings)
     }
 
@@ -2106,6 +2205,98 @@ fn ensure_matching_bar_command(label: &str, tool: &str) -> Result<(), String> {
     }
 }
 
+fn taskbar_orientation(width: i32, height: i32) -> &'static str {
+    if width >= height {
+        "horizontal"
+    } else {
+        "vertical"
+    }
+}
+
+#[tauri::command]
+fn get_taskbar_orientation(window: tauri::Window, tool: String) -> Result<String, String> {
+    ensure_matching_bar_command(window.label(), &tool)?;
+
+    #[cfg(windows)]
+    {
+        let settings = Settings::load();
+        let tool =
+            normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
+        let taskbar = taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool))
+            .map_err(|err| err.to_string())?;
+        Ok(
+            taskbar_orientation(taskbar.right - taskbar.left, taskbar.bottom - taskbar.top)
+                .to_string(),
+        )
+    }
+
+    #[cfg(not(windows))]
+    Ok("horizontal".to_string())
+}
+
+#[tauri::command]
+fn set_taskbar_content_width(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    tool: String,
+    width: f64,
+) -> Result<bool, String> {
+    ensure_matching_bar_command(window.label(), &tool)?;
+    if !width.is_finite() || !(1.0..=1024.0).contains(&width) {
+        return Err("taskbar content width is out of range".into());
+    }
+
+    let tool = normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
+    let settings = Settings::load();
+    if !matches!(settings.bar_mode.as_str(), "full" | "compact") {
+        return Ok(false);
+    }
+    let width = width.ceil() as i32;
+    let previous = taskbar_content_layout(&app, &settings, tool);
+    if previous
+        .as_ref()
+        .is_some_and(|layout| layout.mode == settings.bar_mode && layout.width == width)
+    {
+        return Ok(false);
+    }
+
+    #[cfg(windows)]
+    let ratio = (|| {
+        let current_rect = current_bar_rect(&app, tool).ok()?;
+        let taskbar =
+            taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool)).ok()?;
+        let taskbar_rect = taskbar::DockRect {
+            x: taskbar.left,
+            y: taskbar.top,
+            width: taskbar.right - taskbar.left,
+            height: taskbar.bottom - taskbar.top,
+        };
+        let current_window = taskbar::DockRect {
+            x: current_rect.left,
+            y: current_rect.top,
+            width: current_rect.right - current_rect.left,
+            height: current_rect.bottom - current_rect.top,
+        };
+        let new_length = taskbar_physical_length_for_window(width, taskbar.hwnd);
+        taskbar_ratio_preserving_leading_edge(taskbar_rect, current_window, new_length)
+    })()
+    .or_else(|| Some(taskbar_offset_ratio(&settings, tool)));
+    #[cfg(not(windows))]
+    let ratio = Some(taskbar_offset_ratio(&settings, tool));
+
+    let next = TaskbarContentLayout {
+        mode: settings.bar_mode.clone(),
+        width,
+        ratio,
+    };
+    set_taskbar_content_layout(&app, tool, Some(next));
+    if let Err(err) = apply_taskbar_dock(&app, &settings) {
+        set_taskbar_content_layout(&app, tool, previous);
+        return Err(err.to_string());
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 fn set_taskbar_tooltip(
     window: tauri::Window,
@@ -2144,9 +2335,10 @@ fn set_taskbar_menu_open(
     let current_rect = current_bar_rect(&app, &tool).ok();
     #[cfg(windows)]
     let menu_ratio = if open {
-        if let (Some(current_rect), Some(logical_width)) =
-            (current_rect, taskbar_dock_width(&settings, &tool))
-        {
+        if let (Some(current_rect), Some(logical_width)) = (
+            current_rect,
+            taskbar_dock_width_for_manager(&app, &settings, &tool),
+        ) {
             if let Ok(taskbar) =
                 taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, &tool))
             {
@@ -2217,7 +2409,7 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         .unwrap_or_else(|err| err.into_inner());
     let taskbar_paused = taskbar_bars_paused(manager);
     for tool in TASKBAR_TOOLS {
-        let width = match taskbar_dock_width(settings, tool) {
+        let width = match taskbar_dock_width_for_manager(manager, settings, tool) {
             Some(width) => taskbar_width_with_menu(width, taskbar_menu_is_open(manager, tool)),
             None => {
                 hide_taskbar_bar(manager, tool);
@@ -2284,7 +2476,7 @@ fn taskbar_dock_signature(
             .get(&taskbar.key)
             .copied()
             .unwrap_or_default();
-        let width = taskbar_dock_width(settings, tool).unwrap_or_default();
+        let width = taskbar_dock_width_for_manager(app, settings, tool).unwrap_or_default();
         signature.push_str(&format!(
             "|{tool}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             taskbar.hwnd.0 as isize,
@@ -2315,7 +2507,7 @@ fn save_taskbar_drag_target(
     let settings = Settings::update(|current| {
         let result = (|| {
             let taskbar = taskbar::shell_taskbar_window_for_key(monitor_key)?;
-            let logical_length = taskbar_dock_width(current, tool)
+            let logical_length = taskbar_dock_width_for_manager(app, current, tool)
                 .ok_or_else(|| anyhow::anyhow!("taskbar bar is hidden"))?;
             let physical_length = taskbar_physical_length_for_window(logical_length, taskbar.hwnd);
             let taskbar_rect = taskbar::DockRect {
@@ -2344,6 +2536,7 @@ fn save_taskbar_drag_target(
     if let Some(err) = position_error {
         return Err(err);
     }
+    set_taskbar_content_layout_ratio(app, tool, taskbar_offset_ratio(&settings, tool));
     let _ = app.emit("settings-updated", &settings);
     apply_taskbar_dock(app, &settings)?;
     Ok(())
@@ -2463,7 +2656,7 @@ fn current_bar_drag_start_for_tool(
 
     Some(TaskbarDragStart {
         tool,
-        logical_length: taskbar_dock_width(settings, tool)?,
+        logical_length: taskbar_dock_width_for_manager(app, settings, tool)?,
         grab_axis_ratio: (axis_offset as f32 / axis_length as f32).clamp(0.0, 1.0),
         grab_cross_ratio: (cross_offset as f32 / cross_length as f32).clamp(0.0, 1.0),
     })
@@ -3024,6 +3217,8 @@ pub fn run() {
             open_release_page,
             get_settings,
             save_settings,
+            get_taskbar_orientation,
+            set_taskbar_content_width,
             set_taskbar_tooltip,
             set_taskbar_menu_open,
             move_taskbar_bar,
@@ -3042,6 +3237,7 @@ pub fn run() {
             app.manage(TaskbarRecoveryState::default());
             app.manage(TaskbarDragState::default());
             app.manage(TaskbarTooltipTextState::default());
+            app.manage(TaskbarContentLayoutState::default());
             app.manage(TaskbarShutdownState::default());
             app.manage(QuitPendingState::default());
             let settings = Settings::load();
@@ -3121,11 +3317,16 @@ mod tests {
         assert!(!super::should_show_taskbar_bar_with_pause(
             &settings, "codex", false, false, true
         ));
-        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(312));
-        assert_eq!(super::taskbar_dock_width(&settings, "codex"), Some(312));
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(320));
+        assert_eq!(super::taskbar_dock_width(&settings, "codex"), Some(320));
 
         settings.bar_mode = "compact".into();
-        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(171));
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(179));
+        settings.bar_content_gap_px = 0.0;
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(165));
+        settings.bar_content_gap_px = 24.0;
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(189));
+        settings.bar_content_gap_px = 4.0;
         settings.bar_mode = "dual".into();
         assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(37));
         settings.bar_mode = "quad".into();
@@ -3146,9 +3347,9 @@ mod tests {
         settings.bar_mode = "full".into();
         settings.ring_size_px = 36.0;
         settings.full_reset_time_on = true;
-        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(312));
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(310));
         settings.full_reset_time_on = false;
-        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(215));
+        assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(213));
 
         settings.fullscreen_hide_on = false;
         assert!(super::should_show_taskbar_bar_with_fullscreen(
@@ -3171,13 +3372,35 @@ mod tests {
         assert!(!super::should_show_taskbar_bar(&settings, "claude"));
         assert!(super::should_show_taskbar_bar(&settings, "codex"));
         assert_eq!(super::taskbar_dock_width(&settings, "claude"), None);
-        assert_eq!(super::taskbar_dock_width(&settings, "codex"), Some(215));
+        assert_eq!(super::taskbar_dock_width(&settings, "codex"), Some(213));
 
         settings.show_codex = false;
         assert!(!super::should_show_taskbar_bar(&settings, "claude"));
         assert!(!super::should_show_taskbar_bar(&settings, "codex"));
         assert_eq!(super::taskbar_dock_width(&settings, "claude"), None);
         assert_eq!(super::taskbar_dock_width(&settings, "codex"), None);
+    }
+
+    #[test]
+    fn measured_taskbar_content_width_is_scoped_to_its_text_mode() {
+        let layout = super::TaskbarContentLayout {
+            mode: "full".into(),
+            width: 188,
+            ratio: Some(0.42),
+        };
+        assert_eq!(
+            super::taskbar_content_width_for_mode("full", Some(&layout)),
+            Some(188)
+        );
+        assert_eq!(
+            super::taskbar_content_width_for_mode("compact", Some(&layout)),
+            None
+        );
+        assert_eq!(
+            super::taskbar_content_width_for_mode("dual", Some(&layout)),
+            None
+        );
+        assert_eq!(super::taskbar_content_width_for_mode("full", None), None);
     }
 
     #[test]
@@ -3276,6 +3499,13 @@ mod tests {
         assert!(super::ensure_matching_bar_command("bar-claude", "codex").is_err());
         assert!(super::ensure_matching_bar_command("panel", "claude").is_err());
         assert!(super::ensure_matching_bar_command("bar-claude", "unknown").is_err());
+    }
+
+    #[test]
+    fn taskbar_orientation_uses_the_shell_rectangle_axis() {
+        assert_eq!(super::taskbar_orientation(1920, 48), "horizontal");
+        assert_eq!(super::taskbar_orientation(48, 48), "horizontal");
+        assert_eq!(super::taskbar_orientation(48, 1080), "vertical");
     }
 
     #[test]
