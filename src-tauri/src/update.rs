@@ -1,3 +1,4 @@
+use crate::{collector, paths};
 use chrono::{DateTime, Duration, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::Duration as StdDuration,
 };
 
 const GITHUB_LATEST_API: &str = "https://api.github.com/repos/Lv2dev/agent-juice/releases/latest";
@@ -53,7 +55,7 @@ struct GithubRelease {
 }
 
 pub fn state_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|dir| dir.join("agent-juice").join("update-state.json"))
+    paths::data_dir().map(|dir| dir.join("update-state.json"))
 }
 
 pub fn releases_url() -> &'static str {
@@ -241,47 +243,156 @@ fn parse_version_part(value: &str) -> Option<u64> {
 
 fn fetch_latest_release() -> anyhow::Result<String> {
     let executable = if cfg!(windows) {
-        std::env::var_os("WINDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join("System32")
-            .join("curl.exe")
+        windows_system_directory()?.join("curl.exe")
     } else {
         PathBuf::from("curl")
     };
-    let output = Command::new(executable)
-        .args([
-            "-q",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--max-time",
-            HTTP_TIMEOUT_SECS,
-            "--header",
-            "Accept: application/vnd.github+json",
-            "--header",
-            "X-GitHub-Api-Version: 2022-11-28",
-            "--user-agent",
-            concat!("Juice/", env!("CARGO_PKG_VERSION")),
-            GITHUB_LATEST_API,
-        ])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("GitHub release check failed");
+    let mut command = Command::new(executable);
+    command.args([
+        "-q",
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--max-time",
+        HTTP_TIMEOUT_SECS,
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "--user-agent",
+        concat!("Juice/", env!("CARGO_PKG_VERSION")),
+        GITHUB_LATEST_API,
+    ]);
+    collector::command_output_with_input(
+        command,
+        None,
+        StdDuration::from_secs(6),
+        "GitHub release check",
+    )
+}
+
+#[cfg(windows)]
+fn windows_system_directory() -> anyhow::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+        if length == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if length < buffer.len() {
+            return Ok(std::ffi::OsString::from_wide(&buffer[..length]).into());
+        }
+        buffer.resize(length + 1, 0);
     }
-    String::from_utf8(output.stdout).map_err(Into::into)
+}
+
+#[cfg(not(windows))]
+fn windows_system_directory() -> anyhow::Result<PathBuf> {
+    anyhow::bail!("Windows system directory is unavailable")
 }
 
 fn save_state_to(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
+    save_state_to_with(path, state, replace_state_file)
+}
+
+fn save_state_to_with(
+    path: &Path,
+    state: &UpdateState,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), sequence));
     std::fs::write(&temp, serde_json::to_vec_pretty(state)?)?;
-    if path.exists() {
-        std::fs::remove_file(path)?;
+    match replace(path, &temp) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(error.into())
+        }
     }
-    std::fs::rename(temp, path)?;
-    Ok(())
+}
+
+fn replace_state_file(path: &Path, temp: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return std::fs::rename(temp, path);
+    }
+    replace_existing_state_file(path, temp)
+}
+
+#[cfg(windows)]
+fn replace_existing_state_file(path: &Path, temp: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{ReplaceFileW, REPLACE_FILE_FLAGS},
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let target = wide(path);
+    let replacement = wide(temp);
+    unsafe {
+        ReplaceFileW(
+            PCWSTR(target.as_ptr()),
+            PCWSTR(replacement.as_ptr()),
+            PCWSTR::null(),
+            REPLACE_FILE_FLAGS(0),
+            None,
+            None,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_existing_state_file(path: &Path, temp: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_state_replace_preserves_old_bytes_and_cleans_temp() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-update-state-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("update-state.json");
+        let original = br#"{"last_checked_at":"old"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let result = save_state_to_with(&path, &UpdateState::default(), |_, _| {
+            Err(std::io::Error::other("injected replace failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("json.tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_directory_is_absolute_and_not_environment_derived() {
+        let directory = windows_system_directory().unwrap();
+        assert!(directory.is_absolute());
+        assert!(directory.is_dir());
+        assert!(directory.join("curl.exe").is_file());
+    }
 }

@@ -163,6 +163,27 @@ function limitModel(labelKey, limit, settings, now, language, tool, secondary = 
   };
 }
 
+function tooltipResetLine(labelKey, reset, language) {
+  const label = t(labelKey, language);
+  if (!reset) return `${label} –`;
+  if (reset === t("reset.past", language)) return `${label} ${reset}`;
+  return `${label} ${t("reset.prefix", language)} ${reset}`;
+}
+
+function toolTooltip(label, primary, secondary, language) {
+  return [
+    label,
+    tooltipResetLine("limit.fiveHour", primary.reset, language),
+    tooltipResetLine("limit.weekly", secondary.reset, language),
+  ].join("\n");
+}
+
+function toolAriaLabel(label, primary, secondary, state, language) {
+  const parts = [label, primary.text, secondary.text];
+  if (state === "stale") parts.push(t("state.stale", language));
+  return parts.join(", ");
+}
+
 function worstText(primary, secondary, settings) {
   const values = [primary, secondary]
     .map((limit) => displayPercentFromUsed(limit?.used_percent, settings))
@@ -187,23 +208,33 @@ export function barToolViewModel(
   };
 
   if (!status) {
+    const primary = limitModel("limit.fiveHour", null, settings, now, language, tool);
+    const secondary = limitModel("limit.weekly", null, settings, now, language, tool, true);
+    const state = "empty";
     return {
       ...base,
-      state: "empty",
+      state,
       severity: "empty",
-      primary: limitModel("limit.fiveHour", null, settings, now, language, tool),
-      secondary: limitModel("limit.weekly", null, settings, now, language, tool, true),
+      primary,
+      secondary,
       worst: "–",
+      tooltip: toolTooltip(base.label, primary, secondary, language),
+      ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
     };
   }
 
+  const primary = limitModel("limit.fiveHour", status.primary, settings, now, language, tool);
+  const secondary = limitModel("limit.weekly", status.secondary, settings, now, language, tool, true);
+  const state = status.session?.active === true ? "live" : "stale";
   return {
     ...base,
-    state: status.session?.active === true ? "live" : "stale",
+    state,
     severity: severityForStatus(status, settings),
-    primary: limitModel("limit.fiveHour", status.primary, settings, now, language, tool),
-    secondary: limitModel("limit.weekly", status.secondary, settings, now, language, tool, true),
+    primary,
+    secondary,
     worst: worstText(status.primary, status.secondary, settings),
+    tooltip: toolTooltip(base.label, primary, secondary, language),
+    ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
   };
 }
 
@@ -238,6 +269,7 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
 
   return {
     mode: normalizeBarMode(merged.bar_mode),
+    fullResetTimeOn: boolSetting(merged.full_reset_time_on, true),
     displayBasis: normalizeDisplayBasis(merged.display_basis),
     limitOrder: normalizeLimitOrder(merged.limit_order),
     indicatorStyle: normalizeIndicatorStyle(merged.indicator_style),

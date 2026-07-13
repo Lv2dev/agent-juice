@@ -26,6 +26,100 @@ fn read_json(path: &Path) -> Value {
 }
 
 #[test]
+fn storage_revision_reads_only_file_metadata() {
+    let root = temp_root("storage-revision");
+    let path = root.join("settings.json");
+
+    assert_eq!(Settings::storage_revision_at(&path), None);
+    fs::write(&path, b"{}").unwrap();
+    let first = Settings::storage_revision_at(&path).unwrap();
+    assert_eq!(first.0, 2);
+
+    fs::write(&path, b"{\"poll_interval_secs\":60}").unwrap();
+    let second = Settings::storage_revision_at(&path).unwrap();
+    assert_eq!(second.0, 25);
+    assert!(second.1 >= first.1);
+    assert_eq!(Settings::storage_revision_at(&root), None);
+}
+
+#[test]
+fn settings_update_rejects_malformed_json_and_preserves_bytes() {
+    let root = temp_root("update-malformed");
+    let path = root.join("settings.json");
+    let original = b"{\"poll_interval_secs\": 60";
+    fs::write(&path, original).unwrap();
+
+    assert_eq!(Settings::load_from(&path).poll_interval_secs, 60);
+    assert!(Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn settings_update_rejects_non_object_json_and_preserves_bytes() {
+    for (name, original) in [
+        ("array", b"[1, 2, 3]".as_slice()),
+        ("null", b"null".as_slice()),
+    ] {
+        let root = temp_root(&format!("update-{name}"));
+        let path = root.join("settings.json");
+        fs::write(&path, original).unwrap();
+
+        assert!(Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn settings_update_rejects_read_failure_without_replacing_the_path() {
+    let root = temp_root("update-read-failure");
+    let path = root.join("settings.json");
+    fs::create_dir_all(&path).unwrap();
+
+    assert!(Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).is_err());
+    assert!(path.is_dir());
+}
+
+#[test]
+fn settings_update_uses_defaults_only_when_the_file_is_missing() {
+    let root = temp_root("update-missing");
+    let path = root.join("settings.json");
+
+    let updated = Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).unwrap();
+
+    assert_eq!(updated.poll_interval_secs, 5);
+    assert_eq!(read_json(&path)["poll_interval_secs"], 5);
+}
+
+#[test]
+fn settings_update_migrates_and_clamps_valid_settings_before_mutation() {
+    let root = temp_root("update-valid");
+    let path = root.join("settings.json");
+    fs::write(
+        &path,
+        r#"{"taskbar_offset_ratio":1.25,"poll_interval_secs":2,"ring_size_px":34.5,"ring_thickness_px":6.5,"ring_gap_px":8.5,"ring_center_gap_px":2.5}"#,
+    )
+    .unwrap();
+
+    let updated = Settings::update_at(&path, |settings| settings.show_codex = false).unwrap();
+
+    assert_eq!(updated.taskbar_offset_ratio, 1.0);
+    assert_eq!(updated.claude_taskbar_offset_ratio, 1.0);
+    assert_eq!(updated.codex_taskbar_offset_ratio, 1.0);
+    assert_eq!(updated.poll_interval_secs, 60);
+    assert_eq!(updated.ring_size_px, 34.5);
+    assert_eq!(updated.ring_thickness_px, 6.5);
+    assert_eq!(updated.ring_gap_px, 8.5);
+    assert_eq!(updated.ring_center_size_px, 9.5);
+    assert!(!updated.show_codex);
+
+    let saved = read_json(&path);
+    assert_eq!(saved["poll_interval_secs"], 60);
+    assert_eq!(saved["ring_center_size_px"], 9.5);
+    assert!(saved.get("ring_center_gap_px").is_none());
+    assert_eq!(saved["show_codex"], false);
+}
+
+#[test]
 fn settings_roundtrip_and_legacy_defaults() {
     let root = temp_root("settings");
     let path = root.join("settings.json");
@@ -43,6 +137,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         poll_interval_secs: 3,
         stale_after_secs: 120,
         bar_mode: "quad".into(),
+        full_reset_time_on: true,
         limit_order: "secondary_first".into(),
         fullscreen_hide_on: false,
         maximized_hide_on: true,
@@ -86,6 +181,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.poll_interval_secs, 3);
     assert_eq!(loaded.stale_after_secs, 120);
     assert_eq!(loaded.bar_mode, "quad");
+    assert!(loaded.full_reset_time_on);
     assert_eq!(loaded.limit_order, "secondary_first");
     assert!(!loaded.fullscreen_hide_on);
     assert!(loaded.maximized_hide_on);
@@ -129,6 +225,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.poll_interval_secs, 60);
     assert_eq!(legacy.stale_after_secs, 90);
     assert_eq!(legacy.bar_mode, "full");
+    assert!(legacy.full_reset_time_on);
     assert_eq!(legacy.limit_order, "primary_first");
     assert!(legacy.fullscreen_hide_on);
     assert!(!legacy.maximized_hide_on);
@@ -160,6 +257,10 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(legacy.show_codex);
     assert!(legacy.claude_account_auto_collect_on);
     assert_eq!(legacy.tool_colors, ToolColors::default());
+
+    fs::write(&path, r#"{"full_reset_time_on":false}"#).unwrap();
+    let explicit_reset_off = Settings::load_from(&path);
+    assert!(!explicit_reset_off.full_reset_time_on);
 
     fs::write(&path, r#"{"claude_usage_auto_refresh_lab_on":false}"#).unwrap();
     let migrated_claude_collection = Settings::load_from(&path);
@@ -231,11 +332,8 @@ fn install_statusline_wrap_preserves_original_and_is_idempotent() {
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");
     fs::create_dir_all(&claude_dir).unwrap();
-    fs::write(
-        &settings_path,
-        r#"{"statusLine":{"type":"command","command":"claude-hud --theme dark"},"keep":true}"#,
-    )
-    .unwrap();
+    let original_settings = r#"{"statusLine":{"type":"command","command":"claude-hud --theme dark","padding":2,"nested":{"keep":true}},"keep":true}"#;
+    fs::write(&settings_path, original_settings).unwrap();
 
     Settings::install_statusline_wrap_at(
         &home,
@@ -254,7 +352,13 @@ fn install_statusline_wrap_preserves_original_and_is_idempotent() {
         fs::read_to_string(data_dir.join("wrap.json")).unwrap(),
         "claude-hud --theme dark"
     );
-    assert!(settings_path.with_extension("json.aj-backup").exists());
+    let metadata = read_json(&data_dir.join("wrap-meta.json"));
+    assert_eq!(metadata["version"], 2);
+    assert_eq!(metadata["original_status_line_present"], true);
+    assert_eq!(metadata["original_status_line"]["padding"], 2);
+    assert_eq!(metadata["original_status_line"]["nested"]["keep"], true);
+    let backup_path = settings_path.with_extension("json.aj-backup");
+    assert_eq!(fs::read_to_string(&backup_path).unwrap(), original_settings);
 
     Settings::install_statusline_wrap_at(&home, &data_dir, r"D:\Other\agentjuice-statusline.exe")
         .unwrap();
@@ -268,18 +372,65 @@ fn install_statusline_wrap_preserves_original_and_is_idempotent() {
         fs::read_to_string(data_dir.join("wrap.json")).unwrap(),
         "claude-hud --theme dark"
     );
+    assert_eq!(
+        read_json(&data_dir.join("wrap-meta.json"))["original_status_line"]["padding"],
+        2
+    );
+    assert_eq!(fs::read_to_string(&backup_path).unwrap(), original_settings);
 }
 
 #[test]
-fn restore_statusline_restores_only_statusline() {
+fn restore_statusline_restores_entire_original_subtree_or_absence() {
     let root = temp_root("restore");
     let home = root.join("home");
     let data_dir = root.join("data");
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");
     fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        &settings_path,
+        r#"{"statusLine":{"type":"command","command":"claude-hud --theme dark","padding":2,"nested":{"keep":true}},"keep":true}"#,
+    )
+    .unwrap();
+
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    Settings::restore_statusline_at(&home, &data_dir).unwrap();
+
+    let restored = read_json(&settings_path);
+    assert_eq!(restored["keep"], true);
+    assert_eq!(restored["statusLine"]["command"], "claude-hud --theme dark");
+    assert_eq!(restored["statusLine"]["padding"], 2);
+    assert_eq!(restored["statusLine"]["nested"]["keep"], true);
+    assert!(!data_dir.join("wrap-meta.json").exists());
+    assert!(!data_dir.join("wrap.json").exists());
+
+    fs::write(&settings_path, r#"{"keep":true}"#).unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    Settings::restore_statusline_at(&home, &data_dir).unwrap();
+
+    let removed = read_json(&settings_path);
+    assert_eq!(removed["keep"], true);
+    assert!(removed.get("statusLine").is_none());
+
+    fs::write(&settings_path, r#"{"statusLine":null,"keep":true}"#).unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    Settings::restore_statusline_at(&home, &data_dir).unwrap();
+    let restored_null = read_json(&settings_path);
+    assert!(restored_null.get("statusLine").is_some());
+    assert!(restored_null["statusLine"].is_null());
+}
+
+#[test]
+fn restore_statusline_decodes_legacy_metadata() {
+    let root = temp_root("restore-legacy");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     fs::create_dir_all(&data_dir).unwrap();
-    fs::write(data_dir.join("wrap.json"), "claude-hud --theme dark").unwrap();
     fs::write(
         data_dir.join("wrap-meta.json"),
         r#"{"managed_command":"\"C:/Juice/agentjuice-statusline.exe\"","original_command":"claude-hud --theme dark"}"#,
@@ -308,14 +459,95 @@ fn restore_statusline_restores_only_statusline() {
     )
     .unwrap();
     Settings::restore_statusline_at(&home, &data_dir).unwrap();
-
-    let removed = read_json(&settings_path);
-    assert_eq!(removed["keep"], true);
-    assert!(removed.get("statusLine").is_none());
+    assert!(read_json(&settings_path).get("statusLine").is_none());
 }
 
 #[test]
-fn restore_statusline_refuses_missing_metadata_or_unmanaged_current_command() {
+fn restore_statusline_rejects_incomplete_v2_metadata_without_mutation() {
+    for (name, metadata) in [
+        (
+            "missing-managed",
+            r#"{"version":2,"managed_command":"managed","original_status_line_present":false}"#,
+        ),
+        (
+            "missing-presence",
+            r#"{"version":2,"managed_command":"managed","managed_status_line":{"type":"command","command":"managed"}}"#,
+        ),
+        (
+            "missing-original",
+            r#"{"version":2,"managed_command":"managed","managed_status_line":{"type":"command","command":"managed"},"original_status_line_present":true}"#,
+        ),
+    ] {
+        let root = temp_root(name);
+        let home = root.join("home");
+        let data_dir = root.join("data");
+        let settings_path = home.join(".claude").join("settings.json");
+        let meta_path = data_dir.join("wrap-meta.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+        let settings = r#"{"statusLine":{"type":"command","command":"managed"},"keep":true}"#;
+        fs::write(&settings_path, settings).unwrap();
+        fs::write(&meta_path, metadata).unwrap();
+
+        assert!(Settings::restore_statusline_at(&home, &data_dir).is_err());
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), settings);
+        assert_eq!(fs::read_to_string(&meta_path).unwrap(), metadata);
+    }
+}
+
+#[test]
+fn nsis_uninstall_hooks_restore_before_removal_and_delete_canonical_data_dir() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config = read_json(&manifest_dir.join("tauri.conf.json"));
+    assert_eq!(
+        config["bundle"]["windows"]["nsis"]["installerHooks"],
+        "./windows/hooks.nsh"
+    );
+
+    let hooks = fs::read_to_string(manifest_dir.join("windows/hooks.nsh")).unwrap();
+    assert!(hooks.contains("NSIS_HOOK_PREUNINSTALL"));
+    assert!(hooks.contains("--restore-owned-statusline"));
+    assert!(hooks.contains(
+        "IfFileExists \"$INSTDIR\\agentjuice-statusline.exe\" restore_owned_statusline restore_owned_statusline_missing_bridge"
+    ));
+    assert!(hooks.contains(
+        "IfFileExists \"$LOCALAPPDATA\\agent-juice\\wrap-meta.json\" restore_owned_statusline_repair_required restore_owned_statusline_done"
+    ));
+    assert!(hooks.contains("Repair or reinstall Juice before uninstalling"));
+    assert!(hooks.contains("StrCpy $0 1"));
+    assert!(hooks.contains("${If} $0 <> 0"));
+    assert!(hooks.contains("MessageBox MB_OK|MB_ICONSTOP"));
+    assert!(hooks.contains("/SD IDOK"));
+    assert!(hooks.contains("Abort"));
+    assert!(hooks.contains("NSIS_HOOK_POSTUNINSTALL"));
+    assert!(hooks.contains("$DeleteAppDataCheckboxState = 1"));
+    assert!(hooks.contains(r#"RmDir /r "$LOCALAPPDATA\agent-juice""#));
+    assert!(hooks.matches("$UpdateMode <> 1").count() >= 2);
+
+    let preuninstall = hooks
+        .split("!macro NSIS_HOOK_POSTUNINSTALL")
+        .next()
+        .unwrap();
+    let update_guard = preuninstall.find("$UpdateMode <> 1").unwrap();
+    let repair_required = preuninstall
+        .find("restore_owned_statusline_repair_required:")
+        .unwrap();
+    let repair_abort = preuninstall[repair_required..].find("Abort").unwrap() + repair_required;
+    let restore = preuninstall.find("--restore-owned-statusline").unwrap();
+    let failure_gate = preuninstall.find("${If} $0 <> 0").unwrap();
+    let restore_abort = preuninstall.rfind("Abort").unwrap();
+    let guard_end = preuninstall.rfind("${EndIf}").unwrap();
+    assert!(update_guard < repair_required);
+    assert!(repair_required < repair_abort);
+    assert!(repair_abort < restore);
+    assert!(update_guard < restore);
+    assert!(restore < failure_gate);
+    assert!(failure_gate < restore_abort);
+    assert!(restore_abort < guard_end);
+}
+
+#[test]
+fn restore_statusline_requires_exact_managed_subtree() {
     let root = temp_root("restore-guard");
     let home = root.join("home");
     let data_dir = root.join("data");
@@ -323,25 +555,78 @@ fn restore_statusline_refuses_missing_metadata_or_unmanaged_current_command() {
     let settings_path = claude_dir.join("settings.json");
     fs::create_dir_all(&claude_dir).unwrap();
     fs::create_dir_all(&data_dir).unwrap();
+    assert!(Settings::restore_statusline_at(&home, &data_dir).is_err());
+
     fs::write(
         &settings_path,
-        r#"{"statusLine":{"type":"command","command":"claude-hud --theme dark"},"keep":true}"#,
+        r#"{"statusLine":{"type":"command","command":"old"},"keep":true}"#,
     )
     .unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    let mut changed = read_json(&settings_path);
+    changed["statusLine"]["userChanged"] = serde_json::json!(true);
+    fs::write(&settings_path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
 
     assert!(Settings::restore_statusline_at(&home, &data_dir).is_err());
+    assert_eq!(read_json(&settings_path), changed);
+    assert!(data_dir.join("wrap-meta.json").exists());
+}
 
-    fs::write(
-        data_dir.join("wrap-meta.json"),
-        r#"{"managed_command":"\"C:/Juice/agentjuice-statusline.exe\"","original_command":"old"}"#,
+#[test]
+fn external_claude_settings_fail_closed_on_invalid_or_unreadable_roots() {
+    for (name, contents) in [
+        ("malformed", "{"),
+        ("array", "[]"),
+        ("string", r#""value""#),
+    ] {
+        let root = temp_root(name);
+        let home = root.join("home");
+        let data_dir = root.join("data");
+        let settings_path = home.join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(&settings_path, contents).unwrap();
+
+        assert!(Settings::install_statusline_wrap_at(
+            &home,
+            &data_dir,
+            r"C:\Juice\agentjuice-statusline.exe"
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), contents);
+        assert!(!data_dir.exists());
+    }
+
+    let root = temp_root("read-failure");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::create_dir_all(&settings_path).unwrap();
+    assert!(Settings::install_statusline_wrap_at(
+        &home,
+        &data_dir,
+        r"C:\Juice\agentjuice-statusline.exe"
     )
-    .unwrap();
+    .is_err());
+    assert!(settings_path.is_dir());
+    assert!(!data_dir.exists());
+}
+
+#[test]
+fn restore_statusline_fails_closed_when_settings_becomes_malformed() {
+    let root = temp_root("restore-malformed");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::write(&settings_path, r#"{"statusLine":{"command":"old"}}"#).unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    fs::write(&settings_path, "{").unwrap();
 
     assert!(Settings::restore_statusline_at(&home, &data_dir).is_err());
-    assert_eq!(
-        read_json(&settings_path)["statusLine"]["command"],
-        "claude-hud --theme dark"
-    );
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), "{");
+    assert!(data_dir.join("wrap-meta.json").exists());
 }
 
 #[test]
@@ -354,6 +639,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         poll_interval_secs: 5,
         stale_after_secs: 80,
         bar_mode: "quad".into(),
+        full_reset_time_on: true,
         limit_order: "secondary_first".into(),
         fullscreen_hide_on: false,
         maximized_hide_on: true,
@@ -415,6 +701,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.poll_interval_secs, 5);
     assert_eq!(settings.stale_after_secs, 80);
     assert_eq!(settings.bar_mode, "quad");
+    assert!(settings.full_reset_time_on);
     assert_eq!(settings.limit_order, "secondary_first");
     assert!(!settings.fullscreen_hide_on);
     assert!(settings.maximized_hide_on);

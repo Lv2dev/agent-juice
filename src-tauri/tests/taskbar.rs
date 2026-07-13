@@ -1,8 +1,9 @@
 use agent_juice::taskbar::{
     dock_rect_for_taskbar, dock_rect_for_taskbar_at_offset, dock_rect_for_taskbar_drag_at_point,
-    dock_rect_for_taskbar_target, offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect,
-    rect_covers_monitor, rect_covers_work_area_without_covering_monitor, taskbar_monitor_key,
-    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key,
+    dock_rect_for_taskbar_target, drag_rect_for_logical_length_at_dpi,
+    offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect, rect_covers_monitor,
+    rect_covers_work_area_without_covering_monitor, taskbar_monitor_key,
+    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key, taskbar_tooltip_anchor,
     visible_window_coverage_on_monitor, window_coverage_is_ignored, DockRect, TaskbarTarget,
     WindowCoverageCandidate,
 };
@@ -103,6 +104,122 @@ fn dock_rect_supports_top_bottom_left_and_right_taskbars() {
 }
 
 #[test]
+fn tooltip_anchor_stays_inside_the_desktop_for_each_taskbar_edge() {
+    let work = DockRect {
+        x: 48,
+        y: 48,
+        width: 1872,
+        height: 1032,
+    };
+    let top = DockRect {
+        x: 200,
+        y: 0,
+        width: 260,
+        height: 48,
+    };
+    let bottom = DockRect {
+        x: 200,
+        y: 1080,
+        width: 260,
+        height: 48,
+    };
+    let left = DockRect {
+        x: 0,
+        y: 200,
+        width: 48,
+        height: 260,
+    };
+    let right = DockRect {
+        x: 1920,
+        y: 200,
+        width: 48,
+        height: 260,
+    };
+
+    let bubble_size = (212, 68);
+    assert_eq!(taskbar_tooltip_anchor(top, work, bubble_size), (208, 56));
+    assert_eq!(
+        taskbar_tooltip_anchor(bottom, work, bubble_size),
+        (208, 1004)
+    );
+    assert_eq!(taskbar_tooltip_anchor(left, work, bubble_size), (56, 208));
+    assert_eq!(
+        taskbar_tooltip_anchor(right, work, bubble_size),
+        (1700, 208)
+    );
+}
+
+#[test]
+fn tooltip_anchor_clamps_both_axes_at_work_area_trailing_edges() {
+    let work = DockRect {
+        x: 48,
+        y: 48,
+        width: 1872,
+        height: 1032,
+    };
+    let bottom_right = DockRect {
+        x: 1880,
+        y: 1080,
+        width: 40,
+        height: 48,
+    };
+    let right_bottom = DockRect {
+        x: 1920,
+        y: 1060,
+        width: 48,
+        height: 20,
+    };
+
+    assert_eq!(
+        taskbar_tooltip_anchor(bottom_right, work, (212, 68)),
+        (1708, 1004)
+    );
+    assert_eq!(
+        taskbar_tooltip_anchor(right_bottom, work, (212, 68)),
+        (1700, 1012)
+    );
+}
+
+#[test]
+fn tooltip_anchor_clamps_mixed_dpi_physical_size_on_negative_monitor() {
+    let work = DockRect {
+        x: -2560,
+        y: 48,
+        width: 2560,
+        height: 1392,
+    };
+    let top_trailing = DockRect {
+        x: -180,
+        y: 0,
+        width: 180,
+        height: 48,
+    };
+
+    assert_eq!(
+        taskbar_tooltip_anchor(top_trailing, work, (420, 120)),
+        (-420, 56)
+    );
+}
+
+#[test]
+fn tooltip_anchor_pins_oversized_bubble_to_work_area_origin() {
+    let work = DockRect {
+        x: 100,
+        y: 200,
+        width: 300,
+        height: 180,
+    };
+    let bottom = DockRect {
+        x: 100,
+        y: 380,
+        width: 300,
+        height: 40,
+    };
+
+    assert_eq!(taskbar_tooltip_anchor(bottom, work, (500, 240)), (100, 200));
+}
+
+#[test]
 fn drag_rect_uses_vertical_axis_for_side_taskbars() {
     let (dock, ratio) = dock_rect_for_taskbar_drag_at_point(
         DockRect {
@@ -127,6 +244,35 @@ fn drag_rect_uses_vertical_axis_for_side_taskbars() {
         }
     );
     assert!((ratio - (780.0 / 820.0)).abs() < 0.001);
+}
+
+#[test]
+fn drag_geometry_rescales_logical_length_for_target_dpi() {
+    let horizontal = DockRect {
+        x: 0,
+        y: 1040,
+        width: 1920,
+        height: 40,
+    };
+    let (at_96, _) =
+        drag_rect_for_logical_length_at_dpi(horizontal, 64, 96, (500, 1060), 0.5, 0.5).unwrap();
+    let (at_144, _) =
+        drag_rect_for_logical_length_at_dpi(horizontal, 64, 144, (500, 1060), 0.5, 0.5).unwrap();
+    assert_eq!(at_96.width, 64);
+    assert_eq!(at_144.width, 96);
+    assert_eq!(at_96.x, 468);
+    assert_eq!(at_144.x, 452);
+
+    let vertical = DockRect {
+        x: -60,
+        y: 0,
+        width: 60,
+        height: 1080,
+    };
+    let (side, _) =
+        drag_rect_for_logical_length_at_dpi(vertical, 64, 144, (-30, 500), 0.25, 0.5).unwrap();
+    assert_eq!(side.height, 96);
+    assert_eq!(side.y, 476);
 }
 
 #[test]

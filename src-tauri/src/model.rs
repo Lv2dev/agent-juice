@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+pub fn normalized_percent(value: impl Into<f64>) -> Option<f32> {
+    let value = value.into();
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|value| (0.0..=100.0).contains(value))
+        .map(|value| value as f32)
+}
+
+pub fn normalized_rfc3339(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|_| value.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Tool {
     #[serde(rename = "claude")]

@@ -38,6 +38,8 @@ test("barToolViewModel renders remaining account limits, reset text, and lowest 
   assert.equal(vm.secondary.text, "주간 59%");
   assert.equal(vm.secondary.percent, 59);
   assert.equal(vm.secondary.reset, "3일 2시간");
+  assert.equal(vm.tooltip, "Claude\n5h 리셋 1시간 5분\n주간 리셋 3일 2시간");
+  assert.equal(vm.ariaLabel, "Claude, 5h 12%, 주간 59%");
   assert.equal(vm.secondary.arc, "212.4deg");
   assert.equal(vm.worst, "12");
   assert.equal(vm.severity, "warn");
@@ -59,11 +61,39 @@ test("barToolViewModel is null-safe and marks stale or empty tools", () => {
   assert.equal(vm.primary.arc, "0deg");
   assert.equal(vm.secondary.text, "주간 –");
   assert.equal(vm.worst, "–");
+  assert.equal(vm.tooltip, "Codex\n5h –\n주간 –");
+  assert.equal(vm.ariaLabel, "Codex, 5h –, 주간 –, 오래됨");
 
   const empty = barToolViewModel([], "claude", settings);
   assert.equal(empty.state, "empty");
   assert.equal(empty.severity, "empty");
   assert.equal(empty.primary.text, "5h –");
+  assert.equal(empty.tooltip, "Claude\n5h –\n주간 –");
+  assert.equal(empty.ariaLabel, "Claude, 5h –, 주간 –");
+});
+
+test("barToolViewModel keeps a weekly-only Codex limit in the weekly slot", () => {
+  const weeklyOnly = {
+    tool: "codex",
+    captured_at: "2026-07-13T00:00:00Z",
+    primary: null,
+    secondary: { used_percent: 16, resets_at: "2026-07-20T00:00:00Z" },
+    session: { active: true },
+  };
+
+  const vm = barToolViewModel(
+    [weeklyOnly],
+    "codex",
+    settings,
+    new Date("2026-07-13T00:00:00Z"),
+  );
+
+  assert.equal(vm.primary.text, "5h –");
+  assert.equal(vm.primary.percent, null);
+  assert.equal(vm.secondary.text, "주간 84%");
+  assert.equal(vm.secondary.percent, 84);
+  assert.equal(vm.worst, "84");
+  assert.equal(vm.ariaLabel, "Codex, 5h –, 주간 84%");
 });
 
 test("barToolViewModel treats missing active flag as stale", () => {
@@ -81,6 +111,7 @@ test("barToolViewModel treats missing active flag as stale", () => {
 
   assert.equal(vm.state, "stale");
   assert.equal(vm.severity, "stale");
+  assert.equal(vm.ariaLabel, "Claude, 5h –, 주간 –, 오래됨");
 });
 
 test("barToolViewModel marks danger when any displayed limit crosses danger threshold", () => {
@@ -160,6 +191,21 @@ test("barToolViewModel localizes the weekly limit label", () => {
   const vm = barToolViewModel([], "codex", { ...settings, language: "en" });
 
   assert.equal(vm.secondary.text, "Weekly –");
+  assert.equal(vm.tooltip, "Codex\n5h –\nWeekly –");
+  assert.equal(vm.ariaLabel, "Codex, 5h –, Weekly –");
+
+  const past = barToolViewModel(
+    [{
+      tool: "codex",
+      primary: { used_percent: 20, resets_at: "2026-07-06T23:00:00Z" },
+      secondary: null,
+      session: { active: true },
+    }],
+    "codex",
+    { ...settings, language: "en" },
+    new Date("2026-07-07T00:00:00Z"),
+  );
+  assert.equal(past.tooltip, "Codex\n5h Reset passed\nWeekly –");
 });
 
 test("barViewModel normalizes mode and ring settings", () => {
@@ -183,6 +229,7 @@ test("barViewModel normalizes mode and ring settings", () => {
     bar_text_font_weight: 550,
   });
   assert.equal(full.mode, "compact");
+  assert.equal(full.fullResetTimeOn, true);
   assert.equal(full.limitOrder, "secondary_first");
   assert.equal(full.indicatorStyle, "bar");
   assert.equal(full.indicatorEffectStyle, "glow");
@@ -200,6 +247,11 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(full.barTextFontWeight, 550);
   assert.equal(full.displayBasis, "remaining");
   assert.equal(full.tools.length, 2);
+
+  const withResetTime = barViewModel([], { ...settings, full_reset_time_on: true });
+  assert.equal(withResetTime.fullResetTimeOn, true);
+  const withoutResetTime = barViewModel([], { ...settings, full_reset_time_on: false });
+  assert.equal(withoutResetTime.fullResetTimeOn, false);
 
   const fallback = barViewModel([], { ...settings, bar_mode: "unknown" });
   assert.equal(fallback.mode, "full");

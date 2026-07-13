@@ -1,18 +1,60 @@
 #[cfg(windows)]
+use once_cell::sync::Lazy;
+#[cfg(windows)]
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+#[cfg(windows)]
 use windows::{
-    core::{w, BOOL},
+    core::{w, BOOL, PCWSTR, PWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, RECT},
         Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
         Graphics::Gdi::{
             GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         },
-        UI::WindowsAndMessaging::{
-            EnumWindows, FindWindowW, GetClassNameW, GetWindowRect, GetWindowTextW,
-            GetWindowThreadProcessId, IsIconic, IsWindowVisible, ShowWindow, SW_HIDE,
+        System::Threading::GetCurrentThreadId,
+        UI::{
+            Controls::{
+                TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW, TTM_DELTOOLW,
+                TTM_GETBUBBLESIZE, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION,
+                TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+            },
+            WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW,
+                GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+                IsWindow, IsWindowVisible, PeekMessageW, SendMessageW, ShowWindow,
+                TranslateMessage, MSG, PM_REMOVE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE,
+                WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+            },
         },
     },
 };
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct NativeTooltip {
+    hwnd: isize,
+    owner_thread_id: u32,
+    text: Arc<Vec<u16>>,
+}
+
+#[cfg(windows)]
+static NATIVE_TOOLTIPS: Lazy<Mutex<HashMap<isize, NativeTooltip>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(windows)]
+fn tracking_tool_info(tooltip: HWND, text: &[u16]) -> TTTOOLINFOW {
+    TTTOOLINFOW {
+        cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+        uFlags: TTF_TRACK | TTF_ABSOLUTE,
+        hwnd: tooltip,
+        uId: 1,
+        lpszText: PWSTR(text.as_ptr() as *mut u16),
+        ..Default::default()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DockRect {
@@ -20,6 +62,57 @@ pub struct DockRect {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+pub fn taskbar_tooltip_anchor(
+    bar: DockRect,
+    work_area: DockRect,
+    bubble_size: (i32, i32),
+) -> (i32, i32) {
+    const EDGE_GAP: i32 = 8;
+
+    let bar_right = bar.x.saturating_add(bar.width);
+    let bar_bottom = bar.y.saturating_add(bar.height);
+    let work_right = work_area.x.saturating_add(work_area.width);
+    let work_bottom = work_area.y.saturating_add(work_area.height);
+    let (bubble_width, bubble_height) = (bubble_size.0.max(0), bubble_size.1.max(0));
+    let candidate = if bar_bottom <= work_area.y {
+        (
+            bar.x.saturating_add(EDGE_GAP),
+            bar_bottom.saturating_add(EDGE_GAP),
+        )
+    } else if bar.y >= work_bottom {
+        (
+            bar.x.saturating_add(EDGE_GAP),
+            bar.y.saturating_sub(EDGE_GAP).saturating_sub(bubble_height),
+        )
+    } else if bar_right <= work_area.x {
+        (
+            bar_right.saturating_add(EDGE_GAP),
+            bar.y.saturating_add(EDGE_GAP),
+        )
+    } else if bar.x >= work_right {
+        (
+            bar.x.saturating_sub(EDGE_GAP).saturating_sub(bubble_width),
+            bar.y.saturating_add(EDGE_GAP),
+        )
+    } else {
+        (
+            bar.x.saturating_add(EDGE_GAP),
+            bar.y.saturating_sub(EDGE_GAP).saturating_sub(bubble_height),
+        )
+    };
+
+    fn clamp_axis(value: i32, size: i32, start: i32, length: i32) -> i32 {
+        let end = start.saturating_add(length.max(0));
+        let last = end.saturating_sub(size).max(start);
+        value.clamp(start, last)
+    }
+
+    (
+        clamp_axis(candidate.0, bubble_width, work_area.x, work_area.width),
+        clamp_axis(candidate.1, bubble_height, work_area.y, work_area.height),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +155,298 @@ pub fn hide_window(hwnd: HWND) -> anyhow::Result<()> {
 
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn window_is_valid(hwnd: HWND) -> bool {
+    !hwnd.0.is_null() && unsafe { IsWindow(Some(hwnd)).as_bool() }
+}
+
+#[cfg(windows)]
+pub fn window_is_visible(hwnd: HWND) -> bool {
+    window_is_valid(hwnd) && unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+#[cfg(windows)]
+pub fn pump_current_thread_messages() {
+    let mut message = MSG::default();
+    unsafe {
+        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
+    if parent.0.is_null() {
+        return Err(anyhow::anyhow!("cannot attach a tooltip to a null HWND"));
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(Some(0)).collect()
+    }
+
+    let key = parent.0 as isize;
+    let current = NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&key)
+        .cloned();
+    if let Some(current) = current {
+        let tooltip = HWND(current.hwnd as *mut core::ffi::c_void);
+        if current.owner_thread_id != unsafe { GetCurrentThreadId() } {
+            return Err(anyhow::anyhow!(
+                "native tooltip must be updated on its owner thread"
+            ));
+        }
+        if unsafe { IsWindow(Some(tooltip)).as_bool() } {
+            let next = Arc::new(wide(value));
+            let info = tracking_tool_info(tooltip, &next);
+            {
+                let mut tooltips = NATIVE_TOOLTIPS
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if let Some(stored) = tooltips.get_mut(&key) {
+                    stored.text = next.clone();
+                }
+            }
+            unsafe {
+                SendMessageW(
+                    tooltip,
+                    TTM_UPDATETIPTEXTW,
+                    None,
+                    Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+                );
+            }
+            return Ok(());
+        }
+    }
+    NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(&key);
+
+    let tooltip = unsafe {
+        CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            TOOLTIPS_CLASSW,
+            PCWSTR::null(),
+            WINDOW_STYLE(WS_POPUP.0 | TTS_ALWAYSTIP | TTS_NOPREFIX),
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )?
+    };
+    let text = Arc::new(wide(value));
+    let info = tracking_tool_info(tooltip, &text);
+    let added = unsafe {
+        SendMessageW(
+            tooltip,
+            TTM_ADDTOOLW,
+            None,
+            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+        )
+    };
+    if added.0 == 0 {
+        let _ = unsafe { DestroyWindow(tooltip) };
+        return Err(anyhow::anyhow!("failed to register native taskbar tooltip"));
+    }
+    unsafe {
+        SendMessageW(tooltip, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(360)));
+    }
+    NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(
+            key,
+            NativeTooltip {
+                hwnd: tooltip.0 as isize,
+                owner_thread_id: unsafe { GetCurrentThreadId() },
+                text,
+            },
+        );
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn remove_window_tooltip(parent: HWND) -> anyhow::Result<bool> {
+    let key = parent.0 as isize;
+    let Some(current) = NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&key)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    if current.owner_thread_id != unsafe { GetCurrentThreadId() } {
+        return Err(anyhow::anyhow!(
+            "native tooltip must be removed on its owner thread"
+        ));
+    }
+
+    let tooltip = HWND(current.hwnd as *mut core::ffi::c_void);
+    let result = if unsafe { IsWindow(Some(tooltip)).as_bool() } {
+        let info = tracking_tool_info(tooltip, &current.text);
+        unsafe {
+            SendMessageW(
+                tooltip,
+                TTM_TRACKACTIVATE,
+                Some(windows::Win32::Foundation::WPARAM(0)),
+                Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+            );
+            let _ = ShowWindow(tooltip, SW_HIDE);
+            SendMessageW(
+                tooltip,
+                TTM_DELTOOLW,
+                None,
+                Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+            );
+            DestroyWindow(tooltip)
+        }
+    } else {
+        Ok(())
+    };
+
+    NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(&key);
+    result?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+pub fn clear_current_thread_tooltips() -> anyhow::Result<usize> {
+    let owner_thread_id = unsafe { GetCurrentThreadId() };
+    let parents = NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .filter_map(|(parent, tooltip)| {
+            (tooltip.owner_thread_id == owner_thread_id).then_some(*parent)
+        })
+        .collect::<Vec<_>>();
+    let mut removed = 0;
+    let mut first_error = None;
+    for parent in parents {
+        let hwnd = HWND(parent as *mut core::ffi::c_void);
+        match remove_window_tooltip(hwnd) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(err) if first_error.is_none() => first_error = Some(err),
+            Err(_) => {}
+        }
+    }
+    if let Some(err) = first_error {
+        Err(err)
+    } else {
+        Ok(removed)
+    }
+}
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn native_tooltip_registry_count_for_test() -> usize {
+    NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .len()
+}
+
+#[cfg(windows)]
+fn tooltip_bubble_size(tooltip: HWND, info: &TTTOOLINFOW) -> anyhow::Result<(i32, i32)> {
+    let packed = unsafe {
+        SendMessageW(
+            tooltip,
+            TTM_GETBUBBLESIZE,
+            None,
+            Some(LPARAM((info as *const TTTOOLINFOW) as isize)),
+        )
+    }
+    .0 as u32;
+    let size = ((packed & 0xffff) as i32, ((packed >> 16) & 0xffff) as i32);
+    if size.0 <= 0 || size.1 <= 0 {
+        Err(anyhow::anyhow!(
+            "native taskbar tooltip returned an invalid bubble size"
+        ))
+    } else {
+        Ok(size)
+    }
+}
+
+#[cfg(windows)]
+pub fn show_window_tooltip(parent: HWND, visible: bool) -> anyhow::Result<()> {
+    let key = parent.0 as isize;
+    let current = NATIVE_TOOLTIPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("native taskbar tooltip is not registered"))?;
+    let tooltip = HWND(current.hwnd as *mut core::ffi::c_void);
+    if current.owner_thread_id != unsafe { GetCurrentThreadId() } {
+        return Err(anyhow::anyhow!(
+            "native tooltip must be shown on its owner thread"
+        ));
+    }
+    if !unsafe { IsWindow(Some(tooltip)).as_bool() } {
+        NATIVE_TOOLTIPS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&key);
+        return Err(anyhow::anyhow!(
+            "native taskbar tooltip window is unavailable"
+        ));
+    }
+
+    let info = tracking_tool_info(tooltip, &current.text);
+    if visible {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(parent, &mut rect)? };
+        let bar = rect_to_dock(rect)
+            .ok_or_else(|| anyhow::anyhow!("invalid taskbar tooltip owner rectangle"))?;
+        let monitor = unsafe { MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST) };
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let work_area = if !monitor.0.is_null()
+            && unsafe { GetMonitorInfoW(monitor, &mut monitor_info).as_bool() }
+        {
+            rect_to_dock(monitor_info.rcWork).unwrap_or(bar)
+        } else {
+            bar
+        };
+        let bubble_size = tooltip_bubble_size(tooltip, &info)?;
+        let (x, y) = taskbar_tooltip_anchor(bar, work_area, bubble_size);
+        let packed_position = ((y as i16 as u16 as u32) << 16) | x as i16 as u16 as u32;
+        unsafe {
+            SendMessageW(
+                tooltip,
+                TTM_TRACKPOSITION,
+                None,
+                Some(LPARAM(packed_position as isize)),
+            );
+        }
+    }
+    unsafe {
+        SendMessageW(
+            tooltip,
+            TTM_TRACKACTIVATE,
+            Some(windows::Win32::Foundation::WPARAM(visible as usize)),
+            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+        );
+        let _ = ShowWindow(tooltip, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
     Ok(())
 }
@@ -729,11 +1114,11 @@ pub fn shell_taskbar_drag_rect_at_point(
 
 #[cfg(windows)]
 pub fn shell_taskbar_drag_rect_at_point_for_key(
-    desired_width: i32,
+    logical_length: i32,
     pointer_screen_x: i32,
     pointer_screen_y: i32,
-    grab_offset_x: i32,
-    grab_offset_y: i32,
+    grab_axis_ratio: f32,
+    grab_cross_ratio: f32,
     preferred_key: &str,
 ) -> anyhow::Result<(ShellTaskbarWindow, DockRect, f32)> {
     let taskbars = shell_taskbar_windows()?;
@@ -776,12 +1161,88 @@ pub fn shell_taskbar_drag_rect_at_point_for_key(
             .checked_sub(taskbar.top)
             .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?,
     };
-    let (dock, ratio) = dock_rect_for_taskbar_drag_at_point(
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(taskbar.hwnd) };
+    let (dock, ratio) = drag_rect_for_logical_length_at_dpi(
         rect,
-        desired_width,
+        logical_length,
+        dpi,
         (pointer_screen_x, pointer_screen_y),
-        (grab_offset_x, grab_offset_y),
+        grab_axis_ratio,
+        grab_cross_ratio,
     )
     .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?;
     Ok((taskbar, dock, ratio))
+}
+
+pub fn drag_rect_for_logical_length_at_dpi(
+    taskbar: DockRect,
+    logical_length: i32,
+    dpi: u32,
+    pointer: (i32, i32),
+    grab_axis_ratio: f32,
+    grab_cross_ratio: f32,
+) -> Option<(DockRect, f32)> {
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    let physical_length =
+        ((logical_length.max(1) as i64 * dpi as i64 + 48) / 96).clamp(1, i32::MAX as i64) as i32;
+    let axis_ratio = grab_axis_ratio.clamp(0.0, 1.0);
+    let cross_ratio = grab_cross_ratio.clamp(0.0, 1.0);
+    let grab_offset = if is_horizontal_taskbar(taskbar.width, taskbar.height) {
+        (
+            (physical_length as f32 * axis_ratio).round() as i32,
+            (taskbar.height as f32 * cross_ratio).round() as i32,
+        )
+    } else {
+        (
+            (taskbar.width as f32 * cross_ratio).round() as i32,
+            (physical_length as f32 * axis_ratio).round() as i32,
+        )
+    };
+    dock_rect_for_taskbar_drag_at_point(taskbar, physical_length, pointer, grab_offset)
+}
+
+#[cfg(all(test, windows))]
+mod tooltip_tests {
+    use super::*;
+
+    #[test]
+    fn tracking_tool_is_owned_by_the_tooltip_thread_not_the_bar_window() {
+        let tooltip = HWND(0x2222usize as *mut core::ffi::c_void);
+        let text = "Juice tooltip\0".encode_utf16().collect::<Vec<_>>();
+        let info = tracking_tool_info(tooltip, &text);
+
+        assert_eq!(info.hwnd, tooltip);
+        assert_eq!(info.uId, 1);
+        assert_eq!(info.uFlags, TTF_TRACK | TTF_ABSOLUTE);
+    }
+
+    #[test]
+    fn tooltip_registry_removal_preserves_the_owner_thread_contract() {
+        let parent = 0x1234_5678isize;
+        let tooltip = 0x1234_5679isize;
+        let baseline = native_tooltip_registry_count_for_test();
+        NATIVE_TOOLTIPS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                parent,
+                NativeTooltip {
+                    hwnd: tooltip,
+                    owner_thread_id: unsafe { GetCurrentThreadId() },
+                    text: Arc::new(vec![0]),
+                },
+            );
+        assert_eq!(native_tooltip_registry_count_for_test(), baseline + 1);
+
+        let error = std::thread::spawn(move || {
+            remove_window_tooltip(HWND(parent as *mut core::ffi::c_void)).unwrap_err()
+        })
+        .join()
+        .unwrap();
+        assert!(error.to_string().contains("owner thread"));
+        assert_eq!(native_tooltip_registry_count_for_test(), baseline + 1);
+
+        assert!(remove_window_tooltip(HWND(parent as *mut core::ffi::c_void)).unwrap());
+        assert_eq!(native_tooltip_registry_count_for_test(), baseline);
+    }
 }
