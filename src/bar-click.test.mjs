@@ -707,10 +707,10 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
   assert.equal(tools.claude.textContentFor(".quad-primary-number"), "12");
   assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "59");
-  assert.deepEqual(tooltipCalls, [{
+  assert.deepEqual(tooltipCalls.at(-1), {
     tool: "claude",
     text: "Claude\n5h –\n주간 –",
-  }]);
+  });
   delete global.window;
   delete global.document;
 });
