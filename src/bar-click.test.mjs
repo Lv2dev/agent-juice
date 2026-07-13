@@ -5,9 +5,22 @@ function toolStub() {
   const textNodes = new Map();
   const styleProps = new Map();
   const ringStyleProps = new Map();
+  const attributes = new Map();
   return {
     dataset: {},
     hidden: false,
+    title: "",
+    setAttribute(name, value) {
+      attributes.set(name, value);
+      if (name === "title") this.title = value;
+    },
+    removeAttribute(name) {
+      attributes.delete(name);
+      if (name === "title") this.title = "";
+    },
+    getAttribute(name) {
+      return attributes.get(name) ?? null;
+    },
     style: {
       setProperty(name, value) {
         styleProps.set(name, value);
@@ -51,13 +64,16 @@ test("bar render writes severity attributes for animation states", async () => {
     __TAURI__: {
       core: {
         async invoke(command) {
-          if (command === "get_settings") return {};
+          if (command === "get_settings") return { full_reset_time_on: true };
           if (command === "get_status") {
             return [
               {
                 tool: "claude",
                 captured_at: "2026-07-07T00:00:00Z",
-                primary: { used_percent: 91, resets_at: null },
+                primary: {
+                  used_percent: 91,
+                  resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                },
                 secondary: null,
                 session: { active: true },
               },
@@ -86,6 +102,11 @@ test("bar render writes severity attributes for animation states", async () => {
 
   assert.equal(tools.claude.dataset.severity, "danger");
   assert.equal(tools.codex.dataset.severity, "empty");
+  assert.equal(root.dataset.fullResetTime, "on");
+  assert.equal(tools.claude.textContentFor(".primary-reset"), "(1시간 0분)");
+  assert.equal(tools.claude.getAttribute("title"), null);
+  assert.equal(tools.claude.title, "");
+  assert.equal(tools.claude.getAttribute("aria-label"), "Claude, 5h 9%, 주간 –");
   delete global.window;
   delete global.document;
 });
@@ -225,9 +246,12 @@ test("bar render applies ring number and geometry settings to the root", async (
   delete global.document;
 });
 
-test("bar right click opens a visible refresh menu before forcing a status refresh", async () => {
+test("bar right click waits for native resize before showing the refresh menu", async () => {
   const listeners = {};
+  const eventHandlers = {};
   const invocations = [];
+  let resolveMenuOpen;
+  let resolveMenuClose;
   const root = { dataset: {} };
   const refreshButton = {
     handlers: {},
@@ -265,11 +289,23 @@ test("bar right click opens a visible refresh menu before forcing a status refre
           invocations.push({ command, args });
           if (command === "get_settings") return {};
           if (command === "get_status") return [];
+          if (command === "set_taskbar_menu_open" && args.open) {
+            return new Promise((resolve) => {
+              resolveMenuOpen = resolve;
+            });
+          }
+          if (command === "set_taskbar_menu_open" && !args.open) {
+            return new Promise((resolve) => {
+              resolveMenuClose = resolve;
+            });
+          }
           return null;
         },
       },
       event: {
-        async listen() {},
+        async listen(name, handler) {
+          eventHandlers[name] = handler;
+        },
       },
     },
   };
@@ -296,10 +332,31 @@ test("bar right click opens a visible refresh menu before forcing a status refre
     target: root,
     preventDefault() { prevented = true; },
   });
-  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(prevented, true);
+  assert.equal(menu.hidden, true);
+  assert.equal(root.dataset.menuState, "opening");
+
+  const tooltipCallsBeforeMenu = invocations.filter(
+    (item) => item.command === "set_taskbar_tooltip",
+  ).length;
+  eventHandlers["status-updated"]?.({
+    payload: [{
+      tool: "codex",
+      primary: { used_percent: 20, resets_at: new Date(Date.now() + 3600000).toISOString() },
+      secondary: null,
+      session: { active: true },
+    }],
+  });
+  assert.equal(
+    invocations.filter((item) => item.command === "set_taskbar_tooltip").length,
+    tooltipCallsBeforeMenu,
+  );
+
+  resolveMenuOpen();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(menu.hidden, false);
+  assert.equal(root.dataset.menuState, "open");
   assert.equal(menu.style.getPropertyValue("--menu-x"), "120px");
   assert.equal(menu.style.getPropertyValue("--menu-y"), "8px");
   assert.equal(
@@ -308,6 +365,20 @@ test("bar right click opens a visible refresh menu before forcing a status refre
   );
   await refreshButton.handlers.click?.({ preventDefault() {} });
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(menu.hidden, true);
+  assert.equal(root.dataset.menuState, "closing");
+  assert.equal(
+    invocations.filter((item) => item.command === "set_taskbar_tooltip").length,
+    tooltipCallsBeforeMenu,
+  );
+
+  resolveMenuClose();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(root.dataset.menuState, "closed");
+  assert.equal(
+    invocations.filter((item) => item.command === "set_taskbar_tooltip").length,
+    tooltipCallsBeforeMenu + 1,
+  );
   assert.equal(
     invocations.filter((item) => item.command === "refresh_status").length,
     1
@@ -316,6 +387,59 @@ test("bar right click opens a visible refresh menu before forcing a status refre
     invocations.filter((item) => item.command === "pause_taskbar_bars").length,
     0
   );
+  delete global.window;
+  delete global.document;
+});
+
+test("bar refresh menu rolls back when native resize fails", async () => {
+  const listeners = {};
+  const menuStates = [];
+  const root = { dataset: {} };
+  const menu = {
+    hidden: true,
+    style: { setProperty() {} },
+    contains() { return false; },
+  };
+  const tools = { claude: toolStub(), codex: toolStub() };
+
+  global.window = {
+    location: { search: "?tool=claude" },
+    innerWidth: 260,
+    innerHeight: 40,
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return [];
+          if (command === "set_taskbar_menu_open") {
+            menuStates.push(args.open);
+            if (args.open) throw new Error("resize failed");
+          }
+          return null;
+        },
+      },
+      event: { async listen() {} },
+    },
+  };
+  global.document = {
+    addEventListener(name, handler) { listeners[name] = handler; },
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === "#bar-menu") return menu;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-menu-rollback`);
+  await new Promise((resolve) => setImmediate(resolve));
+  listeners.contextmenu?.({ clientX: 10, clientY: 10, preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(menu.hidden, true);
+  assert.equal(root.dataset.menuState, "closed");
+  assert.deepEqual(menuStates, [true, false]);
   delete global.window;
   delete global.document;
 });
@@ -379,6 +503,7 @@ test("bar refresh menu tolerates transient window leave and closes after a grace
     target: root,
     preventDefault() {},
   });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(menu.hidden, false);
 
   listeners.mouseout?.({ relatedTarget: null });
@@ -462,6 +587,7 @@ test("bar refresh menu closes when another tool bar opens its menu", async () =>
     target: root,
     preventDefault() {},
   });
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(menu.hidden, false);
   assert.deepEqual(emissions.at(-1), {
     name: "bar-refresh-menu-opened",
@@ -522,6 +648,7 @@ test("bar renders the current tool before event subscription resolves", async ()
 
 test("bar render exposes ring CSS variables on each tool for quad mode", async () => {
   const root = { dataset: {}, style: { setProperty() {} } };
+  const tooltipCalls = [];
   const tools = {
     claude: toolStub(),
     codex: toolStub(),
@@ -531,7 +658,7 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
     location: { search: "?tool=claude" },
     __TAURI__: {
       core: {
-        async invoke(command) {
+        async invoke(command, args) {
           if (command === "get_settings") return { bar_mode: "quad" };
           if (command === "get_status") {
             return [
@@ -543,6 +670,9 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
                 session: { active: true },
               },
             ];
+          }
+          if (command === "set_taskbar_tooltip") {
+            tooltipCalls.push(args);
           }
           return null;
         },
@@ -577,6 +707,10 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
   assert.equal(tools.claude.textContentFor(".quad-primary-number"), "12");
   assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "59");
+  assert.deepEqual(tooltipCalls, [{
+    tool: "claude",
+    text: "Claude\n5h –\n주간 –",
+  }]);
   delete global.window;
   delete global.document;
 });
@@ -903,6 +1037,72 @@ test("bar still renders when event listen rejects without keyboard panel opening
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(calls, []);
+  delete global.window;
+  delete global.document;
+});
+
+test("bar retries status listener and ignores an older initial response", async () => {
+  const eventHandlers = {};
+  const attempts = new Map();
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tools = { claude: toolStub(), codex: toolStub() };
+  let resolveStatus;
+  const pendingStatus = new Promise((resolve) => {
+    resolveStatus = resolve;
+  });
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return pendingStatus;
+          return null;
+        },
+      },
+      event: {
+        async listen(name, handler) {
+          const count = (attempts.get(name) ?? 0) + 1;
+          attempts.set(name, count);
+          if (name === "status-updated" && count === 1) throw new Error("transient");
+          eventHandlers[name] = handler;
+        },
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-listener-retry`);
+  await new Promise((resolve) => setTimeout(resolve, 130));
+  eventHandlers["status-updated"]?.({
+    payload: [{
+      tool: "codex",
+      captured_at: "2026-07-13T00:00:00Z",
+      primary: { used_percent: 10 },
+      secondary: { used_percent: 20 },
+      session: { active: true },
+    }],
+  });
+  resolveStatus([{
+    tool: "codex",
+    captured_at: "2026-07-12T00:00:00Z",
+    primary: { used_percent: 90 },
+    secondary: { used_percent: 90 },
+    session: { active: true },
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(tools.codex.textContentFor(".primary-text"), /90%/);
+  assert.ok(attempts.get("status-updated") >= 2);
   delete global.window;
   delete global.document;
 });

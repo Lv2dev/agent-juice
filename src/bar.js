@@ -6,6 +6,12 @@ import { applyTheme } from "./theme.js";
 
 let settings = { ...DEFAULT_SETTINGS };
 let statuses = [];
+let statusEventGeneration = 0;
+let settingsEventGeneration = 0;
+let snapshotFallbackTimer = null;
+const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+let lastNativeTooltip = "";
+let pendingNativeTooltip = null;
 const TOOLS = ["claude", "codex"];
 
 function currentWindowTool() {
@@ -20,11 +26,20 @@ const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
 const MENU_CLOSE_GRACE_MS = 120;
 const REFRESH_MENU_OPENED_EVENT = "bar-refresh-menu-opened";
+const MENU_STATES = Object.freeze({
+  CLOSED: "closed",
+  OPENING: "opening",
+  OPEN: "open",
+  CLOSING: "closing",
+});
 let refreshMenuCloseTimer = null;
+let refreshMenuState = MENU_STATES.CLOSED;
+let refreshMenuRequest = 0;
+let refreshMenuDesiredOpen = false;
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  showRefreshMenu(event);
+  void showRefreshMenu(event);
 });
 
 document.addEventListener("click", (event) => {
@@ -87,7 +102,7 @@ function clampMenuPosition(value, size, max) {
   return Math.max(MENU_MARGIN, Math.min(coordinate, upper));
 }
 
-function showRefreshMenu(event) {
+async function showRefreshMenu(event) {
   const menu = refreshMenu();
   if (!menu) {
     void refreshTaskbarStatus();
@@ -95,18 +110,74 @@ function showRefreshMenu(event) {
   }
 
   cancelRefreshMenuClose();
-  const x = clampMenuPosition(event?.clientX, MENU_WIDTH, window.innerWidth ?? MENU_WIDTH);
-  const y = clampMenuPosition(event?.clientY, MENU_HEIGHT, window.innerHeight ?? MENU_HEIGHT);
-  menu.style?.setProperty("--menu-x", `${x}px`);
-  menu.style?.setProperty("--menu-y", `${y}px`);
-  menu.hidden = false;
-  emitSafely(REFRESH_MENU_OPENED_EVENT, { tool: CURRENT_TOOL ?? "all" });
+  const request = ++refreshMenuRequest;
+  refreshMenuDesiredOpen = true;
+  menu.hidden = true;
+  setRefreshMenuState(MENU_STATES.OPENING);
+
+  try {
+    const nativeOpened = await setNativeMenuOpen(true);
+    if (!nativeOpened) throw new Error("native menu state is unavailable");
+    if (request !== refreshMenuRequest || refreshMenuState !== MENU_STATES.OPENING) {
+      if (!refreshMenuDesiredOpen) {
+        setRefreshMenuState(MENU_STATES.CLOSING);
+        await setNativeMenuOpen(false).catch(() => false);
+        if (!refreshMenuDesiredOpen) {
+          setRefreshMenuState(MENU_STATES.CLOSED);
+          syncNativeTooltip();
+        }
+      }
+      return;
+    }
+
+    const x = clampMenuPosition(event?.clientX, MENU_WIDTH, window.innerWidth ?? MENU_WIDTH);
+    const y = clampMenuPosition(event?.clientY, MENU_HEIGHT, window.innerHeight ?? MENU_HEIGHT);
+    menu.style?.setProperty("--menu-x", `${x}px`);
+    menu.style?.setProperty("--menu-y", `${y}px`);
+    menu.hidden = false;
+    setRefreshMenuState(MENU_STATES.OPEN);
+    emitSafely(REFRESH_MENU_OPENED_EVENT, { tool: CURRENT_TOOL ?? "all" });
+  } catch {
+    if (request !== refreshMenuRequest) return;
+    refreshMenuDesiredOpen = false;
+    menu.hidden = true;
+    await setNativeMenuOpen(false).catch(() => false);
+    setRefreshMenuState(MENU_STATES.CLOSED);
+    syncNativeTooltip();
+  }
 }
 
 function hideRefreshMenu() {
   cancelRefreshMenuClose();
   const menu = refreshMenu();
   if (menu) menu.hidden = true;
+  const shouldCloseNative = refreshMenuState !== MENU_STATES.CLOSED;
+  const request = ++refreshMenuRequest;
+  refreshMenuDesiredOpen = false;
+  if (shouldCloseNative) {
+    setRefreshMenuState(MENU_STATES.CLOSING);
+    void setNativeMenuOpen(false)
+      .then(() => {
+        if (request !== refreshMenuRequest || refreshMenuDesiredOpen) return;
+        setRefreshMenuState(MENU_STATES.CLOSED);
+        syncNativeTooltip();
+      })
+      .catch(() => {});
+  } else {
+    setRefreshMenuState(MENU_STATES.CLOSED);
+  }
+}
+
+function setRefreshMenuState(state) {
+  refreshMenuState = state;
+  const root = document.querySelector("#bar");
+  if (root) root.dataset.menuState = state;
+}
+
+async function setNativeMenuOpen(open) {
+  if (!CURRENT_TOOL || !tauriApi().core?.invoke) return false;
+  await invoke("set_taskbar_menu_open", { tool: CURRENT_TOOL, open });
+  return true;
 }
 
 function cancelRefreshMenuClose() {
@@ -119,8 +190,7 @@ function scheduleRefreshMenuClose() {
   cancelRefreshMenuClose();
   refreshMenuCloseTimer = setTimeout(() => {
     refreshMenuCloseTimer = null;
-    const menu = refreshMenu();
-    if (menu) menu.hidden = true;
+    hideRefreshMenu();
   }, MENU_CLOSE_GRACE_MS);
 }
 
@@ -178,6 +248,8 @@ function renderTool(vm, limitOrder) {
   item.hidden = false;
   item.dataset.state = vm.state;
   item.dataset.severity = vm.severity;
+  item.removeAttribute?.("title");
+  item.setAttribute?.("aria-label", vm.ariaLabel);
   item.style?.setProperty("--tool-brand", vm.brandColor);
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
@@ -185,9 +257,23 @@ function renderTool(vm, limitOrder) {
   setText(item, ".quad-primary-number", first.number);
   setText(item, ".quad-secondary-number", second.number);
   setText(item, ".primary-text", first.text);
-  setText(item, ".primary-reset", first.reset);
+  setText(item, ".primary-reset", first.reset ? `(${first.reset})` : "");
   setText(item, ".secondary-text", second.text);
-  setText(item, ".secondary-reset", second.reset);
+  setText(item, ".secondary-reset", second.reset ? `(${second.reset})` : "");
+  if (CURRENT_TOOL === vm.tool) {
+    pendingNativeTooltip = { tool: vm.tool, text: vm.tooltip };
+    syncNativeTooltip();
+  }
+}
+
+function syncNativeTooltip() {
+  if (refreshMenuState !== MENU_STATES.CLOSED || !pendingNativeTooltip) return;
+  const { tool, text } = pendingNativeTooltip;
+  if (lastNativeTooltip === text) return;
+  lastNativeTooltip = text;
+  void invoke("set_taskbar_tooltip", { tool, text }).catch(() => {
+    lastNativeTooltip = "";
+  });
 }
 
 function renderBar() {
@@ -196,6 +282,8 @@ function renderBar() {
 
   const vm = barViewModel(statuses, settings);
   root.dataset.mode = vm.mode;
+  root.dataset.menuState = refreshMenuState;
+  root.dataset.fullResetTime = vm.fullResetTimeOn ? "on" : "off";
   root.dataset.limitOrder = vm.limitOrder.replace("_", "-");
   root.dataset.indicator = vm.indicatorStyle;
   root.dataset.effect = vm.indicatorEffectStyle;
@@ -243,8 +331,10 @@ function setDragging(payload) {
 }
 
 async function loadSettings() {
+  const requestGeneration = settingsEventGeneration;
   try {
     const loaded = await invoke("get_settings");
+    if (settingsEventGeneration !== requestGeneration) return;
     if (loaded && typeof loaded === "object") {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
@@ -259,29 +349,46 @@ async function loadSettings() {
   }
 }
 
-function listenSafely(listen, eventName, handler) {
-  try {
-    Promise.resolve(listen(eventName, handler)).catch(() => {});
-  } catch {
-    // Initial and periodic status loads still render the bar.
+function scheduleSnapshotFallback() {
+  if (snapshotFallbackTimer) return;
+  snapshotFallbackTimer = setInterval(() => {
+    void loadSettings().then(renderBar);
+    void loadStatus();
+  }, 30_000);
+  snapshotFallbackTimer?.unref?.();
+}
+
+async function listenWithRetry(listen, eventName, handler) {
+  for (const delay of LISTENER_RETRY_DELAYS_MS) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      await listen(eventName, handler);
+      return true;
+    } catch {
+      // Retry each event independently during WebView startup.
+    }
   }
+  scheduleSnapshotFallback();
+  return false;
 }
 
 function bindEvents() {
   const listen = tauriApi().event?.listen;
   if (listen) {
-    listenSafely(listen, REFRESH_MENU_OPENED_EVENT, (event) => {
+    void listenWithRetry(listen, REFRESH_MENU_OPENED_EVENT, (event) => {
       const openedTool = event.payload?.tool;
       if (openedTool && openedTool !== (CURRENT_TOOL ?? "all")) {
         hideRefreshMenu();
       }
     });
-    listenSafely(listen, "status-updated", (event) => {
+    void listenWithRetry(listen, "status-updated", (event) => {
+      statusEventGeneration += 1;
       statuses = Array.isArray(event.payload) ? event.payload : [];
       renderBar();
     });
-    listenSafely(listen, "settings-updated", (event) => {
+    void listenWithRetry(listen, "settings-updated", (event) => {
       if (event.payload && typeof event.payload === "object") {
+        settingsEventGeneration += 1;
         settings = { ...DEFAULT_SETTINGS, ...event.payload };
         applyTheme(settings);
         applyFont(settings);
@@ -289,16 +396,20 @@ function bindEvents() {
         renderBar();
       }
     });
-    listenSafely(listen, "taskbar-dragging-updated", (event) => {
+    void listenWithRetry(listen, "taskbar-dragging-updated", (event) => {
       setDragging(event.payload);
     });
   }
 }
 
 async function loadStatus() {
+  const requestGeneration = statusEventGeneration;
   try {
-    statuses = (await invoke("get_status")) || [];
+    const loaded = (await invoke("get_status")) || [];
+    if (statusEventGeneration !== requestGeneration) return;
+    statuses = loaded;
   } catch {
+    if (statusEventGeneration !== requestGeneration) return;
     statuses = [];
   }
   renderBar();
@@ -308,10 +419,9 @@ async function bootstrap() {
   applyTranslations(settings);
   bindRefreshMenu();
   renderBar();
-  await loadSettings();
-  renderBar();
   bindEvents();
-  await loadStatus();
+  await Promise.all([loadSettings(), loadStatus()]);
+  renderBar();
 }
 
 bootstrap();

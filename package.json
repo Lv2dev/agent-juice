@@ -1,9 +1,10 @@
 {
   "name": "agent-juice",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
+    "test": "node --test --test-concurrency=4 src/*.test.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {

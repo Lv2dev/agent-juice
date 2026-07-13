@@ -8,6 +8,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(resolve(here, "styles.css"), "utf8").replace(/\r\n?/g, "\n");
 const panelMarkup = readFileSync(resolve(here, "index.html"), "utf8").replace(/\r\n?/g, "\n");
 const panelJs = readFileSync(resolve(here, "panel.js"), "utf8").replace(/\r\n?/g, "\n");
+const barJs = readFileSync(resolve(here, "bar.js"), "utf8").replace(/\r\n?/g, "\n");
 const settingsJs = readFileSync(resolve(here, "settings.js"), "utf8").replace(/\r\n?/g, "\n");
 const i18nJsPath = resolve(here, "i18n.js");
 const i18nJs = existsSync(i18nJsPath)
@@ -16,6 +17,10 @@ const i18nJs = existsSync(i18nJsPath)
 const tauriConfig = JSON.parse(
   readFileSync(resolve(here, "../src-tauri/tauri.conf.json"), "utf8"),
 );
+const packageJson = JSON.parse(readFileSync(resolve(here, "../package.json"), "utf8"));
+const packageLock = JSON.parse(readFileSync(resolve(here, "../package-lock.json"), "utf8"));
+const cargoToml = readFileSync(resolve(here, "../src-tauri/Cargo.toml"), "utf8");
+const cargoLock = readFileSync(resolve(here, "../src-tauri/Cargo.lock"), "utf8");
 const capabilitiesDir = resolve(here, "../src-tauri/capabilities");
 const capabilities = readdirSync(capabilitiesDir)
   .filter((name) => name.endsWith(".json"))
@@ -32,12 +37,35 @@ const pushAllowlist = readOptional(resolve(here, "../.ai/scripts/verify-git-push
 const releaseVerifier = readOptional(resolve(here, "../.ai/scripts/verify-release-installer.ps1"));
 const taskbarMoveVerifier = readOptional(resolve(here, "../.ai/scripts/verify-taskbar-native-move.ps1"));
 const statuslineVerifier = readOptional(resolve(here, "../.ai/scripts/verify-statusline-bridge.ps1"));
+const runtimeVerifier = readOptional(resolve(here, "../.ai/scripts/verify-g3.86-runtime.ps1"));
+const cargoConfig = readOptional(resolve(here, "../.cargo/config.toml"));
+const windowsCi = readOptional(resolve(here, "../.github/workflows/windows-ci.yml"));
+const runtimeSmoke = readOptional(resolve(here, "../.github/scripts/runtime-smoke.ps1"));
 const barMarkup = readFileSync(resolve(here, "bar.html"), "utf8").replace(/\r\n?/g, "\n");
 
 function cssBlock(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{(?<body>[^}]+)\\}`));
   return match?.groups?.body ?? "";
+}
+
+function hexToken(block, name) {
+  const value = block.match(new RegExp(`${name}:\\s*(#[0-9a-fA-F]{6})`))?.[1];
+  assert.ok(value, `${name} must be a six-digit hex color`);
+  return value;
+}
+
+function relativeLuminance(hex) {
+  const channels = hex.slice(1).match(/../g).map((part) => Number.parseInt(part, 16) / 255);
+  const linear = channels.map((value) =>
+    value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrastRatio(left, right) {
+  const values = [relativeLuminance(left), relativeLuminance(right)].sort((a, b) => b - a);
+  return (values[0] + 0.05) / (values[1] + 0.05);
 }
 
 function markupSection(name) {
@@ -203,6 +231,10 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.equal(panelWindowConfig?.decorations, false);
   assert.equal(panelWindowConfig?.resizable, true);
   assert.equal(panelWindowConfig?.visible, false);
+  assert.equal(panelWindowConfig?.skipTaskbar, false);
+  for (const barWindow of tauriConfig.app.windows.filter((item) => item.label.startsWith("bar-"))) {
+    assert.equal(barWindow.skipTaskbar, true);
+  }
   assert.match(rustLib, /CloseRequested/);
   assert.match(rustLib, /prevent_close\(\)/);
   assert.match(rustLib, /\.hide\(\)/);
@@ -286,6 +318,34 @@ test("taskbar overlay has no logo, permanent dimming, card border, card backgrou
   assert.doesNotMatch(danger, /border-color:/);
 });
 
+test("stale taskbar state stays legible while looking distinct from live data", () => {
+  const staleIndicator = cssBlock(
+    '.bar-tool[data-state="stale"] .ring-arc,\n.bar-tool[data-state="stale"] .limit-bar::before',
+  );
+  const staleArc = cssBlock('.bar-tool[data-state="stale"] .ring-arc');
+  const staleText = cssBlock(
+    '.bar-tool[data-state="stale"] .bar-tool-name,\n.bar-tool[data-state="stale"] .bar-line,\n.bar-tool[data-state="stale"] .bar-worst,\n.bar-tool[data-state="stale"] .quad-number,\n.bar-tool[data-state="stale"] .primary-reset,\n.bar-tool[data-state="stale"] .secondary-reset',
+  );
+
+  assert.match(staleIndicator, /opacity: 0\.62/);
+  assert.match(staleArc, /stroke-linecap: butt/);
+  assert.match(staleText, /color: var\(--text-muted\)/);
+});
+
+test("muted text and focus tokens meet WCAG contrast thresholds in both themes", () => {
+  const light = cssBlock('html[data-theme="light"]');
+  const dark = cssBlock('html[data-theme="dark"]');
+  const lightMuted = hexToken(light, "--text-muted");
+  const darkMuted = hexToken(dark, "--text-muted");
+  const lightFocus = hexToken(light, "--focus-ring");
+  const darkFocus = hexToken(dark, "--focus-ring");
+
+  assert.ok(contrastRatio(lightMuted, "#ffffff") >= 4.5);
+  assert.ok(contrastRatio(darkMuted, "#1f2223") >= 4.5);
+  assert.ok(contrastRatio(lightFocus, "#f1f4f3") >= 3);
+  assert.ok(contrastRatio(darkFocus, "#0d0f10") >= 3);
+});
+
 test("taskbar overlay lays out tools inside the dock width without horizontal clipping", () => {
   const shell = cssBlock(".bar-shell");
   const tool = cssBlock(".bar-tool");
@@ -310,7 +370,7 @@ test("taskbar overlay preserves core status text instead of ellipsizing reset te
   const primaryText = cssBlock(".primary-text");
   const secondaryText = cssBlock(".secondary-text");
   const reset = cssBlock(".primary-reset,\n.secondary-reset");
-  const fullResets = cssBlock('.bar-shell[data-mode="full"] .primary-reset,\n.bar-shell[data-mode="full"] .secondary-reset');
+  const fullResets = cssBlock('.bar-shell[data-mode="full"][data-full-reset-time="on"] .primary-reset,\n.bar-shell[data-mode="full"][data-full-reset-time="on"] .secondary-reset');
   const compactResets = cssBlock('.bar-shell[data-mode="compact"] .primary-reset,\n.bar-shell[data-mode="compact"] .secondary-reset');
 
   assert.match(copy, /grid-template-columns: max-content max-content max-content/);
@@ -318,7 +378,9 @@ test("taskbar overlay preserves core status text instead of ellipsizing reset te
     assert.doesNotMatch(block, /text-overflow:\s*ellipsis/);
   }
   assert.match(reset, /display: none/);
-  assert.equal(fullResets, "");
+  assert.match(reset, /font-size: calc\(var\(--bar-text-font-size\) \* 0\.88\)/);
+  assert.match(reset, /font-weight: var\(--bar-text-font-weight\)/);
+  assert.match(fullResets, /display: inline/);
   assert.equal(compactResets, "");
 });
 
@@ -332,9 +394,10 @@ test("taskbar overlay implements the four documented bar display modes", () => {
   const dualCopy = cssBlock('.bar-shell[data-mode="dual"] .bar-copy');
   const quadCopy = cssBlock('.bar-shell[data-mode="quad"] .bar-copy,\n.bar-shell[data-mode="quad"] .bar-ring');
   const ringOff = cssBlock('.bar-shell[data-ring="off"][data-mode="full"] .bar-ring,\n.bar-shell[data-ring="off"][data-mode="compact"] .bar-ring');
-  const compactTool = cssBlock('.bar-shell[data-mode="compact"] .bar-tool');
+  const textModeTool = cssBlock('.bar-shell[data-mode="full"] .bar-tool,\n.bar-shell[data-mode="compact"] .bar-tool');
   const dualTool = cssBlock('.bar-shell[data-mode="dual"] .bar-tool');
   const quadTool = cssBlock('.bar-shell[data-mode="quad"] .bar-tool');
+  const indicatorOnlyShell = cssBlock('.bar-shell[data-mode="dual"],\n.bar-shell[data-mode="quad"]');
 
   assert.match(compactToolName, /display: none/);
   assert.equal(compactLimitText, "");
@@ -347,9 +410,15 @@ test("taskbar overlay implements the four documented bar display modes", () => {
   assert.match(quadSecondary, /--quad-color: var\(--secondary-color\)/);
   assert.match(ringOff, /display: none/);
   assert.equal(cssBlock('.bar-shell[data-ring="off"] .bar-ring'), "");
-  for (const block of [compactTool, dualTool, quadTool]) {
+  assert.match(textModeTool, /justify-content: center/);
+  for (const block of [dualTool, quadTool]) {
     assert.match(block, /justify-content: flex-start/);
   }
+  assert.match(cssBlock(".bar-shell"), /padding: 0;/);
+  assert.match(cssBlock(".bar-tool"), /padding: 0 0\.5px/);
+  assert.equal(indicatorOnlyShell, "");
+  assert.doesNotMatch(dualTool, /padding:/);
+  assert.doesNotMatch(quadTool, /padding:/);
 });
 
 test("dual ring center number stays inside the ring hole", () => {
@@ -587,6 +656,7 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   const focusThumb = css.match(
     /input\[type="range"\]:focus-visible::-webkit-slider-thumb\s*\{(?<body>[^}]+)\}/,
   )?.groups?.body ?? "";
+  const rangeFocus = cssBlock('input[type="range"]:focus-visible');
   const button = cssBlock("button");
   const buttonHover = cssBlock("button:hover:not(:disabled)");
 
@@ -629,7 +699,9 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   assert.match(thumb, /box-shadow: none/);
   assert.doesNotMatch(thumb, /radial-gradient/);
   assert.doesNotMatch(thumb, /linear-gradient/);
-  assert.match(focusThumb, /box-shadow: none/);
+  assert.match(rangeFocus, /outline: 2px solid var\(--focus-ring\)/);
+  assert.match(rangeFocus, /outline-offset: 2px/);
+  assert.match(focusThumb, /box-shadow: 0 0 0 3px/);
   assert.match(checkbox, /border-radius: 999px/);
   assert.match(checkbox, /--toggle-track-off:/);
   assert.match(checkbox, /--toggle-knob-off:/);
@@ -719,7 +791,7 @@ test("settings form groups controls into logical sections without changing field
   assert.match(markupSection("appearance"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="palette"/);
   assert.match(markupSection("limits"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"/);
   assert.match(markupSection("limits"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
-  assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
+  assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="full_reset_time_on"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
   assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"/);
   assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="typography" open>[\s\S]*name="ring_number_font_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
   assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">/);
@@ -867,6 +939,13 @@ test("taskbar bar right click exposes a visible refresh action", () => {
   assert.match(menu, /top: var\(--menu-y\)/);
   assert.match(button, /cursor: pointer/);
   assert.match(i18nJs, /"action.refresh": "새로고침"/);
+  assert.match(barJs, /set_taskbar_menu_open/);
+  assert.match(barJs, /setNativeMenuOpen\(true\)/);
+  assert.match(barJs, /setNativeMenuOpen\(false\)/);
+  assert.match(rustLib, /fn set_taskbar_menu_open/);
+  assert.match(rustLib, /struct TaskbarMenuState/);
+  assert.match(rustLib, /taskbar_width_with_menu\(width, taskbar_menu_is_open\(manager, tool\)\)/);
+  assert.match(rustLib, /taskbar_physical_length_for_window\(width, taskbar\.hwnd\)/);
 });
 
 test("panel meta removes estimated cost copy and stays as a full-width card footer", () => {
@@ -991,5 +1070,84 @@ test("status refresh is available from panel and taskbar bars and periodic loop 
 
 test("taskbar movement is persisted only by the native drag loop final save", () => {
   assert.doesNotMatch(rustLib, /WindowEvent::Moved/);
-  assert.match(rustLib, /save_taskbar_drag_target\(&app, tool, &monitor_key, ratio\)/);
+  assert.match(rustLib, /save_taskbar_drag_target\(&app, tool, &monitor_key, rect\)/);
+  assert.match(rustLib, /taskbar_physical_length_for_window\(logical_length, taskbar\.hwnd\)/);
+});
+
+test("local build and test concurrency is capped at four", () => {
+  const packageJson = JSON.parse(readFileSync(resolve(here, "../package.json"), "utf8"));
+  assert.match(cargoConfig, /jobs\s*=\s*4/);
+  assert.match(packageJson.scripts.test, /--test-concurrency=4/);
+});
+
+test("Windows CI pins external actions to full commit SHAs", () => {
+  const uses = [...windowsCi.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(uses.length >= 5);
+  for (const action of uses) {
+    assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
+  }
+  assert.match(windowsCi, /run:\s*npm test/);
+  assert.match(windowsCi, /runtime-smoke\.ps1/);
+  assert.match(runtimeSmoke, /PrivateMemorySize64/);
+  assert.match(runtimeSmoke, /WorkingSet64/);
+});
+
+test("taskbar idle and drag paths reuse snapshots instead of repeated disk and shell scans", () => {
+  const dragLoop = rustLib.match(/fn spawn_taskbar_drag_loop[\s\S]*?\n}\n\nfn spawn_taskbar_visibility_loop/)?.[0] ?? "";
+  const visibilityLoop = rustLib.match(/fn spawn_taskbar_visibility_loop[\s\S]*?\n}\n\n#\[tauri::command\]/)?.[0] ?? "";
+  assert.equal((dragLoop.match(/Settings::load\(\)/g) ?? []).length, 1);
+  assert.match(dragLoop, /drag_monitor_key/);
+  assert.match(visibilityLoop, /taskbar_dock_snapshot/);
+  assert.match(visibilityLoop, /apply_taskbar_dock_with_snapshot/);
+  assert.match(rustLib, /struct TaskbarMenuLayout/);
+  assert.match(rustLib, /static TASKBAR_LAYOUT_GATE/);
+  assert.doesNotMatch(rustLib, /claude_ratio:\s*Mutex/);
+});
+
+test("tray quit flushes pending settings before native cleanup and exit", () => {
+  assert.match(rustLib, /app\.emit\("app-quit-requested"/);
+  assert.match(rustLib, /fn complete_app_quit/);
+  assert.match(rustLib, /TaskbarShutdownState/);
+  assert.match(settingsJs, /enqueueLatestSettingsSave/);
+  assert.match(settingsJs, /flushSettingsAndQuit/);
+  assert.match(settingsJs, /register\(\s*"app-quit-requested"/);
+  assert.doesNotMatch(rustLib, /tray_quit_menu_id\(\)\s*=>\s*app\.exit/);
+});
+
+test("release links use the Windows shell API instead of PATH executable lookup", () => {
+  assert.match(rustLib, /ShellExecuteW/);
+  assert.doesNotMatch(rustLib, /Command::new\("explorer\.exe"\)/);
+});
+
+test("all application version sources stay synchronized", () => {
+  const cargoTomlVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+  const cargoLockVersion = cargoLock.match(
+    /\[\[package\]\]\s*name\s*=\s*"agent-juice"\s*version\s*=\s*"([^"]+)"/,
+  )?.[1];
+  const versions = [
+    packageJson.version,
+    packageLock.version,
+    packageLock.packages[""].version,
+    cargoTomlVersion,
+    cargoLockVersion,
+    tauriConfig.version,
+  ];
+  assert.deepEqual(new Set(versions), new Set(["0.1.5"]));
+});
+
+test("runtime verifier enforces deterministic hang and resource budgets", (t) => {
+  assert.match(
+    rustLib,
+    /if forced_hover\.is_some\(\)\s*\{\s*forced_hover\s*\}\s*else if down/,
+  );
+  if (!runtimeVerifier) return t.skip("private .ai runtime verifier is unavailable");
+  assert.match(runtimeVerifier, /none -> claude -> none -> codex/);
+  assert.match(runtimeVerifier, /SendMessageTimeout/);
+  assert.match(runtimeVerifier, /IsHungAppWindow/);
+  assert.match(runtimeVerifier, /new_application_hang_or_wer_events/);
+  assert.match(runtimeVerifier, /CPU .* exceeded/);
+  assert.match(runtimeVerifier, /handle growth .* exceeded/);
+  assert.match(runtimeVerifier, /thread growth .* exceeded/);
+  assert.match(runtimeVerifier, /working set growth .* exceeded/);
+  assert.match(runtimeVerifier, /private memory growth .* exceeded/);
 });

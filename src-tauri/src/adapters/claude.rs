@@ -58,7 +58,7 @@ fn iso(ts: Option<i64>) -> Option<String> {
 fn limit(label: &str, window: Option<LimitWindow>) -> Option<AccountLimit> {
     window.map(|window| AccountLimit {
         label: label.into(),
-        used_percent: window.used_percentage,
+        used_percent: window.used_percentage.and_then(normalized_percent),
         resets_at: iso(window.resets_at),
     })
 }
@@ -83,7 +83,10 @@ pub fn parse(json: &str, pc_id: &str, captured_at: &str) -> anyhow::Result<Agent
         secondary,
         session: SessionInfo {
             active: true,
-            context_used_percent: status.context_window.and_then(|c| c.used_percentage),
+            context_used_percent: status
+                .context_window
+                .and_then(|c| c.used_percentage)
+                .and_then(normalized_percent),
         },
         cost_estimate_usd: status.cost.and_then(|c| c.total_cost_usd),
         approx: true,
@@ -101,7 +104,7 @@ fn percent_after_prefix(text: &str, prefix: &str) -> Option<f32> {
     text.lines().find_map(|line| {
         let rest = line.trim().strip_prefix(prefix)?;
         let percent = rest.split('%').next()?.trim();
-        percent.parse::<f32>().ok()
+        percent.parse::<f32>().ok().and_then(normalized_percent)
     })
 }
 
@@ -120,8 +123,10 @@ pub fn parse_usage_output(
 ) -> anyhow::Result<AgentStatus> {
     let text = usage_text(raw);
     let session_percent = current_session_percent(&text);
-    let week_percent = current_week_percent(&text)
-        .ok_or_else(|| anyhow::anyhow!("Claude usage output has no current week percent"))?;
+    let week_percent = current_week_percent(&text);
+    if session_percent.is_none() && week_percent.is_none() {
+        anyhow::bail!("Claude usage output has no valid usage percent");
+    }
 
     Ok(AgentStatus {
         schema_version: SCHEMA_VERSION.into(),
@@ -134,9 +139,9 @@ pub fn parse_usage_output(
             used_percent: Some(used_percent),
             resets_at: None,
         }),
-        secondary: Some(AccountLimit {
+        secondary: week_percent.map(|used_percent| AccountLimit {
             label: "week".into(),
-            used_percent: Some(week_percent),
+            used_percent: Some(used_percent),
             resets_at: None,
         }),
         session: SessionInfo {
@@ -150,13 +155,11 @@ pub fn parse_usage_output(
 
 fn oauth_limit(label: &str, window: Option<OauthUsageWindow>) -> Option<AccountLimit> {
     let window = window?;
-    let used_percent = window
-        .utilization
-        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
+    let used_percent = window.utilization.and_then(normalized_percent);
     Some(AccountLimit {
         label: label.into(),
         used_percent,
-        resets_at: window.resets_at,
+        resets_at: window.resets_at.as_deref().and_then(normalized_rfc3339),
     })
 }
 
@@ -230,5 +233,38 @@ mod tests {
             "2026-07-10T03:00:00Z",
         )
         .is_err());
+    }
+
+    #[test]
+    fn approximate_parsers_drop_invalid_percent_fields() {
+        let status = parse(
+            r#"{"session_id":"fixture","context_window":{"used_percentage":-1},"rate_limits":{"five_hour":{"used_percentage":101},"seven_day":{"used_percentage":42}}}"#,
+            "LOCAL",
+            "2026-07-10T03:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(status.session.context_used_percent, None);
+        assert_eq!(status.primary.unwrap().used_percent, None);
+        assert_eq!(status.secondary.unwrap().used_percent, Some(42.0));
+
+        let usage = parse_usage_output(
+            "Current session: 24%\nCurrent week (all models): 101%",
+            "LOCAL",
+            "2026-07-10T03:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(usage.primary.unwrap().used_percent, Some(24.0));
+        assert!(usage.secondary.is_none());
+    }
+
+    #[test]
+    fn oauth_parser_drops_invalid_reset_timestamp() {
+        let status = parse_oauth_usage_response(
+            r#"{"five_hour":{"utilization":25,"resets_at":"not-a-time"}}"#,
+            "LOCAL",
+            "2026-07-10T03:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(status.primary.unwrap().resets_at, None);
     }
 }

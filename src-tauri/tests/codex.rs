@@ -26,6 +26,21 @@ fn parses_real_envelope_and_computes_context() {
 }
 
 #[test]
+fn parses_rollout_with_single_weekly_window_by_duration() {
+    let event = r#"{"timestamp":"2026-07-13T00:00:00Z","type":"event_msg","payload":{
+      "type":"token_count",
+      "info":{"last_token_usage":{"input_tokens":10},"model_context_window":100},
+      "rate_limits":{"primary":{"used_percent":16,"window_minutes":10080},"secondary":null}
+    }}"#;
+
+    let status = codex::parse_token_count(event, "PC1", "session", "2026-07-13T00:00:00Z").unwrap();
+
+    assert!(status.primary.is_none());
+    assert_eq!(status.secondary.as_ref().unwrap().label, "week");
+    assert_eq!(status.secondary.as_ref().unwrap().used_percent, Some(16.0));
+}
+
+#[test]
 fn rejects_non_token_count_payloads() {
     let ev = r#"{"timestamp":"2026-07-02T02:17:30.218Z","type":"event_msg","payload":{"type":"message","text":"token_count only in text"}}"#;
 
@@ -86,6 +101,33 @@ fn codex_account_rate_limits_fallback_to_result_rate_limits() {
 }
 
 #[test]
+fn codex_account_rate_limits_map_single_window_by_duration() {
+    let weekly_only = r#"{"id":3,"result":{"rateLimitsByLimitId":{"codex":{
+      "primary":{"usedPercent":16,"windowDurationMins":10080,"resetsAt":1784506358},
+      "secondary":null
+    }}}}"#;
+    let weekly =
+        codex::parse_account_rate_limits_response(weekly_only, "PC1", "2026-07-13T00:00:00Z")
+            .unwrap();
+
+    assert!(weekly.primary.is_none());
+    assert_eq!(weekly.secondary.as_ref().unwrap().label, "week");
+    assert_eq!(weekly.secondary.as_ref().unwrap().used_percent, Some(16.0));
+
+    let five_hour_only = r#"{"id":3,"result":{"rateLimits":{
+      "primary":{"usedPercent":9,"windowDurationMins":300},
+      "secondary":null
+    }}}"#;
+    let five_hour =
+        codex::parse_account_rate_limits_response(five_hour_only, "PC1", "2026-07-13T00:00:00Z")
+            .unwrap();
+
+    assert_eq!(five_hour.primary.as_ref().unwrap().label, "5h");
+    assert_eq!(five_hour.primary.as_ref().unwrap().used_percent, Some(9.0));
+    assert!(five_hour.secondary.is_none());
+}
+
+#[test]
 fn codex_account_rate_limits_rejects_missing_limits_or_errors() {
     assert!(codex::parse_account_rate_limits_response(
         r#"{"id":2,"result":{"rateLimitsByLimitId":{}}}"#,
@@ -104,13 +146,13 @@ fn codex_account_rate_limits_rejects_missing_limits_or_errors() {
 #[test]
 fn codex_account_rate_limits_rejects_incomplete_or_invalid_windows() {
     let invalid_responses = [
-        r#"{"id":2,"result":{"rateLimits":{"primary":null,"secondary":{"usedPercent":22,"windowDurationMins":10080}}}}"#,
         r#"{"id":2,"result":{"rateLimits":{"primary":{"windowDurationMins":300},"secondary":{"usedPercent":22,"windowDurationMins":10080}}}}"#,
         r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":"11","windowDurationMins":300},"secondary":{"usedPercent":22,"windowDurationMins":10080}}}}"#,
         r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":101,"windowDurationMins":300},"secondary":{"usedPercent":22,"windowDurationMins":10080}}}}"#,
         r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":11,"windowDurationMins":60},"secondary":{"usedPercent":22,"windowDurationMins":10080}}}}"#,
         r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":11,"windowDurationMins":300},"secondary":{"usedPercent":22,"windowDurationMins":1440}}}}"#,
-        r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":11,"windowDurationMins":300}}}}"#,
+        r#"{"id":2,"result":{"rateLimits":{"primary":null,"secondary":null}}}"#,
+        r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":11,"windowDurationMins":300},"secondary":{"usedPercent":22,"windowDurationMins":300}}}}"#,
     ];
 
     for response in invalid_responses {

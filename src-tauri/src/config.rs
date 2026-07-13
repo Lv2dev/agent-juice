@@ -1,14 +1,16 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
+    time::SystemTime,
 };
 
-use crate::render::Palette;
+use crate::{paths, render::Palette};
 
 static SETTINGS_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -57,6 +59,8 @@ pub struct Settings {
     pub stale_after_secs: i64,
     #[serde(default = "default_bar_mode")]
     pub bar_mode: String,
+    #[serde(default = "default_full_reset_time_on")]
+    pub full_reset_time_on: bool,
     #[serde(default = "default_limit_order")]
     pub limit_order: String,
     #[serde(default = "default_fullscreen_hide_on")]
@@ -138,6 +142,8 @@ pub struct SettingsInput {
     pub stale_after_secs: i64,
     #[serde(default = "default_bar_mode")]
     pub bar_mode: String,
+    #[serde(default = "default_full_reset_time_on")]
+    pub full_reset_time_on: bool,
     #[serde(default = "default_limit_order")]
     pub limit_order: String,
     #[serde(default = "default_fullscreen_hide_on")]
@@ -219,10 +225,56 @@ pub struct SettingsInput {
     pub codex_secondary_color: Option<String>,
 }
 
+const WRAP_META_VERSION: u32 = 2;
+
 #[derive(Clone, Serialize, Deserialize)]
 struct WrapMeta {
+    #[serde(default)]
+    version: u32,
     managed_command: String,
     original_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_status_line: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_status_line_present: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_status_line: Option<serde_json::Value>,
+}
+
+impl WrapMeta {
+    fn managed_status_line(&self) -> serde_json::Value {
+        self.managed_status_line.clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "type": "command",
+                "command": self.managed_command,
+            })
+        })
+    }
+
+    fn original_status_line(&self) -> (bool, Option<serde_json::Value>) {
+        if self.version >= WRAP_META_VERSION || self.original_status_line_present.is_some() {
+            let present = self.original_status_line_present.unwrap_or(false);
+            return (
+                present,
+                present.then(|| {
+                    self.original_status_line
+                        .clone()
+                        .unwrap_or(serde_json::Value::Null)
+                }),
+            );
+        }
+
+        match self.original_command.as_ref() {
+            Some(command) => (
+                true,
+                Some(serde_json::json!({
+                    "type": "command",
+                    "command": command,
+                })),
+            ),
+            None => (false, None),
+        }
+    }
 }
 
 fn default_palette_name() -> String {
@@ -255,6 +307,10 @@ fn default_stale() -> i64 {
 
 fn default_bar_mode() -> String {
     "full".into()
+}
+
+fn default_full_reset_time_on() -> bool {
+    true
 }
 
 fn default_limit_order() -> String {
@@ -368,6 +424,7 @@ impl Default for Settings {
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
+            full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
@@ -412,6 +469,7 @@ impl Default for SettingsInput {
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
+            full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
@@ -456,15 +514,57 @@ impl Default for SettingsInput {
 
 impl Settings {
     fn path() -> Option<PathBuf> {
-        dirs::data_local_dir().map(|dir| dir.join("agent-juice").join("settings.json"))
+        paths::data_dir().map(|dir| dir.join("settings.json"))
     }
 
     fn agent_dir() -> Option<PathBuf> {
-        dirs::data_local_dir().map(|dir| dir.join("agent-juice"))
+        paths::data_dir()
     }
 
     pub fn load() -> Self {
         Self::path().map_or_else(Self::default, |path| Self::load_from(&path))
+    }
+
+    pub fn load_with_revision() -> (Self, Option<(u64, SystemTime)>) {
+        let Some(path) = Self::path() else {
+            return (Self::default(), None);
+        };
+        Self::load_with_revision_at(&path)
+    }
+
+    pub fn load_with_revision_at(path: &Path) -> (Self, Option<(u64, SystemTime)>) {
+        Self::load_with_revision_at_with_hook(path, || {})
+    }
+
+    fn load_with_revision_at_with_hook(
+        path: &Path,
+        mut after_load: impl FnMut(),
+    ) -> (Self, Option<(u64, SystemTime)>) {
+        let _guard = SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        for _ in 0..8 {
+            let before = Self::storage_revision_at(path);
+            let settings = Self::load_from(path);
+            after_load();
+            let after = Self::storage_revision_at(path);
+            if before == after {
+                return (settings, after);
+            }
+        }
+        (Self::load_from(path), Self::storage_revision_at(path))
+    }
+
+    pub fn storage_revision() -> Option<(u64, SystemTime)> {
+        Self::path().as_deref().and_then(Self::storage_revision_at)
+    }
+
+    pub fn storage_revision_at(path: &Path) -> Option<(u64, SystemTime)> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        Some((metadata.len(), metadata.modified().ok()?))
     }
 
     pub fn load_from(path: &Path) -> Self {
@@ -473,11 +573,31 @@ impl Settings {
         };
 
         let value = serde_json::from_str::<serde_json::Value>(&contents).ok();
-        let mut settings = serde_json::from_str::<Self>(&contents).unwrap_or_default();
-        settings.apply_legacy_taskbar_offset(value.as_ref());
-        settings.apply_legacy_collection_interval(value.as_ref());
-        settings.apply_legacy_ring_center_size(value.as_ref());
-        settings.apply_legacy_tool_colors(value.as_ref());
+        let settings = serde_json::from_str::<Self>(&contents).unwrap_or_default();
+        Self::normalize_loaded(settings, value.as_ref())
+    }
+
+    fn load_for_update(path: &Path) -> anyhow::Result<Self> {
+        let contents = match std::fs::read(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok(Self::normalize_loaded(Self::default(), None));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let value = serde_json::from_slice::<serde_json::Value>(&contents)?;
+        if !value.is_object() {
+            anyhow::bail!("settings root must be a JSON object");
+        }
+        let settings = serde_json::from_value::<Self>(value.clone())?;
+        Ok(Self::normalize_loaded(settings, Some(&value)))
+    }
+
+    fn normalize_loaded(mut settings: Self, value: Option<&serde_json::Value>) -> Self {
+        settings.apply_legacy_taskbar_offset(value);
+        settings.apply_legacy_collection_interval(value);
+        settings.apply_legacy_ring_center_size(value);
+        settings.apply_legacy_tool_colors(value);
         settings.clamp_offsets();
         settings.clamp_ring_geometry();
         settings.display_basis = normalize_display_basis(&settings.display_basis).into();
@@ -501,11 +621,11 @@ impl Settings {
         Self::update_at(&path, mutator)
     }
 
-    pub(crate) fn update_at(path: &Path, mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+    pub fn update_at(path: &Path, mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
         let _guard = SETTINGS_UPDATE_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let mut settings = Self::load_from(path);
+        let mut settings = Self::load_for_update(path)?;
         mutator(&mut settings);
         settings.save_to(path)?;
         Ok(settings)
@@ -528,6 +648,7 @@ impl Settings {
             poll_interval_secs: interval,
             stale_after_secs: default_stale(),
             bar_mode: default_bar_mode(),
+            full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
@@ -581,6 +702,7 @@ impl Settings {
             poll_interval_secs: input.poll_interval_secs.max(1),
             stale_after_secs: input.stale_after_secs.max(1),
             bar_mode: normalize_bar_mode(&input.bar_mode).into(),
+            full_reset_time_on: input.full_reset_time_on,
             limit_order: normalize_limit_order(&input.limit_order).into(),
             fullscreen_hide_on: input.fullscreen_hide_on,
             maximized_hide_on: input.maximized_hide_on,
@@ -714,7 +836,7 @@ impl Settings {
     }
 
     pub fn install_statusline_wrap(bridge_abs: &str) -> anyhow::Result<()> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+        let home = claude_home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         let agent_dir = Self::agent_dir().ok_or_else(|| anyhow::anyhow!("no data dir"))?;
         Self::install_statusline_wrap_at(&home, &agent_dir, bridge_abs)
     }
@@ -724,37 +846,55 @@ impl Settings {
         agent_dir: &Path,
         bridge_abs: &str,
     ) -> anyhow::Result<()> {
+        Self::install_statusline_wrap_at_with_hook(home, agent_dir, bridge_abs, |_| {})
+    }
+
+    fn install_statusline_wrap_at_with_hook(
+        home: &Path,
+        agent_dir: &Path,
+        bridge_abs: &str,
+        before_settings_patch: impl FnOnce(&Path),
+    ) -> anyhow::Result<()> {
         let settings_path = claude_settings_path(home);
         let bridge = bridge_abs.replace('\\', "/");
         let managed_command = command_for_bridge(&bridge);
-        std::fs::create_dir_all(agent_dir)?;
-        if let Some(parent) = settings_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".into());
-        let mut value = serde_json::from_str::<serde_json::Value>(&raw)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        if !value.is_object() {
-            value = serde_json::json!({});
-        }
-
-        let current = value
-            .pointer("/statusLine/command")
-            .and_then(|command| command.as_str())
-            .unwrap_or("")
-            .to_string();
+        let value = load_optional_json_object(&settings_path)?;
+        let current_status_line = value.get("statusLine").cloned();
+        let current_present = value.contains_key("statusLine");
 
         let wrap_path = agent_dir.join("wrap.json");
         let meta_path = agent_dir.join("wrap-meta.json");
         let previous_meta = read_wrap_meta(&meta_path).ok();
-        let original_command = if is_agentjuice_command(&current) {
-            previous_meta
-                .and_then(|meta| meta.original_command)
-                .or_else(|| read_nonempty(&wrap_path).ok().flatten())
+        let (original_status_line_present, original_status_line) = if let Some(meta) = previous_meta
+            .as_ref()
+            .filter(|meta| current_status_line.as_ref() == Some(&meta.managed_status_line()))
+        {
+            meta.original_status_line()
         } else {
-            nonempty_trimmed(&current)
+            let current_command = current_status_line
+                .as_ref()
+                .and_then(|status_line| status_line.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if is_agentjuice_command(current_command) {
+                anyhow::bail!("Claude statusLine ownership metadata does not match");
+            }
+            (current_present, current_status_line.clone())
         };
+        let original_command = original_status_line
+            .as_ref()
+            .and_then(|status_line| status_line.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(nonempty_trimmed);
+        let managed_status_line = serde_json::json!({
+            "type": "command",
+            "command": managed_command,
+        });
+
+        std::fs::create_dir_all(agent_dir)?;
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         if let Some(original) = &original_command {
             replace_file(&wrap_path, original.as_bytes())?;
@@ -762,75 +902,111 @@ impl Settings {
             let _ = std::fs::remove_file(&wrap_path);
         }
 
-        if settings_path.exists() {
-            std::fs::copy(
-                &settings_path,
-                settings_path.with_extension("json.aj-backup"),
-            )?;
+        let backup_path = settings_path.with_extension("json.aj-backup");
+        if settings_path.exists() && !backup_path.exists() {
+            std::fs::copy(&settings_path, backup_path)?;
         }
 
-        value["statusLine"] = serde_json::json!({
-            "type": "command",
-            "command": managed_command,
-        });
         write_wrap_meta(
             &meta_path,
             &WrapMeta {
-                managed_command,
+                version: WRAP_META_VERSION,
+                managed_command: managed_command.clone(),
                 original_command,
+                managed_status_line: Some(managed_status_line.clone()),
+                original_status_line_present: Some(original_status_line_present),
+                original_status_line,
             },
         )?;
-        replace_file(
+        before_settings_patch(&settings_path);
+        patch_status_line_if_unchanged(
             &settings_path,
-            serde_json::to_string_pretty(&value)?.as_bytes(),
+            current_present,
+            current_status_line.as_ref(),
+            true,
+            Some(managed_status_line),
         )?;
         Ok(())
     }
 
     pub fn restore_statusline() -> anyhow::Result<()> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+        let home = claude_home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         let agent_dir = Self::agent_dir().ok_or_else(|| anyhow::anyhow!("no data dir"))?;
         Self::restore_statusline_at(&home, &agent_dir)
     }
 
     pub fn restore_statusline_at(home: &Path, agent_dir: &Path) -> anyhow::Result<()> {
+        Self::restore_statusline_at_with(home, agent_dir, |_| {}, remove_file_if_exists)
+    }
+
+    fn restore_statusline_at_with(
+        home: &Path,
+        agent_dir: &Path,
+        before_settings_patch: impl FnOnce(&Path),
+        mut remove: impl FnMut(&Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         let settings_path = claude_settings_path(home);
-        let meta = read_wrap_meta(&agent_dir.join("wrap-meta.json"))?;
-        let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".into());
-        let mut value = serde_json::from_str::<serde_json::Value>(&raw)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        if !value.is_object() {
-            value = serde_json::json!({});
+        let meta_path = agent_dir.join("wrap-meta.json");
+        let wrap_path = agent_dir.join("wrap.json");
+        let meta = read_wrap_meta(&meta_path)?;
+        let value = load_optional_json_object(&settings_path)?;
+        let current_present = value.contains_key("statusLine");
+        let current_status_line = value.get("statusLine");
+        let managed_status_line = meta.managed_status_line();
+        let (original_present, original_status_line) = meta.original_status_line();
+        let already_restored = current_present == original_present
+            && current_status_line == original_status_line.as_ref();
+        if current_status_line == Some(&managed_status_line) {
+            before_settings_patch(&settings_path);
+            patch_status_line_if_unchanged(
+                &settings_path,
+                true,
+                Some(&managed_status_line),
+                original_present,
+                original_status_line,
+            )?;
+        } else if !already_restored {
+            anyhow::bail!("Claude statusLine is not managed by Juice or already restored");
         }
 
-        let current = value
-            .pointer("/statusLine/command")
-            .and_then(|command| command.as_str())
-            .unwrap_or("");
-        if !same_command(current, &meta.managed_command) {
-            anyhow::bail!("Claude statusLine is not managed by Juice");
-        }
-
-        if let Some(original) = meta.original_command.as_deref().and_then(nonempty_trimmed) {
-            value["statusLine"] = serde_json::json!({
-                "type": "command",
-                "command": original,
-            });
-        } else {
-            if let Some(object) = value.as_object_mut() {
-                object.remove("statusLine");
-            }
-        }
-
-        if let Some(parent) = settings_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        replace_file(
-            &settings_path,
-            serde_json::to_string_pretty(&value)?.as_bytes(),
-        )?;
+        remove(&wrap_path)?;
+        remove(&meta_path)?;
         Ok(())
     }
+}
+
+fn patch_status_line_if_unchanged(
+    settings_path: &Path,
+    expected_present: bool,
+    expected_status_line: Option<&serde_json::Value>,
+    replacement_present: bool,
+    replacement_status_line: Option<serde_json::Value>,
+) -> anyhow::Result<()> {
+    let (mut latest, snapshot) = load_optional_json_object_snapshot(settings_path)?;
+    if latest.contains_key("statusLine") != expected_present
+        || latest.get("statusLine") != expected_status_line
+    {
+        anyhow::bail!("Claude statusLine changed during Juice update");
+    }
+    if replacement_present {
+        latest.insert(
+            "statusLine".into(),
+            replacement_status_line.unwrap_or(serde_json::Value::Null),
+        );
+    } else {
+        latest.remove("statusLine");
+    }
+    if read_optional_bytes(settings_path)? != snapshot {
+        anyhow::bail!("Claude settings changed during Juice update");
+    }
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    replace_file(
+        settings_path,
+        serde_json::to_string_pretty(&latest)?.as_bytes(),
+    )?;
+    Ok(())
 }
 
 fn command_for_bridge(bridge: &str) -> String {
@@ -846,15 +1022,29 @@ fn nonempty_trimmed(value: &str) -> Option<String> {
     }
 }
 
-fn read_nonempty(path: &Path) -> anyhow::Result<Option<String>> {
-    Ok(std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| nonempty_trimmed(&contents)))
-}
-
 fn read_wrap_meta(path: &Path) -> anyhow::Result<WrapMeta> {
     let contents = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&contents)?)
+    let raw: serde_json::Value = serde_json::from_str(&contents)?;
+    let meta: WrapMeta = serde_json::from_value(raw.clone())?;
+    if meta.version >= WRAP_META_VERSION {
+        let object = raw
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Claude statusLine metadata must be an object"))?;
+        if !object
+            .get("managed_status_line")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            anyhow::bail!("Claude statusLine metadata has no managed subtree");
+        }
+        let original_present = object
+            .get("original_status_line_present")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| anyhow::anyhow!("Claude statusLine metadata has no presence flag"))?;
+        if original_present && !object.contains_key("original_status_line") {
+            anyhow::bail!("Claude statusLine metadata has no original subtree");
+        }
+    }
+    Ok(meta)
 }
 
 fn write_wrap_meta(path: &Path, meta: &WrapMeta) -> anyhow::Result<()> {
@@ -876,12 +1066,51 @@ fn is_agentjuice_command(command: &str) -> bool {
         || normalized.ends_with("/agentjuice-statusline")
 }
 
-fn same_command(left: &str, right: &str) -> bool {
-    normalized_command_path(left) == normalized_command_path(right)
-}
-
 fn claude_settings_path(home: &Path) -> PathBuf {
     home.join(".claude").join("settings.json")
+}
+
+fn claude_home_dir() -> Option<PathBuf> {
+    std::env::var_os("AGENT_JUICE_CLAUDE_HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
+
+fn load_optional_json_object(
+    path: &Path,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    Ok(load_optional_json_object_snapshot(path)?.0)
+}
+
+type JsonObjectSnapshot = (serde_json::Map<String, serde_json::Value>, Option<Vec<u8>>);
+
+fn load_optional_json_object_snapshot(path: &Path) -> anyhow::Result<JsonObjectSnapshot> {
+    let contents = read_optional_bytes(path)?;
+    let Some(bytes) = contents.as_ref() else {
+        return Ok((serde_json::Map::new(), None));
+    };
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Claude settings root must be a JSON object"))
+        .map(|object| (object, contents))
+}
+
+fn read_optional_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn clamp_percent(value: f32) -> f32 {
@@ -1040,7 +1269,7 @@ fn tool_colors_from_input(input: &SettingsInput) -> ToolColors {
 
 fn parse_hex_rgb(value: Option<&str>) -> Option<[u8; 3]> {
     let value = value?.trim().strip_prefix('#').unwrap_or(value?.trim());
-    if value.len() != 6 {
+    if value.len() != 6 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
 
@@ -1106,4 +1335,226 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::{parse_hex_rgb, remove_file_if_exists, Settings};
+    use std::{
+        fs,
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "agent-juice-config-unit-{name}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn hex_rgb_rejects_non_ascii_without_panicking() {
+        assert_eq!(parse_hex_rgb(Some("#a0B1c2")), Some([0xa0, 0xb1, 0xc2]));
+        for invalid in ["aéaaa", "💚12", "12 456", "gg0000"] {
+            assert_eq!(parse_hex_rgb(Some(invalid)), None);
+        }
+    }
+
+    #[test]
+    fn install_preserves_concurrent_unrelated_changes_and_rejects_statusline_conflicts() {
+        let root = temp_root("install-conflict");
+        let home = root.join("home");
+        let data = root.join("data");
+        let settings = home.join(".claude").join("settings.json");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            r#"{"statusLine":{"type":"command","command":"original"},"theme":"old"}"#,
+        )
+        .unwrap();
+
+        Settings::install_statusline_wrap_at_with_hook(
+            &home,
+            &data,
+            r"C:\Juice\agentjuice-statusline.exe",
+            |path| {
+                fs::write(
+                    path,
+                    r#"{"statusLine":{"type":"command","command":"original"},"theme":"new"}"#,
+                )
+                .unwrap();
+            },
+        )
+        .unwrap();
+        let installed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(installed["theme"], "new");
+        assert!(installed["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("agentjuice-statusline.exe"));
+
+        let conflict_root = temp_root("install-statusline-conflict");
+        let conflict_home = conflict_root.join("home");
+        let conflict_data = conflict_root.join("data");
+        let conflict_settings = conflict_home.join(".claude").join("settings.json");
+        fs::create_dir_all(conflict_settings.parent().unwrap()).unwrap();
+        fs::write(
+            &conflict_settings,
+            r#"{"statusLine":{"type":"command","command":"original"}}"#,
+        )
+        .unwrap();
+        assert!(Settings::install_statusline_wrap_at_with_hook(
+            &conflict_home,
+            &conflict_data,
+            r"C:\Juice\agentjuice-statusline.exe",
+            |path| {
+                fs::write(
+                    path,
+                    r#"{"statusLine":{"type":"command","command":"user-change"}}"#,
+                )
+                .unwrap();
+            },
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&conflict_settings).unwrap())
+                .unwrap()["statusLine"]["command"],
+            "user-change"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(conflict_root).unwrap();
+    }
+
+    #[test]
+    fn restore_retries_cleanup_after_settings_are_already_restored() {
+        for failed_name in ["wrap.json", "wrap-meta.json"] {
+            let root = temp_root(failed_name);
+            let home = root.join("home");
+            let data = root.join("data");
+            let settings = home.join(".claude").join("settings.json");
+            fs::create_dir_all(settings.parent().unwrap()).unwrap();
+            fs::write(
+                &settings,
+                r#"{"statusLine":{"type":"command","command":"original"},"keep":true}"#,
+            )
+            .unwrap();
+            Settings::install_statusline_wrap_at(
+                &home,
+                &data,
+                r"C:\Juice\agentjuice-statusline.exe",
+            )
+            .unwrap();
+
+            let mut failed = false;
+            assert!(Settings::restore_statusline_at_with(
+                &home,
+                &data,
+                |_| {},
+                |path: &Path| {
+                    if !failed
+                        && path.file_name().and_then(|name| name.to_str()) == Some(failed_name)
+                    {
+                        failed = true;
+                        anyhow::bail!("injected cleanup failure");
+                    }
+                    remove_file_if_exists(path)
+                },
+            )
+            .is_err());
+            let restored: serde_json::Value =
+                serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+            assert_eq!(restored["statusLine"]["command"], "original");
+            assert!(data.join("wrap-meta.json").exists());
+
+            Settings::restore_statusline_at(&home, &data).unwrap();
+            assert!(!data.join("wrap.json").exists());
+            assert!(!data.join("wrap-meta.json").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn restore_preserves_concurrent_unrelated_changes_and_rejects_statusline_conflicts() {
+        for conflict in [false, true] {
+            let root = temp_root(if conflict {
+                "restore-statusline-conflict"
+            } else {
+                "restore-unrelated-change"
+            });
+            let home = root.join("home");
+            let data = root.join("data");
+            let settings = home.join(".claude").join("settings.json");
+            fs::create_dir_all(settings.parent().unwrap()).unwrap();
+            fs::write(
+                &settings,
+                r#"{"statusLine":{"type":"command","command":"original"},"theme":"old"}"#,
+            )
+            .unwrap();
+            Settings::install_statusline_wrap_at(
+                &home,
+                &data,
+                r"C:\Juice\agentjuice-statusline.exe",
+            )
+            .unwrap();
+            let managed: serde_json::Value =
+                serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+            let replacement = if conflict {
+                serde_json::json!({
+                    "statusLine": {"type":"command", "command":"user-change"},
+                    "theme": "new"
+                })
+            } else {
+                serde_json::json!({
+                    "statusLine": managed["statusLine"].clone(),
+                    "theme": "new"
+                })
+            };
+
+            let result = Settings::restore_statusline_at_with(
+                &home,
+                &data,
+                |path| fs::write(path, serde_json::to_vec(&replacement).unwrap()).unwrap(),
+                remove_file_if_exists,
+            );
+            let current: serde_json::Value =
+                serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+            assert_eq!(current["theme"], "new");
+            if conflict {
+                assert!(result.is_err());
+                assert_eq!(current["statusLine"]["command"], "user-change");
+                assert!(data.join("wrap-meta.json").exists());
+            } else {
+                result.unwrap();
+                assert_eq!(current["statusLine"]["command"], "original");
+                assert!(!data.join("wrap-meta.json").exists());
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn settings_snapshot_retries_when_revision_changes_after_load() {
+        let root = temp_root("settings-snapshot");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&path, r#"{"bar_mode":"full"}"#).unwrap();
+        let mut replaced = false;
+
+        let (settings, revision) = Settings::load_with_revision_at_with_hook(&path, || {
+            if !replaced {
+                fs::write(&path, r#"{"bar_mode":"compact"}"#).unwrap();
+                replaced = true;
+            }
+        });
+
+        assert_eq!(settings.bar_mode, "compact");
+        assert_eq!(revision, Settings::storage_revision_at(&path));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

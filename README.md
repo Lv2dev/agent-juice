@@ -57,7 +57,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 
 | 모드 | 구성 |
 | --- | --- |
-| 넉넉 | 도구명, 링, 선택한 기준의 5h/주간 값을 모두 표시합니다. |
+| 넉넉 | 도구명, 링, 5h/주간 값과 리셋까지 남은 시간을 표시합니다. 리셋 시간은 설정에서 끌 수 있습니다. |
 | 컴팩트 | 도구명을 줄이고 두 한도 값을 중심으로 표시합니다. |
 | 이중원 | 5h와 주간을 겹치지 않는 두 개의 원으로 압축합니다. |
 | 링4 | 도구별 한도 두 개를 독립된 단일 링으로 표시합니다. |
@@ -247,7 +247,7 @@ Juice provides **four bar modes**.
 
 | Mode | Layout |
 | --- | --- |
-| Full | Tool name, ring, and both limits in the selected display basis. |
+| Full | Shows the tool name, ring, both limits, and time remaining until reset. Reset times can be disabled in Settings. |
 | Compact | Hides the tool name and prioritizes the two limit values. |
 | Dual ring | Compresses 5-hour and weekly limits into two non-overlapping rings. |
 | Four rings | Uses one standalone ring for each tool limit. |

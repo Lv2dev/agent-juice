@@ -310,3 +310,88 @@ test("panel drag falls back to guarded IPC when startDragging fails", async () =
   delete global.window;
   delete global.document;
 });
+
+test("panel retries listeners, keeps newer events, and rolls back failed window commands", async () => {
+  const listeners = {};
+  const eventHandlers = {};
+  const attempts = new Map();
+  const cards = { claude: toolCardStub(), codex: toolCardStub() };
+  let resolveStatus;
+  const pendingStatus = new Promise((resolve) => {
+    resolveStatus = resolve;
+  });
+
+  global.window = {
+    addEventListener() {},
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return pendingStatus;
+          if (command === "hide_panel_window") throw new Error("window unavailable");
+          return null;
+        },
+      },
+      event: {
+        async listen(name, handler) {
+          const count = (attempts.get(name) ?? 0) + 1;
+          attempts.set(name, count);
+          if (name === "status-updated" && count === 1) throw new Error("transient");
+          eventHandlers[name] = handler;
+        },
+      },
+    },
+  };
+  global.document = {
+    hidden: false,
+    documentElement: { dataset: {}, removeAttribute() {} },
+    addEventListener(name, handler) {
+      listeners[name] = handler;
+    },
+    querySelector(selector) {
+      if (selector === '[data-tool="claude"]') return cards.claude;
+      if (selector === '[data-tool="codex"]') return cards.codex;
+      return null;
+    },
+  };
+
+  await import(`./panel.js?test=${Date.now()}-listener-retry`);
+  await new Promise((resolve) => setTimeout(resolve, 130));
+  eventHandlers["status-updated"]?.({
+    payload: [{
+      tool: "codex",
+      pc_id: "NEW",
+      captured_at: "2026-07-13T00:00:00Z",
+      primary: { used_percent: 10 },
+      secondary: { used_percent: 20 },
+      session: { active: true },
+    }],
+  });
+  resolveStatus([{
+    tool: "codex",
+    pc_id: "OLD",
+    captured_at: "2026-07-12T00:00:00Z",
+    primary: { used_percent: 90 },
+    secondary: { used_percent: 90 },
+    session: { active: true },
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cards.codex.querySelector(".pc").textContent, "NEW");
+  assert.ok(attempts.get("status-updated") >= 2);
+
+  listeners.click?.({
+    target: {
+      closest(selector) {
+        return selector === "[data-window-action]"
+          ? { dataset: { windowAction: "close" } }
+          : null;
+      },
+    },
+    preventDefault() {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(global.document.documentElement.dataset.panelVisible, "true");
+
+  delete global.window;
+  delete global.document;
+});

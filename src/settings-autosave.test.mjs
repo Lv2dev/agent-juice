@@ -29,7 +29,10 @@ test("settings form auto-saves changed values without a submit button", async ()
   const savedInputs = [];
   const pendingSaveResponses = [];
   let deferSaveResponses = false;
-  let settingsEventHandler = null;
+  const eventHandlers = {};
+  const listenerOrder = [];
+  const listenerAttempts = new Map();
+  const invokedCommands = [];
   const statusHost = { dataset: {} };
   const statusEl = {
     textContent: "",
@@ -42,6 +45,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   const toastText = { textContent: "" };
   const customRow = { hidden: true };
   const toolColorRow = { hidden: true };
+  const fullResetRow = { hidden: false };
+  const updateStatusEl = { textContent: "", dataset: {} };
   const fields = {
     palette: makeField("traffic"),
     display_basis: makeField("remaining", "text", { name: "display_basis" }),
@@ -54,6 +59,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     stale_after_secs: makeField("90"),
     "stale-output": makeField("90"),
     bar_mode: makeField("full"),
+    full_reset_time_on: makeField(false, "checkbox"),
     limit_order: makeField("primary_first"),
     fullscreen_hide_on: makeField(true, "checkbox"),
     maximized_hide_on: makeField(true, "checkbox"),
@@ -126,6 +132,7 @@ test("settings form auto-saves changed values without a submit button", async ()
     __TAURI__: {
       core: {
         async invoke(command, args) {
+          invokedCommands.push(command);
           if (command === "get_settings") return { maximized_hide_on: true, language: "ko" };
           if (command === "save_settings") {
             savedInputs.push(args.input);
@@ -134,14 +141,20 @@ test("settings form auto-saves changed values without a submit button", async ()
                 pendingSaveResponses.push({ input: args.input, resolve });
               });
             }
-            return args.input;
+            return { settings: args.input, warnings: ["taskbar retry"] };
           }
+          if (command === "check_for_updates") throw new Error("offline");
           return null;
         },
       },
       event: {
-        async listen(_name, handler) {
-          settingsEventHandler = handler;
+        async listen(name, handler) {
+          listenerOrder.push(name);
+          const attempts = (listenerAttempts.get(name) ?? 0) + 1;
+          listenerAttempts.set(name, attempts);
+          if (name === "settings-updated" && attempts === 1) throw new Error("transient");
+          if (name === "update-status") throw new Error("unavailable");
+          eventHandlers[name] = handler;
         },
       },
     },
@@ -158,28 +171,36 @@ test("settings form auto-saves changed values without a submit button", async ()
       if (selector === "[data-settings-toast-text]") return toastText;
       if (selector === "[data-custom-palette]") return customRow;
       if (selector === "[data-tool-palette]") return toolColorRow;
+      if (selector === "[data-full-reset-toggle]") return fullResetRow;
+      if (selector === "#update-check-status") return updateStatusEl;
       return null;
     },
   };
 
   await import(`./settings.js?test=${Date.now()}-autosave`);
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(listenerOrder[0], "app-quit-requested");
 
   assert.equal(statusHost.hidden, true, "initial hydration must not show a completion state");
   assert.equal(toastLayer.hidden, true, "initial hydration must not show a completion toast");
   assert.equal(fields.warn_threshold.style.getPropertyValue("--range-progress"), "30%");
   assert.equal(fields.ring_size_px.style.getPropertyValue("--range-progress"), "66.7%");
+  assert.equal(fullResetRow.hidden, false);
 
   fields.bar_mode.value = "dual";
   fields.claude_primary_color.value = "#123456";
   fields.display_basis.value = "used";
   listeners.input?.({ target: fields.display_basis });
+  fields.theme.value = "dark";
+  listeners.input?.({ target: { ...fields.theme, name: "theme" } });
+  assert.equal(global.document.documentElement.dataset.theme, "dark");
   assert.equal(fields.warn_threshold.value, "70");
   assert.equal(fields.danger_threshold.value, "90");
   await new Promise((resolve) => setTimeout(resolve, 180));
 
   assert.equal(savedInputs.length, 1);
   assert.equal(savedInputs[0].bar_mode, "dual");
+  assert.equal(savedInputs[0].full_reset_time_on, true);
   assert.equal(savedInputs[0].display_basis, "used");
   assert.equal(savedInputs[0].warn_threshold, 70);
   assert.equal(savedInputs[0].danger_threshold, 90);
@@ -203,12 +224,18 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].claude_primary_color, "#123456");
   assert.equal(savedInputs[0].claude_secondary_color, "#d36b86");
   assert.equal(toolColorRow.hidden, false);
+  assert.equal(fullResetRow.hidden, true);
   assert.equal(dispatched.at(-1)?.type, "settings-updated");
   assert.equal(statusEl.textContent, "");
   assert.equal(statusHost.hidden, true);
   assert.equal(toastLayer.hidden, false);
   assert.equal(toastLayer.dataset.visible, "true");
-  assert.equal(toastText.textContent, "적용 완료");
+  assert.equal(toastText.textContent, "저장 완료 · 시스템 적용 재시도 중");
+
+  listeners.click?.({ target: { dataset: { action: "check-updates" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(updateStatusEl.dataset.state, "error");
+  assert.equal(statusHost.hidden, true, "update errors must not become settings save errors");
 
   deferSaveResponses = true;
   fields.bar_mode.value = "compact";
@@ -220,7 +247,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   listeners.input?.({ target: fields.bar_mode });
   await new Promise((resolve) => setTimeout(resolve, 150));
 
-  settingsEventHandler?.({ payload: { bar_mode: "full" } });
+  eventHandlers["settings-updated"]?.({ payload: { bar_mode: "full" } });
   assert.equal(fields.bar_mode.value, "quad", "an old event must not overwrite a newer edit");
   assert.equal(savedInputs.length, 2, "a second save must wait for the in-flight save");
   pendingSaveResponses.shift().resolve(savedInputs[1]);
@@ -230,6 +257,15 @@ test("settings form auto-saves changed values without a submit button", async ()
   pendingSaveResponses.shift().resolve(savedInputs[2]);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.bar_mode.value, "quad");
+
+  deferSaveResponses = false;
+  fields.bar_mode.value = "compact";
+  listeners.input?.({ target: fields.bar_mode });
+  eventHandlers["app-quit-requested"]?.({ payload: null });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(savedInputs.at(-1).bar_mode, "compact");
+  assert.equal(invokedCommands.at(-1), "complete_app_quit");
+  assert.ok(listenerAttempts.get("settings-updated") >= 2);
 
   delete global.window;
   delete global.document;
@@ -242,10 +278,17 @@ test("settings form ignores early input events until stored settings hydrate", a
   const customRow = { hidden: true };
   const monoRow = { hidden: true };
   const toolColorRow = { hidden: true };
+  let focusedOption = null;
   const paletteOptions = ["traffic", "ocean", "mono", "custom"].map((value) => ({
     dataset: { paletteValue: value },
     setAttribute(name, next) {
       this[name] = next;
+    },
+    closest(selector) {
+      return selector.includes("[data-palette-value]") ? this : null;
+    },
+    focus() {
+      focusedOption = this;
     },
   }));
   const palettePicker = {
@@ -254,6 +297,7 @@ test("settings form ignores early input events until stored settings hydrate", a
       return paletteOptions;
     },
   };
+  const fullResetRow = { hidden: false };
   const fields = {
     palette: makeField("custom"),
     display_basis: makeField("remaining", "text", { name: "display_basis" }),
@@ -266,6 +310,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     stale_after_secs: makeField("90"),
     "stale-output": makeField("90"),
     bar_mode: makeField("full"),
+    full_reset_time_on: makeField(false, "checkbox"),
     limit_order: makeField("primary_first"),
     fullscreen_hide_on: makeField(false, "checkbox"),
     maximized_hide_on: makeField(false, "checkbox"),
@@ -322,6 +367,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     },
   };
   let resolveSettings;
+  let settingsLoadAttempts = 0;
   const settingsLoaded = new Promise((resolve) => {
     resolveSettings = resolve;
   });
@@ -340,7 +386,11 @@ test("settings form ignores early input events until stored settings hydrate", a
     __TAURI__: {
       core: {
         async invoke(command, args) {
-          if (command === "get_settings") return settingsLoaded;
+          if (command === "get_settings") {
+            settingsLoadAttempts += 1;
+            if (settingsLoadAttempts === 1) throw new Error("transient settings IPC failure");
+            return settingsLoaded;
+          }
           if (command === "save_settings") {
             savedInputs.push(args.input);
             return args.input;
@@ -365,6 +415,7 @@ test("settings form ignores early input events until stored settings hydrate", a
       if (selector === "[data-mono-palette]") return monoRow;
       if (selector === "[data-tool-palette]") return toolColorRow;
       if (selector === "[data-palette-picker]") return palettePicker;
+      if (selector === "[data-full-reset-toggle]") return fullResetRow;
       return null;
     },
   };
@@ -373,6 +424,7 @@ test("settings form ignores early input events until stored settings hydrate", a
   listeners.input?.({ target: fields.bar_mode });
   await new Promise((resolve) => setTimeout(resolve, 180));
   assert.equal(savedInputs.length, 0);
+  assert.ok(settingsLoadAttempts >= 2);
 
   resolveSettings({
     palette: "Traffic",
@@ -384,17 +436,20 @@ test("settings form ignores early input events until stored settings hydrate", a
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.palette.value, "traffic");
   assert.equal(fields.bar_mode.value, "compact");
+  assert.equal(fullResetRow.hidden, true);
   assert.equal(paletteOptions[0]["aria-checked"], "true");
+  assert.equal(paletteOptions[0].tabIndex, 0);
+  assert.equal(paletteOptions[1].tabIndex, -1);
 
-  listeners.click?.({
-    target: {
-      closest(selector) {
-        return selector === "[data-palette-value]" ? paletteOptions[1] : null;
-      },
-    },
+  listeners.keydown?.({
+    target: paletteOptions[0],
+    key: "ArrowRight",
+    preventDefault() {},
   });
   await new Promise((resolve) => setTimeout(resolve, 180));
   assert.equal(fields.palette.value, "ocean");
+  assert.equal(focusedOption, paletteOptions[1]);
+  assert.equal(paletteOptions[1].tabIndex, 0);
   assert.equal(savedInputs.length, 1);
   assert.equal(savedInputs[0].palette, "ocean");
 

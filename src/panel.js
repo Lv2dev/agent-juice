@@ -11,6 +11,14 @@ const WINDOW_ACTION_COMMANDS = {
 };
 let settings = { ...DEFAULT_SETTINGS };
 let lastStatuses = [];
+let statusEventGeneration = 0;
+let settingsEventGeneration = 0;
+let snapshotFallbackTimer = null;
+const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+
+function setPanelVisible(visible) {
+  document.documentElement.dataset.panelVisible = visible ? "true" : "false";
+}
 
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 
@@ -31,7 +39,11 @@ function bindWindowControls() {
     if (!command) return;
 
     event.preventDefault();
-    void invoke(command);
+    const hidesPanel = action === "close" || action === "minimize";
+    if (hidesPanel) setPanelVisible(false);
+    void invoke(command).catch(() => {
+      if (hidesPanel) setPanelVisible(true);
+    });
   });
 }
 
@@ -136,8 +148,10 @@ window.addEventListener("settings-updated", (event) => {
 });
 
 async function loadSettings() {
+  const requestGeneration = settingsEventGeneration;
   try {
     const loaded = await invoke("get_settings");
+    if (settingsEventGeneration !== requestGeneration) return;
     if (loaded && typeof loaded === "object") {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
@@ -152,13 +166,49 @@ async function loadSettings() {
   }
 }
 
-async function bindStatusUpdates() {
+async function loadStatus() {
+  const requestGeneration = statusEventGeneration;
+  try {
+    const statuses = await invoke("get_status");
+    if (statusEventGeneration === requestGeneration) renderStatuses(statuses);
+  } catch {
+    if (statusEventGeneration === requestGeneration) renderStatuses([]);
+  }
+}
+
+function scheduleSnapshotFallback() {
+  if (snapshotFallbackTimer) return;
+  snapshotFallbackTimer = setInterval(() => {
+    void loadSettings();
+    void loadStatus();
+  }, 30_000);
+  snapshotFallbackTimer?.unref?.();
+}
+
+async function listenWithRetry(listen, eventName, handler) {
+  for (const delay of LISTENER_RETRY_DELAYS_MS) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      await listen(eventName, handler);
+      return true;
+    } catch {
+      // Retry each event independently during WebView startup.
+    }
+  }
+  scheduleSnapshotFallback();
+  return false;
+}
+
+function bindStatusUpdates() {
   const listen = tauriApi().event?.listen;
   if (listen) {
-    try {
-      await listen("status-updated", (event) => renderStatuses(event.payload));
-      await listen("settings-updated", (event) => {
+    void listenWithRetry(listen, "status-updated", (event) => {
+      statusEventGeneration += 1;
+      renderStatuses(event.payload);
+    });
+    void listenWithRetry(listen, "settings-updated", (event) => {
         if (event.payload && typeof event.payload === "object") {
+          settingsEventGeneration += 1;
           settings = { ...DEFAULT_SETTINGS, ...event.payload };
           applyTheme(settings);
           applyFont(settings);
@@ -166,25 +216,21 @@ async function bindStatusUpdates() {
           renderStatuses(lastStatuses);
         }
       });
-    } catch {
-      // The first get_status call below still renders the panel.
-    }
-  }
-
-  try {
-    const statuses = await invoke("get_status");
-    renderStatuses(statuses);
-  } catch {
-    renderStatuses([]);
+    void listenWithRetry(listen, "panel-visibility-updated", (event) => {
+        setPanelVisible(event.payload !== false);
+      });
   }
 }
 
 async function bootstrap() {
+  setPanelVisible(!document.hidden);
+  window.addEventListener("focus", () => setPanelVisible(true));
+  document.addEventListener("visibilitychange", () => setPanelVisible(!document.hidden));
   applyTranslations(settings);
   bindWindowControls();
   bindPanelDragFallback();
-  await loadSettings();
-  await bindStatusUpdates();
+  bindStatusUpdates();
+  await Promise.all([loadSettings(), loadStatus()]);
 }
 
 bootstrap();

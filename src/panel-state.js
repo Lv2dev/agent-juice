@@ -5,6 +5,7 @@ export const DEFAULT_SETTINGS = {
   danger_threshold: 90,
   display_basis: "remaining",
   poll_interval_secs: 60,
+  full_reset_time_on: true,
   palette: "Traffic",
   theme: "system",
   language: "system",

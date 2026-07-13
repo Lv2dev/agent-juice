@@ -11,6 +11,7 @@ const toastText = document.querySelector("[data-settings-toast-text]");
 const customRow = document.querySelector("[data-custom-palette]");
 const monoRow = document.querySelector("[data-mono-palette]");
 const toolColorRow = document.querySelector("[data-tool-palette]");
+const fullResetRow = document.querySelector("[data-full-reset-toggle]");
 const palettePicker = document.querySelector("[data-palette-picker]");
 const effectPicker = document.querySelector("[data-effect-picker]");
 const updateBand = document.querySelector("#update-band");
@@ -27,6 +28,12 @@ let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
 let toastTimer = null;
 let toastHideTimer = null;
+let settingsEventGeneration = 0;
+let quitListenerReady = false;
+let quitFlushPromise = null;
+const SETTINGS_LOAD_RETRY_DELAYS_MS = [0, 100, 250];
+const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 
 function tauriApi() {
   return window.__TAURI__ ?? {};
@@ -48,6 +55,19 @@ function setStatus(text, state = "ready") {
   if (statusHost) {
     statusHost.dataset.state = state;
     statusHost.hidden = value.length === 0;
+  }
+}
+
+function wait(delay) {
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+function setSettingsFormEnabled(enabled) {
+  if (!form) return;
+  if (form.dataset) form.dataset.loadState = enabled ? "ready" : "loading";
+  form.setAttribute?.("aria-busy", String(!enabled));
+  for (const control of form.querySelectorAll?.("input, select, button") ?? []) {
+    control.disabled = !enabled;
   }
 }
 
@@ -171,15 +191,20 @@ function updateOutputs() {
   if (customRow) customRow.hidden = palette !== "custom";
   if (monoRow) monoRow.hidden = palette !== "mono";
   if (toolColorRow) toolColorRow.hidden = palette !== "traffic";
+  if (fullResetRow) {
+    fullResetRow.hidden = (form.elements.namedItem("bar_mode")?.value ?? "full") !== "full";
+  }
 
   for (const option of palettePicker?.querySelectorAll?.("[data-palette-value]") ?? []) {
     const selected = option.dataset.paletteValue === palette;
     option.setAttribute("aria-checked", String(selected));
+    option.tabIndex = selected ? 0 : -1;
   }
   const effect = form.elements.namedItem("indicator_effect_style")?.value ?? "flat";
   for (const option of effectPicker?.querySelectorAll?.("[data-effect-value]") ?? []) {
     const selected = option.dataset.effectValue === effect;
     option.setAttribute("aria-checked", String(selected));
+    option.tabIndex = selected ? 0 : -1;
   }
   palettePicker?.style?.setProperty(
     "--mono-swatch",
@@ -229,6 +254,7 @@ function fillForm(settings) {
   setField("poll_interval_secs", state.pollIntervalSecs);
   setField("stale_after_secs", state.staleAfterSecs);
   setField("bar_mode", state.barMode);
+  setField("full_reset_time_on", state.fullResetTimeOn);
   setField("limit_order", state.limitOrder);
   setField("fullscreen_hide_on", state.fullscreenHideOn);
   setField("maximized_hide_on", state.maximizedHideOn);
@@ -275,17 +301,29 @@ function fillForm(settings) {
 function hydrateSettings(settings) {
   fillForm(settings);
   hasLoadedSettings = true;
+  setSettingsFormEnabled(true);
 }
 
 async function loadSettings() {
-  try {
-    const settings = await invoke("get_settings");
-    hydrateSettings(settings || {});
-    setStatus("", "ready");
-  } catch {
-    hydrateSettings({});
-    setStatus("", "ready");
+  setSettingsFormEnabled(false);
+  const requestGeneration = settingsEventGeneration;
+  for (const delay of SETTINGS_LOAD_RETRY_DELAYS_MS) {
+    if (delay) await wait(delay);
+    if (hasLoadedSettings && settingsEventGeneration !== requestGeneration) return;
+    try {
+      const settings = await invoke("get_settings");
+      if (settingsEventGeneration !== requestGeneration) return;
+      if (!settings || typeof settings !== "object") throw new Error("invalid settings payload");
+      hydrateSettings(settings);
+      setStatus("", "ready");
+      return;
+    } catch {
+      // Retry while the backend or WebView IPC is still starting.
+    }
   }
+  setSettingsFormEnabled(false);
+  if (form.dataset) form.dataset.loadState = "error";
+  setStatus(t("status.settingsLoadFailed", currentLanguageSettings()), "error");
 }
 
 function renderUpdateStatus(result) {
@@ -324,15 +362,40 @@ async function loadUpdateStatus() {
 }
 
 async function saveSettings(input, revision) {
-  const saved = await invoke("save_settings", { input });
+  const response = await invoke("save_settings", { input });
   if (revision !== localRevision) return;
 
+  const saved = response?.settings ?? response;
+  const warnings = Array.isArray(response?.warnings) ? response.warnings : [];
   const next = saved || input;
   savedRevision = revision;
   window.dispatchEvent(new CustomEvent("settings-updated", { detail: next }));
   fillForm(next);
   setStatus("", "ready");
-  showSettingsToast(t("status.saved", next));
+  showSettingsToast(t(warnings.length > 0 ? "status.savedRetrying" : "status.saved", next));
+}
+
+function enqueueLatestSettingsSave() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = null;
+  if (!hasLoadedSettings || localRevision <= savedRevision) return saveQueue;
+
+  const revision = localRevision;
+  const input = payloadFromEntries(new FormData(form));
+  saveQueue = saveQueue.catch(() => {}).then(() => saveSettings(input, revision));
+  saveQueue.catch((error) => {
+    if (revision === localRevision) setStatus(String(error), "error");
+  });
+  return saveQueue;
+}
+
+async function flushSettingsAndQuit() {
+  if (quitFlushPromise) return quitFlushPromise;
+  quitFlushPromise = (async () => {
+    await enqueueLatestSettingsSave();
+    await invoke("complete_app_quit");
+  })();
+  return quitFlushPromise;
 }
 
 function scheduleAutosave() {
@@ -342,19 +405,17 @@ function scheduleAutosave() {
   hideSettingsToast();
   setStatus(t("status.saving", currentLanguageSettings()), "saving");
   clearTimeout(autosaveTimer);
-  autosaveTimer = setTimeout(() => {
-    const revision = localRevision;
-    const input = payloadFromEntries(new FormData(form));
-    saveQueue = saveQueue.catch(() => {}).then(() => saveSettings(input, revision));
-    saveQueue.catch((error) => {
-      if (revision === localRevision) setStatus(String(error), "error");
-    });
-  }, 120);
+  autosaveTimer = setTimeout(enqueueLatestSettingsSave, quitListenerReady ? 120 : 0);
 }
 
 function handleSettingsMutation(event) {
   if (event?.target?.name === "display_basis") {
     transformThresholdInputs(displayBasis(event.target.value));
+  }
+  if (["theme", "font_mode", "language"].includes(event?.target?.name)) {
+    applyTheme({ theme: form.elements.namedItem("theme")?.value });
+    applyFont({ font_mode: form.elements.namedItem("font_mode")?.value });
+    applyTranslations({ language: form.elements.namedItem("language")?.value });
   }
   scheduleAutosave();
 }
@@ -371,7 +432,11 @@ async function runAction(action) {
       updateStatusEl.textContent = t("status.updateChecking", currentLanguageSettings());
       updateStatusEl.dataset.state = "checking";
     }
-    renderUpdateStatus(await invoke("check_for_updates"));
+    try {
+      renderUpdateStatus(await invoke("check_for_updates"));
+    } catch {
+      renderUpdateStatus({ status: "error" });
+    }
     return;
   }
   if (action === "open-releases") {
@@ -387,24 +452,57 @@ async function bindSettingsUpdates() {
   const listen = tauriApi().event?.listen;
   if (!listen) return;
 
-  try {
-    await listen("settings-updated", (event) => {
+  const register = async (eventName, handler, critical = false) => {
+    for (const delay of LISTENER_RETRY_DELAYS_MS) {
+      if (delay) await wait(delay);
+      try {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error(`${eventName} listener registration timed out`)),
+            LISTENER_REGISTRATION_TIMEOUT_MS,
+          );
+          Promise.resolve(listen(eventName, handler)).then(
+            (value) => {
+              clearTimeout(timer);
+              resolve(value);
+            },
+            (error) => {
+              clearTimeout(timer);
+              reject(error);
+            },
+          );
+        });
+        if (critical) quitListenerReady = true;
+        return;
+      } catch {
+        // Each listener retries independently so one event cannot block another.
+      }
+    }
+    if (critical) quitListenerReady = false;
+  };
+
+  void register(
+    "app-quit-requested",
+    () => {
+      void flushSettingsAndQuit().catch((error) => setStatus(String(error), "error"));
+    },
+    true,
+  );
+  void register("settings-updated", (event) => {
       if (
         localRevision === savedRevision &&
         event.payload &&
         typeof event.payload === "object"
       ) {
+        settingsEventGeneration += 1;
         hydrateSettings(event.payload);
       }
     });
-    await listen("update-status", (event) => {
+  void register("update-status", (event) => {
       if (event.payload && typeof event.payload === "object") {
         renderUpdateStatus(event.payload);
       }
     });
-  } catch {
-    // Form save still applies settings locally.
-  }
 }
 
 if (form) {
@@ -429,6 +527,35 @@ if (form) {
     const action = event.target?.dataset?.action;
     if (action) runAction(action).catch((error) => setStatus(String(error), "error"));
   });
+  form.addEventListener("keydown", (event) => {
+    const option = event.target?.closest?.("[data-palette-value], [data-effect-value]");
+    if (!option) return;
+    const isPalette = option.dataset.paletteValue !== undefined;
+    const picker = isPalette ? palettePicker : effectPicker;
+    const selector = isPalette ? "[data-palette-value]" : "[data-effect-value]";
+    const options = [...(picker?.querySelectorAll?.(selector) ?? [])];
+    const current = options.indexOf(option);
+    if (current < 0) return;
+
+    let next = current;
+    if (["ArrowRight", "ArrowDown"].includes(event.key)) next = (current + 1) % options.length;
+    else if (["ArrowLeft", "ArrowUp"].includes(event.key)) {
+      next = (current - 1 + options.length) % options.length;
+    } else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = options.length - 1;
+    else if (![" ", "Enter"].includes(event.key)) return;
+
+    event.preventDefault();
+    const selected = options[next];
+    setField(
+      isPalette ? "palette" : "indicator_effect_style",
+      isPalette ? selected.dataset.paletteValue : selected.dataset.effectValue,
+    );
+    updateOutputs();
+    selected.focus?.();
+    scheduleAutosave();
+  });
+  setSettingsFormEnabled(false);
   bindSettingsUpdates();
   loadSettings();
   loadUpdateStatus();

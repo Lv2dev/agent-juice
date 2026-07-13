@@ -1,18 +1,92 @@
+use crate::paths;
 use serde_json::Value;
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
 };
 
 const MAX_ORIGINAL_COMMAND_LEN: usize = 4096;
+const MAX_ORIGINAL_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_ORIGINAL_OUTPUT_BYTES: usize = 256 * 1024;
+const ORIGINAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const TASKKILL_TIMEOUT: Duration = Duration::from_millis(250);
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+struct ProcessTree {
+    job: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn attach(child: &Child) -> anyhow::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::{
+            core::PCWSTR,
+            Win32::{
+                Foundation::HANDLE,
+                System::JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                },
+            },
+        };
+
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null())? };
+        let tree = Self { job };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                tree.job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )?;
+            AssignProcessToJobObject(tree.job, HANDLE(child.as_raw_handle()))?;
+        }
+        Ok(tree)
+    }
+
+    fn terminate(&self) -> bool {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe { TerminateJobObject(self.job, 1) }.is_ok()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.job) };
+    }
+}
+
+#[cfg(not(windows))]
+struct ProcessTree;
+
+#[cfg(not(windows))]
+impl ProcessTree {
+    fn attach(_child: &Child) -> anyhow::Result<Self> {
+        Ok(Self)
+    }
+
+    fn terminate(&self) -> bool {
+        false
+    }
+}
 
 pub fn aj_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("AGENT_JUICE_DATA_DIR") {
-        return Some(PathBuf::from(path));
-    }
-    dirs::data_local_dir().map(|dir| dir.join("agent-juice"))
+    paths::data_dir()
 }
 
 pub fn run_with_default_dir(input: &str) -> Vec<u8> {
@@ -69,13 +143,23 @@ fn safe_session_id(session_id: &str) -> String {
 }
 
 fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("claude-status");
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.{}.{}.aj-tmp",
+        std::process::id(),
+        sequence
+    ));
     fs::write(&tmp, contents)?;
-    if !path.exists() {
-        return fs::rename(&tmp, path);
-    }
-
-    match replace_existing_file(path, &tmp) {
+    let result = if path.exists() {
+        replace_existing_file(path, &tmp)
+    } else {
+        fs::rename(&tmp, path)
+    };
+    match result {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = fs::remove_file(&tmp);
@@ -158,6 +242,11 @@ fn verified_original_command(dir: &Path) -> Option<String> {
 }
 
 fn run_shell(program: &str, args: &[&str], original: &str, input: &str) -> Option<Vec<u8>> {
+    if input.len() > MAX_ORIGINAL_INPUT_BYTES {
+        return None;
+    }
+    let deadline = Instant::now() + ORIGINAL_COMMAND_TIMEOUT;
+    let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
     let mut child = Command::new(program)
         .args(args)
         .arg(original)
@@ -166,16 +255,129 @@ fn run_shell(program: &str, args: &[&str], original: &str, input: &str) -> Optio
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let tree = match ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(_) => {
+            terminate_process_tree_until(&mut child, None, hard_deadline);
+            return None;
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
+            return None;
+        }
+    };
+    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = read_bounded_to_end(stdout, MAX_ORIGINAL_OUTPUT_BYTES);
+        let _ = stdout_tx.send(result);
+    });
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
+            return None;
+        }
+    };
+    let input = input.as_bytes().to_vec();
+    let (stdin_tx, stdin_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = stdin.write_all(&input).and_then(|_| stdin.flush());
+        let _ = stdin_tx.send(result);
+    });
+
+    let mut stdin_failed = false;
+    let status = loop {
+        if let Ok(Err(_)) = stdin_rx.try_recv() {
+            stdin_failed = true;
+            break None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) | Err(_) => break None,
+        }
+    };
+
+    terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
+    let remaining = hard_deadline.saturating_duration_since(Instant::now());
+    let output = stdout_rx.recv_timeout(remaining).ok()?.ok()?;
+    if stdin_failed || !status.is_some_and(|status| status.success()) {
+        return None;
+    }
+    Some(output)
+}
+
+fn read_bounded_to_end(mut reader: impl Read, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(max_bytes.min(16 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    let mut overflowed = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let available = max_bytes.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(available)]);
+        overflowed |= read > available;
+    }
+    if overflowed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "original statusLine output exceeded byte limit",
+        ));
+    }
+    Ok(output)
+}
+
+fn terminate_process_tree_until(child: &mut Child, tree: Option<&ProcessTree>, deadline: Instant) {
+    let job_terminated = tree.is_some_and(ProcessTree::terminate);
+    #[cfg(not(windows))]
+    let _ = job_terminated;
+
+    #[cfg(windows)]
+    if !job_terminated && child.try_wait().ok().flatten().is_none() {
+        use std::os::windows::process::CommandExt;
+
+        let taskkill_path = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("taskkill.exe");
+        let mut taskkill = Command::new(taskkill_path);
+        taskkill
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000);
+        if let Ok(mut helper) = taskkill.spawn() {
+            let helper_deadline = deadline.min(Instant::now() + TASKKILL_TIMEOUT);
+            if !wait_for_exit_until(&mut helper, helper_deadline) {
+                let _ = helper.kill();
+                let _ = wait_for_exit_until(&mut helper, deadline);
+            }
+        }
     }
 
-    let output = child.wait_with_output().ok()?;
-    if output.status.success() {
-        Some(output.stdout)
-    } else {
-        None
+    let _ = child.kill();
+    let _ = wait_for_exit_until(child, deadline);
+}
+
+fn wait_for_exit_until(child: &mut Child, deadline: Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => return false,
+        }
     }
 }
 
@@ -195,4 +397,18 @@ fn fallback_line(parsed: Option<&Value>) -> String {
         .and_then(|value| value.as_f64())
         .map(|pct| format!("ctx {}%\n", pct.round() as i64))
         .unwrap_or_else(|| "agent-juice\n".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_output_reader_rejects_bytes_beyond_the_cap() {
+        let oversized = vec![b'x'; MAX_ORIGINAL_OUTPUT_BYTES + 1];
+        assert!(
+            read_bounded_to_end(std::io::Cursor::new(oversized), MAX_ORIGINAL_OUTPUT_BYTES)
+                .is_err()
+        );
+    }
 }
