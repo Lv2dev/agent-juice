@@ -25,8 +25,14 @@ const capabilitiesDir = resolve(here, "../src-tauri/capabilities");
 const capabilities = readdirSync(capabilitiesDir)
   .filter((name) => name.endsWith(".json"))
   .map((name) => JSON.parse(readFileSync(resolve(capabilitiesDir, name), "utf8")));
-const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8");
-const rustConfig = readFileSync(resolve(here, "../src-tauri/src/config.rs"), "utf8");
+const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
+const rustConfig = readFileSync(resolve(here, "../src-tauri/src/config.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
 const gitignore = readFileSync(resolve(here, "../.gitignore"), "utf8").replace(/\r\n?/g, "\n");
 function readOptional(path) {
   return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";

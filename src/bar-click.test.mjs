@@ -64,7 +64,7 @@ test("bar render writes severity attributes for animation states", async () => {
     __TAURI__: {
       core: {
         async invoke(command) {
-          if (command === "get_settings") return { full_reset_time_on: true };
+          if (command === "get_settings") return { language: "ko", full_reset_time_on: true };
           if (command === "get_status") {
             return [
               {
@@ -659,7 +659,7 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
     __TAURI__: {
       core: {
         async invoke(command, args) {
-          if (command === "get_settings") return { bar_mode: "quad" };
+          if (command === "get_settings") return { language: "ko", bar_mode: "quad" };
           if (command === "get_status") {
             return [
               {
