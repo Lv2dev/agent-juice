@@ -9,7 +9,11 @@ let statuses = [];
 let statusEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
+let listenerLifecycleGeneration = 0;
+let listenersDisposed = false;
+const activeUnlisteners = new Set();
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
 let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
@@ -39,6 +43,7 @@ let refreshMenuCloseTimer = null;
 let refreshMenuState = MENU_STATES.CLOSED;
 let refreshMenuRequest = 0;
 let refreshMenuDesiredOpen = false;
+let refreshStatusInFlight = null;
 let taskbarOrientationRequest = 0;
 
 document.addEventListener("contextmenu", (event) => {
@@ -78,12 +83,17 @@ async function invoke(command, args) {
   return fn(command, args);
 }
 
-async function refreshTaskbarStatus() {
-  try {
-    await invoke("refresh_status");
-  } catch {
-    // The bar should still suppress the browser menu even if IPC is unavailable.
-  }
+function refreshTaskbarStatus() {
+  if (refreshStatusInFlight) return refreshStatusInFlight;
+  const request = invoke("refresh_status")
+    .catch(() => {
+      // The bar should still suppress the browser menu even if IPC is unavailable.
+    })
+    .finally(() => {
+      if (refreshStatusInFlight === request) refreshStatusInFlight = null;
+    });
+  refreshStatusInFlight = request;
+  return request;
 }
 
 function emitSafely(eventName, payload) {
@@ -224,10 +234,18 @@ function setDisplayLimitVars(scope, first, second) {
   scope.style?.setProperty("--primary-color", first.color);
   scope.style?.setProperty("--primary-arc", first.arc);
   scope.style?.setProperty("--primary-dash", first.dash);
+  scope.style?.setProperty(
+    "--primary-ring-visibility",
+    first.percent != null && first.percent > 0 ? "visible" : "hidden",
+  );
   scope.style?.setProperty("--primary-percent", `${first.percent ?? 0}%`);
   scope.style?.setProperty("--secondary-color", second.color);
   scope.style?.setProperty("--secondary-arc", second.arc);
   scope.style?.setProperty("--secondary-dash", second.dash);
+  scope.style?.setProperty(
+    "--secondary-ring-visibility",
+    second.percent != null && second.percent > 0 ? "visible" : "hidden",
+  );
   scope.style?.setProperty("--secondary-percent", `${second.percent ?? 0}%`);
 }
 
@@ -336,10 +354,27 @@ function renderBar() {
   root.dataset.limitOrder = vm.limitOrder.replace("_", "-");
   root.dataset.indicator = vm.indicatorStyle;
   root.dataset.effect = vm.indicatorEffectStyle;
+  root.dataset.indicatorTrackColor = vm.indicatorTrackColorAuto ? "theme" : "custom";
+  root.dataset.claudeTextColor = vm.claudeTextColorOn ? "custom" : "auto";
+  root.dataset.codexTextColor = vm.codexTextColorOn ? "custom" : "auto";
+  root.dataset.infoTextColor = vm.infoTextColorOn ? "custom" : "auto";
+  root.dataset.ringTextColor = vm.ringTextColorOn ? "custom" : "auto";
   root.dataset.ring = vm.ringOn ? "on" : "off";
   root.dataset.ringNumbers = vm.ringNumbersOn ? "on" : "off";
   root.dataset.numberOutline = vm.ringNumberOutlineOn ? "on" : "off";
   root.style?.setProperty("--ring-number-outline-width", `${vm.ringNumberOutlineWidthPx}px`);
+  root.style?.setProperty(
+    "--indicator-track-color",
+    vm.indicatorTrackColorAuto ? "var(--text)" : vm.indicatorTrackColor,
+  );
+  root.style?.setProperty(
+    "--indicator-track-opacity",
+    `${vm.indicatorTrackOpacityPercent}%`,
+  );
+  root.style?.setProperty("--claude-text-color", vm.claudeTextColor);
+  root.style?.setProperty("--codex-text-color", vm.codexTextColor);
+  root.style?.setProperty("--info-text-color", vm.infoTextColor);
+  root.style?.setProperty("--ring-text-color", vm.ringTextColor);
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);
   root.style?.setProperty("--ring-thickness", `${vm.ringThicknessPx}px`);
   root.style?.setProperty("--ring-gap", `${vm.ringGapPx}px`);
@@ -393,6 +428,7 @@ async function loadSettings() {
       applyTranslations(settings);
     }
   } catch {
+    if (settingsEventGeneration !== requestGeneration) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
@@ -423,7 +459,7 @@ async function loadTaskbarOrientation() {
 }
 
 function scheduleSnapshotFallback() {
-  if (snapshotFallbackTimer) return;
+  if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
     void loadSettings().then(renderBar);
     void loadStatus();
@@ -432,11 +468,75 @@ function scheduleSnapshotFallback() {
   snapshotFallbackTimer?.unref?.();
 }
 
+function unlistenSafely(unlisten) {
+  if (typeof unlisten !== "function") return;
+  try {
+    Promise.resolve(unlisten()).catch(() => {});
+  } catch {
+    // Listener teardown is best-effort while the WebView is closing.
+  }
+}
+
+function cleanupListeners() {
+  if (listenersDisposed) return;
+  listenersDisposed = true;
+  listenerLifecycleGeneration += 1;
+  if (snapshotFallbackTimer) {
+    clearInterval(snapshotFallbackTimer);
+    snapshotFallbackTimer = null;
+  }
+  const unlisteners = [...activeUnlisteners];
+  activeUnlisteners.clear();
+  for (const unlisten of unlisteners) unlistenSafely(unlisten);
+}
+
+function registerListenerAttempt(listen, eventName, handler) {
+  const lifecycleGeneration = listenerLifecycleGeneration;
+  let timedOut = false;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`${eventName} listener registration timed out`));
+    }, LISTENER_REGISTRATION_TIMEOUT_MS);
+
+    let registration;
+    try {
+      registration = listen(eventName, handler);
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+
+    Promise.resolve(registration).then(
+      (unlisten) => {
+        clearTimeout(timer);
+        if (
+          timedOut ||
+          listenersDisposed ||
+          lifecycleGeneration !== listenerLifecycleGeneration
+        ) {
+          unlistenSafely(unlisten);
+          if (!timedOut) reject(new Error(`${eventName} listener lifecycle ended`));
+          return;
+        }
+        resolve(unlisten);
+      },
+      (error) => {
+        clearTimeout(timer);
+        if (!timedOut) reject(error);
+      },
+    );
+  });
+}
+
 async function listenWithRetry(listen, eventName, handler) {
   for (const delay of LISTENER_RETRY_DELAYS_MS) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (listenersDisposed) return false;
     try {
-      await listen(eventName, handler);
+      const unlisten = await registerListenerAttempt(listen, eventName, handler);
+      if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
       return true;
     } catch {
       // Retry each event independently during WebView startup.
@@ -474,6 +574,12 @@ function bindEvents() {
     void listenWithRetry(listen, "taskbar-dragging-updated", (event) => {
       setDragging(event.payload);
     });
+    void listenWithRetry(listen, "taskbar-topology-updated", (event) => {
+      const root = document.querySelector("#bar");
+      if (!root) return;
+      root.dataset.taskbarOrientation = event.payload === "vertical" ? "vertical" : "horizontal";
+      scheduleTaskbarContentWidthSync();
+    });
   }
 }
 
@@ -492,6 +598,8 @@ async function loadStatus() {
 
 async function bootstrap() {
   applyTranslations(settings);
+  window.addEventListener?.("pagehide", cleanupListeners);
+  window.addEventListener?.("beforeunload", cleanupListeners);
   bindRefreshMenu();
   renderBar();
   bindEvents();

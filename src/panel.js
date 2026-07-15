@@ -14,7 +14,11 @@ let lastStatuses = [];
 let statusEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
+let listenerLifecycleGeneration = 0;
+let listenersDisposed = false;
+const activeUnlisteners = new Set();
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
+const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 
 function setPanelVisible(visible) {
   document.documentElement.dataset.panelVisible = visible ? "true" : "false";
@@ -139,6 +143,7 @@ export function renderStatuses(statuses, now = new Date()) {
 
 window.addEventListener("settings-updated", (event) => {
   if (event.detail && typeof event.detail === "object") {
+    settingsEventGeneration += 1;
     settings = { ...DEFAULT_SETTINGS, ...event.detail };
     applyTheme(settings);
     applyFont(settings);
@@ -159,6 +164,7 @@ async function loadSettings() {
       applyTranslations(settings);
     }
   } catch {
+    if (settingsEventGeneration !== requestGeneration) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
@@ -177,7 +183,7 @@ async function loadStatus() {
 }
 
 function scheduleSnapshotFallback() {
-  if (snapshotFallbackTimer) return;
+  if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
     void loadSettings();
     void loadStatus();
@@ -185,11 +191,75 @@ function scheduleSnapshotFallback() {
   snapshotFallbackTimer?.unref?.();
 }
 
+function unlistenSafely(unlisten) {
+  if (typeof unlisten !== "function") return;
+  try {
+    Promise.resolve(unlisten()).catch(() => {});
+  } catch {
+    // Listener teardown is best-effort while the WebView is closing.
+  }
+}
+
+function cleanupListeners() {
+  if (listenersDisposed) return;
+  listenersDisposed = true;
+  listenerLifecycleGeneration += 1;
+  if (snapshotFallbackTimer) {
+    clearInterval(snapshotFallbackTimer);
+    snapshotFallbackTimer = null;
+  }
+  const unlisteners = [...activeUnlisteners];
+  activeUnlisteners.clear();
+  for (const unlisten of unlisteners) unlistenSafely(unlisten);
+}
+
+function registerListenerAttempt(listen, eventName, handler) {
+  const lifecycleGeneration = listenerLifecycleGeneration;
+  let timedOut = false;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`${eventName} listener registration timed out`));
+    }, LISTENER_REGISTRATION_TIMEOUT_MS);
+
+    let registration;
+    try {
+      registration = listen(eventName, handler);
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+
+    Promise.resolve(registration).then(
+      (unlisten) => {
+        clearTimeout(timer);
+        if (
+          timedOut ||
+          listenersDisposed ||
+          lifecycleGeneration !== listenerLifecycleGeneration
+        ) {
+          unlistenSafely(unlisten);
+          if (!timedOut) reject(new Error(`${eventName} listener lifecycle ended`));
+          return;
+        }
+        resolve(unlisten);
+      },
+      (error) => {
+        clearTimeout(timer);
+        if (!timedOut) reject(error);
+      },
+    );
+  });
+}
+
 async function listenWithRetry(listen, eventName, handler) {
   for (const delay of LISTENER_RETRY_DELAYS_MS) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (listenersDisposed) return false;
     try {
-      await listen(eventName, handler);
+      const unlisten = await registerListenerAttempt(listen, eventName, handler);
+      if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
       return true;
     } catch {
       // Retry each event independently during WebView startup.
@@ -225,6 +295,8 @@ function bindStatusUpdates() {
 async function bootstrap() {
   setPanelVisible(!document.hidden);
   window.addEventListener("focus", () => setPanelVisible(true));
+  window.addEventListener("pagehide", cleanupListeners);
+  window.addEventListener("beforeunload", cleanupListeners);
   document.addEventListener("visibilitychange", () => setPanelVisible(!document.hidden));
   applyTranslations(settings);
   bindWindowControls();

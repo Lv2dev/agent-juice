@@ -107,6 +107,60 @@ test("bar render writes severity attributes for animation states", async () => {
   assert.equal(tools.claude.getAttribute("title"), null);
   assert.equal(tools.claude.title, "");
   assert.equal(tools.claude.getAttribute("aria-label"), "Claude, 5h 9%, 주간 –");
+  assert.equal(tools.claude.style.getPropertyValue("--primary-ring-visibility"), "visible");
+  assert.equal(tools.claude.style.getPropertyValue("--secondary-ring-visibility"), "hidden");
+  delete global.window;
+  delete global.document;
+});
+
+test("bar render hides a zero-percent ring arc without hiding a positive sibling", async () => {
+  const root = { dataset: {} };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return { language: "ko" };
+          if (command === "get_status") {
+            return [
+              {
+                tool: "codex",
+                captured_at: new Date().toISOString(),
+                primary: { used_percent: 100, resets_at: null },
+                secondary: { used_percent: 40, resets_at: null },
+                session: { active: true },
+              },
+            ];
+          }
+          return null;
+        },
+      },
+      event: {
+        async listen() {},
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-zero-ring-arc`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(tools.codex.style.getPropertyValue("--primary-dash"), "0");
+  assert.equal(tools.codex.style.getPropertyValue("--primary-ring-visibility"), "hidden");
+  assert.equal(tools.codex.style.getPropertyValue("--secondary-ring-visibility"), "visible");
   delete global.window;
   delete global.document;
 });
@@ -269,6 +323,7 @@ test("full bar reports packed content width once after horizontal rendering", as
 
 test("bar render applies ring number and geometry settings to the root", async () => {
   const rootStyleProps = new Map();
+  const eventHandlers = {};
   const root = {
     dataset: {},
     style: {
@@ -294,6 +349,19 @@ test("bar render applies ring number and geometry settings to the root", async (
             return {
               indicator_style: "bar",
               indicator_effect_style: "depth",
+              indicator_track_color_auto: false,
+              indicator_track_color: [0x12, 0x34, 0x56],
+              indicator_track_opacity_percent: 37.5,
+              taskbar_text_colors: {
+                claude: [0x11, 0x22, 0x44],
+                claude_on: true,
+                codex: [0x33, 0x55, 0x77],
+                codex_on: false,
+                info: [0x44, 0x66, 0x88],
+                info_on: true,
+                ring: [0x55, 0x77, 0x99],
+                ring_on: true,
+              },
               ring_numbers_on: false,
               ring_number_outline_on: true,
               ring_number_outline_width_px: 1.4,
@@ -313,7 +381,9 @@ test("bar render applies ring number and geometry settings to the root", async (
         },
       },
       event: {
-        async listen() {},
+        async listen(name, handler) {
+          eventHandlers[name] = handler;
+        },
       },
     },
   };
@@ -332,9 +402,20 @@ test("bar render applies ring number and geometry settings to the root", async (
 
   assert.equal(root.dataset.indicator, "bar");
   assert.equal(root.dataset.effect, "depth");
+  assert.equal(root.dataset.indicatorTrackColor, "custom");
+  assert.equal(root.dataset.claudeTextColor, "custom");
+  assert.equal(root.dataset.codexTextColor, "auto");
+  assert.equal(root.dataset.infoTextColor, "custom");
+  assert.equal(root.dataset.ringTextColor, "custom");
   assert.equal(root.dataset.ringNumbers, "off");
   assert.equal(root.dataset.numberOutline, "on");
   assert.equal(root.style.getPropertyValue("--ring-number-outline-width"), "1.4px");
+  assert.equal(root.style.getPropertyValue("--indicator-track-color"), "#123456");
+  assert.equal(root.style.getPropertyValue("--indicator-track-opacity"), "37.5%");
+  assert.equal(root.style.getPropertyValue("--claude-text-color"), "#112244");
+  assert.equal(root.style.getPropertyValue("--codex-text-color"), "#335577");
+  assert.equal(root.style.getPropertyValue("--info-text-color"), "#446688");
+  assert.equal(root.style.getPropertyValue("--ring-text-color"), "#557799");
   assert.equal(root.style.getPropertyValue("--ring-size"), "34.5px");
   assert.equal(root.style.getPropertyValue("--ring-thickness"), "6.5px");
   assert.equal(root.style.getPropertyValue("--ring-gap"), "8.5px");
@@ -348,6 +429,17 @@ test("bar render applies ring number and geometry settings to the root", async (
   assert.equal(root.style.getPropertyValue("--bar-text-font-size"), "12.5px");
   assert.equal(root.style.getPropertyValue("--bar-text-font-weight"), "550");
   assert.equal(root.style.getPropertyValue("--bar-content-gap"), "3.5px");
+
+  eventHandlers["settings-updated"]?.({ payload: { indicator_effect_style: "breathe" } });
+  assert.equal(root.dataset.effect, "breathe");
+  assert.equal(root.dataset.indicatorTrackColor, "theme");
+  assert.equal(root.dataset.claudeTextColor, "auto");
+  assert.equal(root.dataset.codexTextColor, "auto");
+  assert.equal(root.dataset.infoTextColor, "auto");
+  assert.equal(root.dataset.ringTextColor, "auto");
+  assert.equal(root.style.getPropertyValue("--indicator-track-color"), "var(--text)");
+  assert.equal(root.style.getPropertyValue("--indicator-track-opacity"), "11%");
+  await new Promise((resolve) => setTimeout(resolve, 100));
   delete global.window;
   delete global.document;
 });
@@ -708,6 +800,7 @@ test("bar refresh menu closes when another tool bar opens its menu", async () =>
 });
 
 test("bar renders the current tool before event subscription resolves", async () => {
+  const windowListeners = {};
   const root = { dataset: {}, style: { setProperty() {} } };
   const tools = {
     claude: toolStub(),
@@ -716,6 +809,9 @@ test("bar renders the current tool before event subscription resolves", async ()
 
   global.window = {
     location: { search: "?tool=codex" },
+    addEventListener(name, handler) {
+      windowListeners[name] = handler;
+    },
     __TAURI__: {
       core: {
         async invoke(command) {
@@ -747,6 +843,7 @@ test("bar renders the current tool before event subscription resolves", async ()
   assert.equal(tools.claude.hidden, true);
   assert.equal(tools.codex.hidden, false);
   assert.equal(root.dataset.currentTool, "codex");
+  windowListeners.pagehide?.();
   assert.equal(root.dataset.tool, undefined);
   delete global.window;
   delete global.document;
@@ -1086,6 +1183,7 @@ test("bar move outline is only enabled while dragging", async () => {
 
 test("bar still renders when event listen rejects without keyboard panel opening", async () => {
   const listeners = {};
+  const windowListeners = {};
   const calls = [];
   const root = { dataset: {} };
   const tools = {
@@ -1103,6 +1201,9 @@ test("bar still renders when event listen rejects without keyboard panel opening
   };
 
   global.window = {
+    addEventListener(name, handler) {
+      windowListeners[name] = handler;
+    },
     __TAURI__: {
       core: {
         async invoke(command) {
@@ -1143,6 +1244,7 @@ test("bar still renders when event listen rejects without keyboard panel opening
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(calls, []);
+  windowListeners.pagehide?.();
   delete global.window;
   delete global.document;
 });
@@ -1211,4 +1313,172 @@ test("bar retries status listener and ignores an older initial response", async 
   assert.ok(attempts.get("status-updated") >= 2);
   delete global.window;
   delete global.document;
+});
+
+test("bar admits only one refresh invoke while a refresh is in flight", async () => {
+  const listeners = {};
+  const refreshButton = {
+    handlers: {},
+    addEventListener(name, handler) {
+      this.handlers[name] = handler;
+    },
+  };
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tools = { claude: toolStub(), codex: toolStub() };
+  const refreshResolvers = [];
+  let refreshInvocations = 0;
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return {};
+          if (command === "get_status") return [];
+          if (command === "get_taskbar_orientation") return "horizontal";
+          if (command === "refresh_status") {
+            refreshInvocations += 1;
+            return new Promise((resolve) => refreshResolvers.push(resolve));
+          }
+          return null;
+        },
+      },
+      event: { async listen() {} },
+    },
+  };
+  global.document = {
+    addEventListener(name, handler) {
+      listeners[name] = handler;
+    },
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-bar-action="refresh"]') return refreshButton;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-refresh-admission`);
+  await new Promise((resolve) => setImmediate(resolve));
+  for (let index = 0; index < 20; index += 1) {
+    refreshButton.handlers.click?.({ preventDefault() {} });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshInvocations, 1);
+
+  refreshResolvers[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  refreshButton.handlers.click?.({ preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshInvocations, 2);
+  refreshResolvers[1]();
+
+  delete global.window;
+  delete global.document;
+});
+
+test("bar bounds pending listeners, cleans late registrations, and preserves newer settings", async () => {
+  const windowListeners = {};
+  const eventHandlers = {};
+  const pendingListenerResolvers = [];
+  const attempts = new Map();
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tools = { claude: toolStub(), codex: toolStub() };
+  const originalSetInterval = global.setInterval;
+  let fallbackIntervals = 0;
+  let lateUnlistenCalls = 0;
+  let normalUnlistenCalls = 0;
+  let rejectSettings;
+  const pendingSettings = new Promise((_, reject) => {
+    rejectSettings = reject;
+  });
+
+  global.setInterval = (callback, delay) => {
+    fallbackIntervals += 1;
+    const timer = originalSetInterval(callback, delay);
+    timer.unref?.();
+    return timer;
+  };
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    addEventListener(name, handler) {
+      windowListeners[name] = handler;
+    },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return pendingSettings;
+          if (command === "get_status") {
+            return [{
+              tool: "codex",
+              captured_at: new Date().toISOString(),
+              primary: { used_percent: 10 },
+              secondary: { used_percent: 20 },
+              session: { active: true },
+            }];
+          }
+          if (command === "get_taskbar_orientation") return "horizontal";
+          return null;
+        },
+      },
+      event: {
+        listen(name, handler) {
+          attempts.set(name, (attempts.get(name) ?? 0) + 1);
+          if (name === "status-updated") {
+            return new Promise((resolve) => pendingListenerResolvers.push(resolve));
+          }
+          eventHandlers[name] = handler;
+          return Promise.resolve(() => {
+            normalUnlistenCalls += 1;
+          });
+        },
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  try {
+    await import(`./bar.js?test=${Date.now()}-listener-timeout`);
+    await new Promise((resolve) => setImmediate(resolve));
+    eventHandlers["settings-updated"]?.({ payload: { display_basis: "used" } });
+    rejectSettings(new Error("late bootstrap failure"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(tools.codex.textContentFor(".primary-text"), /10%/);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_950));
+    assert.equal(attempts.get("status-updated"), 3);
+    assert.equal(fallbackIntervals, 1);
+
+    pendingListenerResolvers[0](() => {
+      lateUnlistenCalls += 1;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(lateUnlistenCalls, 1);
+
+    windowListeners.beforeunload?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(normalUnlistenCalls, 4);
+
+    for (const resolve of pendingListenerResolvers.slice(1)) {
+      resolve(() => {
+        lateUnlistenCalls += 1;
+      });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(lateUnlistenCalls, 3);
+  } finally {
+    global.setInterval = originalSetInterval;
+    delete global.window;
+    delete global.document;
+  }
 });

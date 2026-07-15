@@ -125,10 +125,44 @@
               <span class="settings-save-dot" aria-hidden="true"></span>
               <span id="settings-status" class="settings-status" aria-live="polite"></span>
             </span>
+            <svg class="settings-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m9 18 6-6-6-6"></path>
+            </svg>
           </summary>
           <div class="settings-form">
-          <fieldset class="settings-section" data-settings-section="appearance">
-            <legend data-i18n="section.appearance">외형</legend>
+          <div
+            class="settings-tabs"
+            role="tablist"
+            aria-label="설정 카테고리"
+            data-i18n-aria-label="aria.settingsTabs"
+          >
+            <button id="settings-tab-general" type="button" role="tab" aria-selected="true" aria-controls="settings-panel-general" data-settings-tab="general">
+              <span data-i18n="tab.general">기본</span>
+            </button>
+            <button id="settings-tab-collection" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-collection" data-settings-tab="collection" tabindex="-1">
+              <span data-i18n="tab.collection">수집</span>
+            </button>
+            <button id="settings-tab-taskbar" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-taskbar" data-settings-tab="taskbar" tabindex="-1">
+              <span data-i18n="tab.taskbar">표시줄</span>
+            </button>
+            <button id="settings-tab-colors" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-colors" data-settings-tab="colors" tabindex="-1">
+              <span data-i18n="tab.colors">색상</span>
+            </button>
+            <button id="settings-tab-details" type="button" role="tab" aria-selected="false" aria-controls="settings-panel-details" data-settings-tab="details" tabindex="-1">
+              <span data-i18n="tab.details">세부</span>
+            </button>
+          </div>
+
+          <div class="settings-tab-panels">
+          <fieldset
+            id="settings-panel-general"
+            class="settings-section settings-tab-panel"
+            role="tabpanel"
+            aria-labelledby="settings-tab-general"
+            data-settings-section="general"
+            data-settings-tab-panel="general"
+          >
+            <legend data-i18n="section.general">기본</legend>
             <div class="settings-section-grid">
               <div class="field-row">
                 <label for="theme" data-i18n="field.theme">테마</label>
@@ -155,6 +189,25 @@
                   <option value="pretendard">Pretendard</option>
                 </select>
               </div>
+
+              <label class="toggle-row">
+                <input type="checkbox" name="autostart_on" checked />
+                <span data-i18n="field.autostart">자동시작</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset
+            id="settings-panel-colors"
+            class="settings-section settings-tab-panel"
+            role="tabpanel"
+            aria-labelledby="settings-tab-colors"
+            data-settings-section="colors"
+            data-settings-tab-panel="colors"
+            hidden
+          >
+            <legend data-i18n="section.colors">색상</legend>
+            <div class="settings-section-grid">
 
               <div class="palette-field">
                 <span id="palette-label" class="palette-label" data-i18n="field.palette">팔레트</span>
@@ -219,6 +272,70 @@
                     <input type="color" name="codex_secondary_color" value="#4d86d6" />
                   </label>
                 </div>
+                <div class="tool-threshold-grid">
+                  <label class="tool-threshold-color">
+                    <span data-i18n="field.toolWarningColor">경고 색상</span>
+                    <input type="color" name="tool_warning_color" value="#f59e0b" />
+                  </label>
+                  <label class="toggle-row tool-threshold-toggle">
+                    <input type="checkbox" name="tool_warning_color_on" checked />
+                    <span data-i18n="field.toolWarningColorOn">경고 시 색상 변경</span>
+                  </label>
+                  <label class="tool-threshold-color">
+                    <span data-i18n="field.toolDangerColor">위험 색상</span>
+                    <input type="color" name="tool_danger_color" value="#ef4444" />
+                  </label>
+                  <label class="toggle-row tool-threshold-toggle">
+                    <input type="checkbox" name="tool_danger_color_on" checked />
+                    <span data-i18n="field.toolDangerColorOn">위험 시 색상 변경</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="taskbar-text-color-field">
+                <span class="palette-label" data-i18n="field.taskbarTextColors">작업표시줄 글자색</span>
+                <div class="taskbar-text-color-grid">
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="claude">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="claude_text_color_on" />
+                      <span data-i18n="field.claudeTextColor">Claude 이름</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="claude_text_color" value="#d79a32" />
+                    </label>
+                  </div>
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="codex">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="codex_text_color_on" />
+                      <span data-i18n="field.codexTextColor">Codex 이름</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="codex_text_color" value="#2fac7d" />
+                    </label>
+                  </div>
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="info">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="info_text_color_on" />
+                      <span data-i18n="field.infoTextColor">5h·주간 정보</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="info_text_color" value="#6b7280" />
+                    </label>
+                  </div>
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="ring">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="ring_text_color_on" />
+                      <span data-i18n="field.ringTextColor">링 숫자</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="ring_text_color" value="#6b7280" />
+                    </label>
+                  </div>
+                </div>
               </div>
 
               <div class="swatch-row" data-mono-palette hidden>
@@ -245,8 +362,16 @@
             </div>
           </fieldset>
 
-          <fieldset class="settings-section" data-settings-section="limits">
-            <legend data-i18n="section.limits">표시·수집</legend>
+          <fieldset
+            id="settings-panel-collection"
+            class="settings-section settings-tab-panel"
+            role="tabpanel"
+            aria-labelledby="settings-tab-collection"
+            data-settings-section="collection"
+            data-settings-tab-panel="collection"
+            hidden
+          >
+            <legend data-i18n="section.collection">수집</legend>
             <div class="settings-section-grid">
               <div class="field-row">
                 <label for="display-basis" data-i18n="field.displayBasis">표시 기준</label>
@@ -318,10 +443,26 @@
                   <small class="field-help" data-i18n="help.claudeUsageAutoRefresh">Claude Code 로컬 로그인으로 계정 사용량을 조회합니다. 채팅을 보내지 않으며 실패 시 기존 statusline 값을 유지합니다.</small>
                 </span>
               </label>
+
+              <div class="settings-action-row">
+                <span class="settings-action-copy">
+                  <strong data-i18n="field.restoreStatusline">Claude 상태줄 복원</strong>
+                  <small class="field-help" data-i18n="help.restoreStatusline">Juice 연결 전 Claude Code 상태줄 설정으로 되돌립니다.</small>
+                </span>
+                <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
+              </div>
             </div>
           </fieldset>
 
-          <fieldset class="settings-section" data-settings-section="taskbar">
+          <fieldset
+            id="settings-panel-taskbar"
+            class="settings-section settings-tab-panel"
+            role="tabpanel"
+            aria-labelledby="settings-tab-taskbar"
+            data-settings-section="taskbar"
+            data-settings-tab-panel="taskbar"
+            hidden
+          >
             <legend data-i18n="section.taskbar">작업표시줄</legend>
             <div class="settings-section-grid">
               <div class="field-row">
@@ -356,7 +497,7 @@
               </div>
 
               <label class="toggle-row">
-                <input type="checkbox" name="fullscreen_hide_on" checked />
+                <input type="checkbox" name="fullscreen_hide_on" />
                 <span data-i18n="field.fullscreenHide">전체화면 앱에서 숨김</span>
               </label>
 
@@ -377,9 +518,20 @@
             </div>
           </fieldset>
 
-          <fieldset class="settings-section" data-settings-section="indicator">
-            <legend data-i18n="section.indicator">원·바 세부</legend>
+          <fieldset
+            id="settings-panel-details"
+            class="settings-section settings-tab-panel"
+            role="tabpanel"
+            aria-labelledby="settings-tab-details"
+            data-settings-section="details"
+            data-settings-tab-panel="details"
+            hidden
+          >
+            <legend data-i18n="section.details">세부</legend>
             <div class="settings-section-grid">
+              <section class="settings-subgroup" data-settings-subgroup="appearance">
+                <h3 data-i18n="subgroup.appearance">표현</h3>
+                <div class="settings-subgroup-grid">
               <div class="effect-field">
                 <span id="effect-style-label" class="effect-label" data-i18n="field.effectStyle">표현 스타일</span>
                 <input id="indicator-effect-style" type="hidden" name="indicator_effect_style" value="flat" />
@@ -407,6 +559,44 @@
                 </div>
               </div>
 
+              <div class="indicator-track-field">
+                <span class="indicator-track-label" data-i18n="field.indicatorTrack">표시기 배경</span>
+                <div class="indicator-track-grid">
+                  <label class="toggle-row">
+                    <input type="checkbox" name="indicator_track_color_auto" checked />
+                    <span data-i18n="field.indicatorTrackAuto">테마 색상 사용</span>
+                  </label>
+
+                  <label class="indicator-track-color-row" data-indicator-track-custom-color>
+                    <span data-i18n="field.indicatorTrackColor">배경색</span>
+                    <input type="color" name="indicator_track_color" value="#6b7280" />
+                  </label>
+
+                  <label class="range-row indicator-track-opacity-row">
+                    <span data-i18n="field.indicatorTrackOpacity">배경 농도</span>
+                    <span class="range-value-editor">
+                      <output name="indicator-track-opacity-output" hidden>11</output>
+                      <input type="number" data-range-number-for="indicator_track_opacity_percent" min="0" max="100" step="1" value="11" />
+                      <span class="range-unit">%</span>
+                    </span>
+                    <input
+                      type="range"
+                      name="indicator_track_opacity_percent"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value="11"
+                    />
+                  </label>
+                </div>
+                <small class="field-help" data-i18n="help.indicatorTrack">원과 가로 바의 미사용 영역에 함께 적용됩니다.</small>
+              </div>
+                </div>
+              </section>
+
+              <section class="settings-subgroup" data-settings-subgroup="ring-display">
+                <h3 data-i18n="subgroup.ringDisplay">링 표시</h3>
+                <div class="settings-subgroup-grid">
               <label class="toggle-row">
                 <input type="checkbox" name="ring_on" checked />
                 <span data-i18n="field.ring">링</span>
@@ -438,10 +628,12 @@
                   value="16"
                 />
               </label>
+                </div>
+              </section>
 
-              <details class="settings-advanced" data-settings-advanced="typography" open>
-                <summary data-i18n="advanced.typography">글자 조정</summary>
-                <div class="settings-advanced-grid">
+              <section class="settings-subgroup" data-settings-subgroup="typography">
+                <h3 data-i18n="subgroup.typography">글자·간격</h3>
+                <div class="settings-subgroup-grid">
                   <label class="range-row">
                     <span data-i18n="field.ringNumberSize">원 안 숫자 크기</span>
                     <span class="range-value-editor">
@@ -525,11 +717,11 @@
                     />
                   </label>
                 </div>
-              </details>
+              </section>
 
-              <details class="settings-advanced" data-settings-advanced="indicator">
-                <summary data-i18n="advanced.indicator">고급 조정</summary>
-                <div class="settings-advanced-grid">
+              <section class="settings-subgroup" data-settings-subgroup="geometry">
+                <h3 data-i18n="subgroup.geometry">링 크기</h3>
+                <div class="settings-subgroup-grid">
                   <label class="range-row">
                     <span data-i18n="field.numberOutlineWidth">숫자 윤곽 두께</span>
                     <span class="range-value-editor">
@@ -599,27 +791,14 @@
                   </label>
 
                 </div>
-              </details>
+              </section>
             </div>
           </fieldset>
 
-          <fieldset class="settings-section" data-settings-section="system">
-            <legend data-i18n="section.system">시스템</legend>
-            <div class="settings-section-grid">
-              <label class="toggle-row">
-                <input type="checkbox" name="autostart_on" checked />
-                <span data-i18n="field.autostart">자동시작</span>
-              </label>
+          </div>
 
-              <div class="button-row">
-                <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
-              </div>
-
-            </div>
-          </fieldset>
-
-          <input type="hidden" name="claude_taskbar_offset_ratio" value="0.5" />
-          <input type="hidden" name="codex_taskbar_offset_ratio" value="0.5" />
+          <input type="hidden" name="claude_taskbar_offset_ratio" value="0" />
+          <input type="hidden" name="codex_taskbar_offset_ratio" value="0" />
           </div>
         </details>
 

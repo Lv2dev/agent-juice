@@ -9,9 +9,19 @@ const DEFAULT_TOOL_COLORS = {
   claudeSecondary: "#d36b86",
   codexPrimary: "#2fac7d",
   codexSecondary: "#4d86d6",
+  warning: "#f59e0b",
+  danger: "#ef4444",
+};
+
+const DEFAULT_TASKBAR_TEXT_COLORS = {
+  claude: "#d79a32",
+  codex: "#2fac7d",
+  info: "#6b7280",
+  ring: "#6b7280",
 };
 
 const DEFAULT_MONO_COLOR = "#4f8a73";
+const DEFAULT_INDICATOR_TRACK_COLOR = "#6b7280";
 
 const DEFAULT_RING = {
   sizePx: 36,
@@ -155,13 +165,34 @@ function toolColorState(toolColors) {
     claudeSecondaryColor: rgbToHex(colors.claude_secondary, DEFAULT_TOOL_COLORS.claudeSecondary),
     codexPrimaryColor: rgbToHex(colors.codex_primary, DEFAULT_TOOL_COLORS.codexPrimary),
     codexSecondaryColor: rgbToHex(colors.codex_secondary, DEFAULT_TOOL_COLORS.codexSecondary),
+    toolWarningColor: rgbToHex(colors.warning, DEFAULT_TOOL_COLORS.warning),
+    toolDangerColor: rgbToHex(colors.danger, DEFAULT_TOOL_COLORS.danger),
+    toolWarningColorOn: boolOr(colors.warning_on, true),
+    toolDangerColorOn: boolOr(colors.danger_on, true),
+  };
+}
+
+function taskbarTextColorState(taskbarTextColors) {
+  const colors = taskbarTextColors && typeof taskbarTextColors === "object"
+    ? taskbarTextColors
+    : {};
+  return {
+    claudeTextColor: rgbToHex(colors.claude, DEFAULT_TASKBAR_TEXT_COLORS.claude),
+    claudeTextColorOn: boolOr(colors.claude_on, false),
+    codexTextColor: rgbToHex(colors.codex, DEFAULT_TASKBAR_TEXT_COLORS.codex),
+    codexTextColorOn: boolOr(colors.codex_on, false),
+    infoTextColor: rgbToHex(colors.info, DEFAULT_TASKBAR_TEXT_COLORS.info),
+    infoTextColorOn: boolOr(colors.info_on, false),
+    ringTextColor: rgbToHex(colors.ring, DEFAULT_TASKBAR_TEXT_COLORS.ring),
+    ringTextColorOn: boolOr(colors.ring_on, false),
   };
 }
 
 export function formStateFromSettings(settings = {}) {
   const palette = paletteState(settings.palette);
   const toolColors = toolColorState(settings.tool_colors);
-  const legacyOffset = ratioOr(settings.taskbar_offset_ratio, 0.5);
+  const taskbarTextColors = taskbarTextColorState(settings.taskbar_text_colors);
+  const legacyOffset = ratioOr(settings.taskbar_offset_ratio, 0);
   const displayBasis = displayBasisOr(settings.display_basis);
 
   return {
@@ -178,10 +209,16 @@ export function formStateFromSettings(settings = {}) {
     barMode: settings.bar_mode || "full",
     fullResetTimeOn: boolOr(settings.full_reset_time_on, true),
     limitOrder: limitOrderOr(settings.limit_order),
-    fullscreenHideOn: boolOr(settings.fullscreen_hide_on, true),
+    fullscreenHideOn: boolOr(settings.fullscreen_hide_on, false),
     maximizedHideOn: boolOr(settings.maximized_hide_on, false),
     indicatorStyle: indicatorStyleOr(settings.indicator_style),
     indicatorEffectStyle: indicatorEffectStyleOr(settings.indicator_effect_style),
+    indicatorTrackColorAuto: boolOr(settings.indicator_track_color_auto, true),
+    indicatorTrackColor: rgbToHex(
+      settings.indicator_track_color,
+      DEFAULT_INDICATOR_TRACK_COLOR,
+    ),
+    indicatorTrackOpacityPercent: percentOr(settings.indicator_track_opacity_percent, 11),
     ringOn: settings.ring_on !== false,
     ringNumbersOn: boolOr(settings.ring_numbers_on, true),
     ringNumberOutlineOn: boolOr(settings.ring_number_outline_on, true),
@@ -240,6 +277,7 @@ export function formStateFromSettings(settings = {}) {
     customWarn: palette.customWarn,
     customDanger: palette.customDanger,
     ...toolColors,
+    ...taskbarTextColors,
   };
 }
 
@@ -279,6 +317,14 @@ export function payloadFromEntries(entries) {
     maximized_hide_on: isChecked(source.get("maximized_hide_on")),
     indicator_style: indicatorStyleOr(source.get("indicator_style")),
     indicator_effect_style: indicatorEffectStyleOr(source.get("indicator_effect_style")),
+    indicator_track_color_auto: isChecked(source.get("indicator_track_color_auto")),
+    indicator_track_color: String(
+      source.get("indicator_track_color") || DEFAULT_INDICATOR_TRACK_COLOR,
+    ),
+    indicator_track_opacity_percent: percentOr(
+      source.get("indicator_track_opacity_percent"),
+      11,
+    ),
     ring_on: isChecked(source.get("ring_on")),
     ring_numbers_on: isChecked(source.get("ring_numbers_on")),
     ring_number_outline_on: isChecked(source.get("ring_number_outline_on")),
@@ -320,11 +366,11 @@ export function payloadFromEntries(entries) {
     font_mode: fontModeOr(source.get("font_mode")),
     claude_taskbar_offset_ratio: ratioOr(
       source.get("claude_taskbar_offset_ratio"),
-      0.5,
+      0,
     ),
     codex_taskbar_offset_ratio: ratioOr(
       source.get("codex_taskbar_offset_ratio"),
-      0.5,
+      0,
     ),
     show_claude: isChecked(source.get("show_claude")),
     show_codex: isChecked(source.get("show_codex")),
@@ -339,5 +385,25 @@ export function payloadFromEntries(entries) {
     claude_secondary_color: String(source.get("claude_secondary_color") || DEFAULT_TOOL_COLORS.claudeSecondary),
     codex_primary_color: String(source.get("codex_primary_color") || DEFAULT_TOOL_COLORS.codexPrimary),
     codex_secondary_color: String(source.get("codex_secondary_color") || DEFAULT_TOOL_COLORS.codexSecondary),
+    tool_warning_color: String(source.get("tool_warning_color") || DEFAULT_TOOL_COLORS.warning),
+    tool_danger_color: String(source.get("tool_danger_color") || DEFAULT_TOOL_COLORS.danger),
+    tool_warning_color_on: isChecked(source.get("tool_warning_color_on")),
+    tool_danger_color_on: isChecked(source.get("tool_danger_color_on")),
+    claude_text_color: String(
+      source.get("claude_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.claude,
+    ),
+    claude_text_color_on: isChecked(source.get("claude_text_color_on")),
+    codex_text_color: String(
+      source.get("codex_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.codex,
+    ),
+    codex_text_color_on: isChecked(source.get("codex_text_color_on")),
+    info_text_color: String(
+      source.get("info_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.info,
+    ),
+    info_text_color_on: isChecked(source.get("info_text_color_on")),
+    ring_text_color: String(
+      source.get("ring_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.ring,
+    ),
+    ring_text_color_on: isChecked(source.get("ring_text_color_on")),
   };
 }

@@ -18,6 +18,7 @@ function makeField(value, type = "text", options = {}) {
     type,
     value,
     checked: Boolean(value),
+    disabled: false,
     style: makeStyle(),
     ...options,
   };
@@ -25,6 +26,7 @@ function makeField(value, type = "text", options = {}) {
 
 test("settings form auto-saves changed values without a submit button", async () => {
   const listeners = {};
+  const windowListeners = {};
   const dispatched = [];
   const savedInputs = [];
   const pendingSaveResponses = [];
@@ -32,6 +34,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   const eventHandlers = {};
   const listenerOrder = [];
   const listenerAttempts = new Map();
+  let unlistenCalls = 0;
   const invokedCommands = [];
   const statusHost = { dataset: {} };
   const statusEl = {
@@ -45,8 +48,41 @@ test("settings form auto-saves changed values without a submit button", async ()
   const toastText = { textContent: "" };
   const customRow = { hidden: true };
   const toolColorRow = { hidden: true };
+  const indicatorTrackColorRow = { dataset: {} };
   const fullResetRow = { hidden: false };
   const updateStatusEl = { textContent: "", dataset: {} };
+  const effectOptions = ["flat", "soft", "depth", "glow", "breathe"].map((value) => ({
+    dataset: { effectValue: value },
+    setAttribute(name, next) {
+      this[name] = next;
+    },
+    closest(selector) {
+      return selector.includes("[data-effect-value]") ? this : null;
+    },
+  }));
+  const effectPicker = {
+    querySelectorAll() {
+      return effectOptions;
+    },
+  };
+  let focusedSettingsTab = null;
+  const settingsTabs = ["general", "collection", "taskbar", "colors", "details"].map((value) => ({
+    dataset: { settingsTab: value },
+    tabIndex: -1,
+    setAttribute(name, next) {
+      this[name] = next;
+    },
+    closest(selector) {
+      return selector === "[data-settings-tab]" ? this : null;
+    },
+    focus() {
+      focusedSettingsTab = this;
+    },
+  }));
+  const settingsTabPanels = settingsTabs.map((tab) => ({
+    dataset: { settingsTabPanel: tab.dataset.settingsTab },
+    hidden: true,
+  }));
   const fields = {
     palette: makeField("traffic"),
     display_basis: makeField("remaining", "text", { name: "display_basis" }),
@@ -61,10 +97,14 @@ test("settings form auto-saves changed values without a submit button", async ()
     bar_mode: makeField("full"),
     full_reset_time_on: makeField(false, "checkbox"),
     limit_order: makeField("primary_first"),
-    fullscreen_hide_on: makeField(true, "checkbox"),
+    fullscreen_hide_on: makeField(false, "checkbox"),
     maximized_hide_on: makeField(true, "checkbox"),
     indicator_style: makeField("ring"),
     indicator_effect_style: makeField("flat"),
+    indicator_track_color_auto: makeField(true, "checkbox"),
+    indicator_track_color: makeField("#6b7280", "color"),
+    indicator_track_opacity_percent: makeField("11", "range", { min: "0", max: "100" }),
+    "indicator-track-opacity-output": makeField("11"),
     ring_on: makeField(true, "checkbox"),
     ring_numbers_on: makeField(true, "checkbox"),
     ring_number_outline_on: makeField(true, "checkbox"),
@@ -105,9 +145,16 @@ test("settings form auto-saves changed values without a submit button", async ()
     claude_secondary_color: makeField("#d36b86", "color"),
     codex_primary_color: makeField("#2fac7d", "color"),
     codex_secondary_color: makeField("#4d86d6", "color"),
+    tool_warning_color: makeField("#f59e0b", "color"),
+    tool_danger_color: makeField("#ef4444", "color"),
+    tool_warning_color_on: makeField(true, "checkbox"),
+    tool_danger_color_on: makeField(true, "checkbox"),
   };
   const ringSizeEditor = makeField("36", "number", {
     dataset: { rangeNumberFor: "ring_size_px" },
+  });
+  const trackOpacityEditor = makeField("11", "number", {
+    dataset: { rangeNumberFor: "indicator_track_opacity_percent" },
   });
   const form = {
     elements: {
@@ -119,7 +166,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       listeners[name] = handler;
     },
     querySelectorAll(selector) {
-      return selector === "[data-range-number-for]" ? [ringSizeEditor] : [];
+      return selector === "[data-range-number-for]" ? [ringSizeEditor, trackOpacityEditor] : [];
     },
   };
 
@@ -132,7 +179,9 @@ test("settings form auto-saves changed values without a submit button", async ()
     }
   };
   global.window = {
-    addEventListener() {},
+    addEventListener(name, handler) {
+      windowListeners[name] = handler;
+    },
     dispatchEvent(event) {
       dispatched.push(event);
     },
@@ -162,6 +211,9 @@ test("settings form auto-saves changed values without a submit button", async ()
           if (name === "settings-updated" && attempts === 1) throw new Error("transient");
           if (name === "update-status") throw new Error("unavailable");
           eventHandlers[name] = handler;
+          return () => {
+            unlistenCalls += 1;
+          };
         },
       },
     },
@@ -178,9 +230,16 @@ test("settings form auto-saves changed values without a submit button", async ()
       if (selector === "[data-settings-toast-text]") return toastText;
       if (selector === "[data-custom-palette]") return customRow;
       if (selector === "[data-tool-palette]") return toolColorRow;
+      if (selector === "[data-indicator-track-custom-color]") return indicatorTrackColorRow;
       if (selector === "[data-full-reset-toggle]") return fullResetRow;
+      if (selector === "[data-effect-picker]") return effectPicker;
       if (selector === "#update-check-status") return updateStatusEl;
       return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-settings-tab]") return settingsTabs;
+      if (selector === "[data-settings-tab-panel]") return settingsTabPanels;
+      return [];
     },
   };
 
@@ -192,10 +251,51 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(toastLayer.hidden, true, "initial hydration must not show a completion toast");
   assert.equal(fields.warn_threshold.style.getPropertyValue("--range-progress"), "30%");
   assert.equal(fields.ring_size_px.style.getPropertyValue("--range-progress"), "66.7%");
+  assert.equal(fields.indicator_track_opacity_percent.style.getPropertyValue("--range-progress"), "11%");
+  assert.equal(fields.indicator_track_color.disabled, false);
+  assert.equal(fields.indicator_track_color.ariaDisabled, "true");
+  assert.equal(fields.indicator_track_color.inert, true);
+  assert.equal(fields.indicator_track_color.tabIndex, -1);
+  assert.equal(indicatorTrackColorRow.dataset.disabled, "true");
   assert.equal(fullResetRow.hidden, false);
+  assert.equal(settingsTabs[0]["aria-selected"], "true");
+  assert.equal(settingsTabs[0].tabIndex, 0);
+  assert.equal(settingsTabPanels[0].hidden, false);
+  assert.ok(settingsTabPanels.slice(1).every((panel) => panel.hidden));
+
+  listeners.click?.({ target: settingsTabs[3] });
+  assert.equal(settingsTabs[3]["aria-selected"], "true");
+  assert.equal(settingsTabs[3].tabIndex, 0);
+  assert.equal(settingsTabPanels[3].hidden, false);
+  assert.equal(savedInputs.length, 0, "tab navigation must not save settings");
+
+  let preventedTabKey = false;
+  listeners.keydown?.({
+    target: settingsTabs[3],
+    key: "End",
+    preventDefault() {
+      preventedTabKey = true;
+    },
+  });
+  assert.equal(preventedTabKey, true);
+  assert.equal(settingsTabs[4]["aria-selected"], "true");
+  assert.equal(settingsTabPanels[4].hidden, false);
+  assert.equal(focusedSettingsTab, settingsTabs[4]);
+  assert.equal(savedInputs.length, 0, "keyboard tab navigation must not save settings");
 
   fields.bar_mode.value = "dual";
   fields.claude_primary_color.value = "#123456";
+  fields.tool_warning_color.value = "#654321";
+  fields.tool_danger_color_on.checked = false;
+  fields.indicator_track_color_auto.checked = false;
+  fields.indicator_track_color.value = "#123456";
+  trackOpacityEditor.value = "37";
+  listeners.input?.({ type: "input", target: trackOpacityEditor });
+  assert.equal(fields.indicator_track_opacity_percent.value, "37");
+  assert.equal(fields.indicator_track_color.disabled, false);
+  assert.equal(fields.indicator_track_color.ariaDisabled, "false");
+  assert.equal(fields.indicator_track_color.inert, false);
+  assert.equal(fields.indicator_track_color.tabIndex, 0);
   fields.display_basis.value = "used";
   listeners.input?.({ target: fields.display_basis });
   ringSizeEditor.value = "";
@@ -206,7 +306,11 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(fields.ring_size_px.value, "40.5");
   fields.theme.value = "dark";
   listeners.input?.({ target: { ...fields.theme, name: "theme" } });
+  listeners.click?.({ target: effectOptions[2] });
   assert.equal(global.document.documentElement.dataset.theme, "dark");
+  assert.equal(fields.indicator_effect_style.value, "depth");
+  assert.equal(effectOptions[2]["aria-checked"], "true");
+  assert.equal(effectOptions[0]["aria-checked"], "false");
   assert.equal(fields.warn_threshold.value, "70");
   assert.equal(fields.danger_threshold.value, "90");
   await new Promise((resolve) => setTimeout(resolve, 180));
@@ -218,10 +322,13 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].warn_threshold, 70);
   assert.equal(savedInputs[0].danger_threshold, 90);
   assert.equal(savedInputs[0].limit_order, "primary_first");
-  assert.equal(savedInputs[0].fullscreen_hide_on, true);
+  assert.equal(savedInputs[0].fullscreen_hide_on, false);
   assert.equal(savedInputs[0].maximized_hide_on, true);
   assert.equal(savedInputs[0].indicator_style, "ring");
-  assert.equal(savedInputs[0].indicator_effect_style, "flat");
+  assert.equal(savedInputs[0].indicator_effect_style, "depth");
+  assert.equal(savedInputs[0].indicator_track_color_auto, false);
+  assert.equal(savedInputs[0].indicator_track_color, "#123456");
+  assert.equal(savedInputs[0].indicator_track_opacity_percent, 37);
   assert.equal(savedInputs[0].ring_numbers_on, true);
   assert.equal(savedInputs[0].ring_number_outline_on, true);
   assert.equal(savedInputs[0].ring_number_outline_width_px, 1.2);
@@ -237,6 +344,10 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].update_check_on, true);
   assert.equal(savedInputs[0].claude_primary_color, "#123456");
   assert.equal(savedInputs[0].claude_secondary_color, "#d36b86");
+  assert.equal(savedInputs[0].tool_warning_color, "#654321");
+  assert.equal(savedInputs[0].tool_danger_color, "#ef4444");
+  assert.equal(savedInputs[0].tool_warning_color_on, true);
+  assert.equal(savedInputs[0].tool_danger_color_on, false);
   assert.equal(toolColorRow.hidden, false);
   assert.equal(fullResetRow.hidden, true);
   assert.equal(dispatched.at(-1)?.type, "settings-updated");
@@ -279,7 +390,18 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(savedInputs.at(-1).bar_mode, "compact");
   assert.equal(invokedCommands.at(-1), "complete_app_quit");
+  eventHandlers["app-quit-cancelled"]?.({ payload: "activation" });
+  eventHandlers["app-quit-requested"]?.({ payload: null });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    invokedCommands.filter((command) => command === "complete_app_quit").length,
+    2,
+  );
   assert.ok(listenerAttempts.get("settings-updated") >= 2);
+
+  windowListeners.pagehide?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(unlistenCalls, 3);
 
   delete global.window;
   delete global.document;
@@ -292,6 +414,7 @@ test("settings form ignores early input events until stored settings hydrate", a
   const customRow = { hidden: true };
   const monoRow = { hidden: true };
   const toolColorRow = { hidden: true };
+  const indicatorTrackColorRow = { dataset: {} };
   let focusedOption = null;
   const paletteOptions = ["traffic", "ocean", "mono", "custom"].map((value) => ({
     dataset: { paletteValue: value },
@@ -330,6 +453,10 @@ test("settings form ignores early input events until stored settings hydrate", a
     maximized_hide_on: makeField(false, "checkbox"),
     indicator_style: makeField("bar"),
     indicator_effect_style: makeField("flat"),
+    indicator_track_color_auto: makeField(true, "checkbox"),
+    indicator_track_color: makeField("#6b7280", "color"),
+    indicator_track_opacity_percent: makeField("11", "range", { min: "0", max: "100" }),
+    "indicator-track-opacity-output": makeField("11"),
     ring_on: makeField(true, "checkbox"),
     ring_numbers_on: makeField(true, "checkbox"),
     ring_number_outline_on: makeField(true, "checkbox"),
@@ -370,6 +497,10 @@ test("settings form ignores early input events until stored settings hydrate", a
     claude_secondary_color: makeField("#d36b86", "color"),
     codex_primary_color: makeField("#2fac7d", "color"),
     codex_secondary_color: makeField("#4d86d6", "color"),
+    tool_warning_color: makeField("#f59e0b", "color"),
+    tool_danger_color: makeField("#ef4444", "color"),
+    tool_warning_color_on: makeField(true, "checkbox"),
+    tool_danger_color_on: makeField(true, "checkbox"),
   };
   const form = {
     elements: {
@@ -429,6 +560,7 @@ test("settings form ignores early input events until stored settings hydrate", a
       if (selector === "[data-custom-palette]") return customRow;
       if (selector === "[data-mono-palette]") return monoRow;
       if (selector === "[data-tool-palette]") return toolColorRow;
+      if (selector === "[data-indicator-track-custom-color]") return indicatorTrackColorRow;
       if (selector === "[data-palette-picker]") return palettePicker;
       if (selector === "[data-full-reset-toggle]") return fullResetRow;
       return null;

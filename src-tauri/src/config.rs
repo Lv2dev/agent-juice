@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -16,11 +16,16 @@ static SETTINGS_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolColors {
     pub claude_primary: [u8; 3],
     pub claude_secondary: [u8; 3],
     pub codex_primary: [u8; 3],
     pub codex_secondary: [u8; 3],
+    pub warning: [u8; 3],
+    pub danger: [u8; 3],
+    pub warning_on: bool,
+    pub danger_on: bool,
 }
 
 const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
@@ -28,6 +33,10 @@ const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     claude_secondary: [0xa6, 0x5f, 0x72],
     codex_primary: [0x4f, 0x8a, 0x73],
     codex_secondary: [0x4f, 0x76, 0xa6],
+    warning: [0xf5, 0x9e, 0x0b],
+    danger: [0xef, 0x44, 0x44],
+    warning_on: true,
+    danger_on: true,
 };
 
 impl Default for ToolColors {
@@ -37,6 +46,38 @@ impl Default for ToolColors {
             claude_secondary: [0xd3, 0x6b, 0x86],
             codex_primary: [0x2f, 0xac, 0x7d],
             codex_secondary: [0x4d, 0x86, 0xd6],
+            warning: [0xf5, 0x9e, 0x0b],
+            danger: [0xef, 0x44, 0x44],
+            warning_on: true,
+            danger_on: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskbarTextColors {
+    pub claude: [u8; 3],
+    pub claude_on: bool,
+    pub codex: [u8; 3],
+    pub codex_on: bool,
+    pub info: [u8; 3],
+    pub info_on: bool,
+    pub ring: [u8; 3],
+    pub ring_on: bool,
+}
+
+impl Default for TaskbarTextColors {
+    fn default() -> Self {
+        Self {
+            claude: [0xd7, 0x9a, 0x32],
+            claude_on: false,
+            codex: [0x2f, 0xac, 0x7d],
+            codex_on: false,
+            info: [0x6b, 0x72, 0x80],
+            info_on: false,
+            ring: [0x6b, 0x72, 0x80],
+            ring_on: false,
         }
     }
 }
@@ -47,6 +88,8 @@ pub struct Settings {
     pub palette: Palette,
     #[serde(default)]
     pub tool_colors: ToolColors,
+    #[serde(default)]
+    pub taskbar_text_colors: TaskbarTextColors,
     #[serde(default = "default_warn")]
     pub warn_threshold: f32,
     #[serde(default = "default_danger")]
@@ -63,7 +106,7 @@ pub struct Settings {
     pub full_reset_time_on: bool,
     #[serde(default = "default_limit_order")]
     pub limit_order: String,
-    #[serde(default = "default_fullscreen_hide_on")]
+    #[serde(default = "legacy_fullscreen_hide_on")]
     pub fullscreen_hide_on: bool,
     #[serde(default = "default_maximized_hide_on")]
     pub maximized_hide_on: bool,
@@ -71,6 +114,12 @@ pub struct Settings {
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
     pub indicator_effect_style: String,
+    #[serde(default = "default_indicator_track_color_auto")]
+    pub indicator_track_color_auto: bool,
+    #[serde(default = "default_indicator_track_color")]
+    pub indicator_track_color: [u8; 3],
+    #[serde(default = "default_indicator_track_opacity_percent")]
+    pub indicator_track_opacity_percent: f32,
     #[serde(default = "default_ring_on")]
     pub ring_on: bool,
     #[serde(default = "default_ring_numbers_on")]
@@ -117,6 +166,10 @@ pub struct Settings {
     pub claude_taskbar_monitor_key: String,
     #[serde(default)]
     pub codex_taskbar_monitor_key: String,
+    #[serde(default)]
+    pub claude_taskbar_target_initialized: bool,
+    #[serde(default)]
+    pub codex_taskbar_target_initialized: bool,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
@@ -156,6 +209,12 @@ pub struct SettingsInput {
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
     pub indicator_effect_style: String,
+    #[serde(default = "default_indicator_track_color_auto")]
+    pub indicator_track_color_auto: bool,
+    #[serde(default)]
+    pub indicator_track_color: Option<String>,
+    #[serde(default = "default_indicator_track_opacity_percent")]
+    pub indicator_track_opacity_percent: f32,
     #[serde(default = "default_ring_on")]
     pub ring_on: bool,
     #[serde(default = "default_ring_numbers_on")]
@@ -227,6 +286,30 @@ pub struct SettingsInput {
     pub codex_primary_color: Option<String>,
     #[serde(default)]
     pub codex_secondary_color: Option<String>,
+    #[serde(default)]
+    pub tool_warning_color: Option<String>,
+    #[serde(default)]
+    pub tool_danger_color: Option<String>,
+    #[serde(default = "default_tool_threshold_color_on")]
+    pub tool_warning_color_on: bool,
+    #[serde(default = "default_tool_threshold_color_on")]
+    pub tool_danger_color_on: bool,
+    #[serde(default)]
+    pub claude_text_color: Option<String>,
+    #[serde(default)]
+    pub claude_text_color_on: bool,
+    #[serde(default)]
+    pub codex_text_color: Option<String>,
+    #[serde(default)]
+    pub codex_text_color_on: bool,
+    #[serde(default)]
+    pub info_text_color: Option<String>,
+    #[serde(default)]
+    pub info_text_color_on: bool,
+    #[serde(default)]
+    pub ring_text_color: Option<String>,
+    #[serde(default)]
+    pub ring_text_color_on: bool,
 }
 
 const WRAP_META_VERSION: u32 = 2;
@@ -322,6 +405,10 @@ fn default_limit_order() -> String {
 }
 
 fn default_fullscreen_hide_on() -> bool {
+    false
+}
+
+fn legacy_fullscreen_hide_on() -> bool {
     true
 }
 
@@ -335,6 +422,18 @@ fn default_indicator_style() -> String {
 
 fn default_indicator_effect_style() -> String {
     "flat".into()
+}
+
+fn default_indicator_track_color_auto() -> bool {
+    true
+}
+
+fn default_indicator_track_color() -> [u8; 3] {
+    [0x6b, 0x72, 0x80]
+}
+
+fn default_indicator_track_opacity_percent() -> f32 {
+    11.0
 }
 
 fn default_ring_on() -> bool {
@@ -413,6 +512,10 @@ fn default_taskbar_offset_ratio() -> f32 {
     0.5
 }
 
+fn initial_taskbar_offset_ratio() -> f32 {
+    0.0
+}
+
 fn default_show_tool() -> bool {
     true
 }
@@ -421,11 +524,16 @@ fn default_claude_account_auto_collect_on() -> bool {
     true
 }
 
+fn default_tool_threshold_color_on() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             palette: default_palette(),
             tool_colors: ToolColors::default(),
+            taskbar_text_colors: TaskbarTextColors::default(),
             warn_threshold: default_warn(),
             danger_threshold: default_danger(),
             display_basis: default_display_basis(),
@@ -438,6 +546,9 @@ impl Default for Settings {
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
+            indicator_track_color_auto: default_indicator_track_color_auto(),
+            indicator_track_color: default_indicator_track_color(),
+            indicator_track_opacity_percent: default_indicator_track_opacity_percent(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -456,11 +567,13 @@ impl Default for Settings {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
-            taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
+            claude_taskbar_target_initialized: false,
+            codex_taskbar_target_initialized: false,
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
@@ -484,6 +597,9 @@ impl Default for SettingsInput {
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
+            indicator_track_color_auto: default_indicator_track_color_auto(),
+            indicator_track_color: None,
+            indicator_track_opacity_percent: default_indicator_track_opacity_percent(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -502,9 +618,9 @@ impl Default for SettingsInput {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
-            taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
@@ -518,6 +634,18 @@ impl Default for SettingsInput {
             claude_secondary_color: None,
             codex_primary_color: None,
             codex_secondary_color: None,
+            tool_warning_color: None,
+            tool_danger_color: None,
+            tool_warning_color_on: default_tool_threshold_color_on(),
+            tool_danger_color_on: default_tool_threshold_color_on(),
+            claude_text_color: None,
+            claude_text_color_on: false,
+            codex_text_color: None,
+            codex_text_color_on: false,
+            info_text_color: None,
+            info_text_color_on: false,
+            ring_text_color: None,
+            ring_text_color_on: false,
         }
     }
 }
@@ -535,11 +663,42 @@ impl Settings {
         Self::path().map_or_else(Self::default, |path| Self::load_from(&path))
     }
 
+    pub fn try_load() -> anyhow::Result<Self> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+        Self::try_load_from(&path)
+    }
+
     pub fn load_with_revision() -> (Self, Option<(u64, SystemTime)>) {
         let Some(path) = Self::path() else {
             return (Self::default(), None);
         };
         Self::load_with_revision_at(&path)
+    }
+
+    pub fn try_load_with_revision() -> anyhow::Result<(Self, Option<(u64, SystemTime)>)> {
+        let Some(path) = Self::path() else {
+            return Ok((Self::default(), None));
+        };
+        Self::try_load_with_revision_at(&path)
+    }
+
+    pub fn try_load_with_revision_at(
+        path: &Path,
+    ) -> anyhow::Result<(Self, Option<(u64, SystemTime)>)> {
+        let _guard = SETTINGS_UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        for _ in 0..8 {
+            let before = Self::storage_revision_at(path);
+            let settings = Self::try_load_from(path)?;
+            let after = Self::storage_revision_at(path);
+            if before == after {
+                return Ok((settings, after));
+            }
+        }
+        Ok((Self::try_load_from(path)?, Self::storage_revision_at(path)))
     }
 
     pub fn load_with_revision_at(path: &Path) -> (Self, Option<(u64, SystemTime)>) {
@@ -578,13 +737,21 @@ impl Settings {
     }
 
     pub fn load_from(path: &Path) -> Self {
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
+        Self::try_load_from(path).unwrap_or_default()
+    }
 
-        let value = serde_json::from_str::<serde_json::Value>(&contents).ok();
-        let settings = serde_json::from_str::<Self>(&contents).unwrap_or_default();
-        Self::normalize_loaded(settings, value.as_ref())
+    pub fn try_load_from(path: &Path) -> anyhow::Result<Self> {
+        let contents = match std::fs::read(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => return Err(err.into()),
+        };
+        let value = serde_json::from_slice::<serde_json::Value>(&contents)?;
+        if !value.is_object() {
+            anyhow::bail!("settings root must be a JSON object");
+        }
+        let settings = serde_json::from_value::<Self>(value.clone())?;
+        Ok(Self::normalize_loaded(settings, Some(&value)))
     }
 
     fn load_for_update(path: &Path) -> anyhow::Result<Self> {
@@ -605,6 +772,7 @@ impl Settings {
 
     fn normalize_loaded(mut settings: Self, value: Option<&serde_json::Value>) -> Self {
         settings.apply_legacy_taskbar_offset(value);
+        settings.apply_legacy_taskbar_target_state(value);
         settings.apply_legacy_collection_interval(value);
         settings.apply_legacy_ring_center_size(value);
         settings.apply_legacy_tool_colors(value);
@@ -664,6 +832,9 @@ impl Settings {
             maximized_hide_on: default_maximized_hide_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
+            indicator_track_color_auto: default_indicator_track_color_auto(),
+            indicator_track_color: None,
+            indicator_track_opacity_percent: default_indicator_track_opacity_percent(),
             ring_on: default_ring_on(),
             ring_numbers_on: default_ring_numbers_on(),
             ring_number_outline_on: default_ring_number_outline_on(),
@@ -682,9 +853,9 @@ impl Settings {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
-            taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            claude_taskbar_offset_ratio: default_taskbar_offset_ratio(),
-            codex_taskbar_offset_ratio: default_taskbar_offset_ratio(),
+            taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
@@ -698,6 +869,18 @@ impl Settings {
             claude_secondary_color: None,
             codex_primary_color: None,
             codex_secondary_color: None,
+            tool_warning_color: None,
+            tool_danger_color: None,
+            tool_warning_color_on: default_tool_threshold_color_on(),
+            tool_danger_color_on: default_tool_threshold_color_on(),
+            claude_text_color: None,
+            claude_text_color_on: false,
+            codex_text_color: None,
+            codex_text_color_on: false,
+            info_text_color: None,
+            info_text_color_on: false,
+            ring_text_color: None,
+            ring_text_color_on: false,
         })
     }
 
@@ -707,6 +890,7 @@ impl Settings {
         Self {
             palette: palette_from_input(&input),
             tool_colors: tool_colors_from_input(&input),
+            taskbar_text_colors: taskbar_text_colors_from_input(&input),
             warn_threshold: warn,
             danger_threshold: danger,
             display_basis: normalize_display_basis(&input.display_basis).into(),
@@ -720,6 +904,15 @@ impl Settings {
             indicator_style: normalize_indicator_style(&input.indicator_style).into(),
             indicator_effect_style: normalize_indicator_effect_style(&input.indicator_effect_style)
                 .into(),
+            indicator_track_color_auto: input.indicator_track_color_auto,
+            indicator_track_color: parse_hex_rgb(input.indicator_track_color.as_deref())
+                .unwrap_or_else(default_indicator_track_color),
+            indicator_track_opacity_percent: clamp_px(
+                input.indicator_track_opacity_percent,
+                default_indicator_track_opacity_percent(),
+                0.0,
+                100.0,
+            ),
             ring_on: input.ring_on,
             ring_numbers_on: input.ring_numbers_on,
             ring_number_outline_on: input.ring_number_outline_on,
@@ -760,6 +953,8 @@ impl Settings {
             codex_taskbar_offset_ratio: clamp_ratio(input.codex_taskbar_offset_ratio),
             claude_taskbar_monitor_key: input.claude_taskbar_monitor_key,
             codex_taskbar_monitor_key: input.codex_taskbar_monitor_key,
+            claude_taskbar_target_initialized: false,
+            codex_taskbar_target_initialized: false,
             show_claude: input.show_claude,
             show_codex: input.show_codex,
             claude_account_auto_collect_on: input.claude_account_auto_collect_on,
@@ -779,6 +974,18 @@ impl Settings {
         }
         if !json_has_field(value, "codex_taskbar_offset_ratio") {
             self.codex_taskbar_offset_ratio = legacy;
+        }
+    }
+
+    fn apply_legacy_taskbar_target_state(&mut self, value: Option<&serde_json::Value>) {
+        let Some(value) = value.filter(|value| value.is_object()) else {
+            return;
+        };
+        if !json_has_field(value, "claude_taskbar_target_initialized") {
+            self.claude_taskbar_target_initialized = true;
+        }
+        if !json_has_field(value, "codex_taskbar_target_initialized") {
+            self.codex_taskbar_target_initialized = true;
         }
     }
 
@@ -830,6 +1037,12 @@ impl Settings {
     }
 
     fn clamp_ring_geometry(&mut self) {
+        self.indicator_track_opacity_percent = clamp_px(
+            self.indicator_track_opacity_percent,
+            default_indicator_track_opacity_percent(),
+            0.0,
+            100.0,
+        );
         self.ring_size_px = clamp_px(self.ring_size_px, default_ring_size_px(), 20.0, 44.0);
         self.ring_thickness_px = clamp_ring_thickness(self.ring_thickness_px);
         self.ring_gap_px = clamp_ring_gap(self.ring_gap_px);
@@ -1287,6 +1500,24 @@ fn tool_colors_from_input(input: &SettingsInput) -> ToolColors {
             .unwrap_or(defaults.codex_primary),
         codex_secondary: parse_hex_rgb(input.codex_secondary_color.as_deref())
             .unwrap_or(defaults.codex_secondary),
+        warning: parse_hex_rgb(input.tool_warning_color.as_deref()).unwrap_or(defaults.warning),
+        danger: parse_hex_rgb(input.tool_danger_color.as_deref()).unwrap_or(defaults.danger),
+        warning_on: input.tool_warning_color_on,
+        danger_on: input.tool_danger_color_on,
+    }
+}
+
+fn taskbar_text_colors_from_input(input: &SettingsInput) -> TaskbarTextColors {
+    let defaults = TaskbarTextColors::default();
+    TaskbarTextColors {
+        claude: parse_hex_rgb(input.claude_text_color.as_deref()).unwrap_or(defaults.claude),
+        claude_on: input.claude_text_color_on,
+        codex: parse_hex_rgb(input.codex_text_color.as_deref()).unwrap_or(defaults.codex),
+        codex_on: input.codex_text_color_on,
+        info: parse_hex_rgb(input.info_text_color.as_deref()).unwrap_or(defaults.info),
+        info_on: input.info_text_color_on,
+        ring: parse_hex_rgb(input.ring_text_color.as_deref()).unwrap_or(defaults.ring),
+        ring_on: input.ring_text_color_on,
     }
 }
 
@@ -1313,7 +1544,10 @@ fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         sequence
     ));
-    std::fs::write(&tmp, contents)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
     let result = if path.exists() {
         replace_existing_file(path, &tmp)
     } else {
@@ -1362,7 +1596,7 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod parser_tests {
-    use super::{parse_hex_rgb, remove_file_if_exists, Settings};
+    use super::{parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, ToolColors};
     use std::{
         fs,
         path::Path,
@@ -1385,6 +1619,44 @@ mod parser_tests {
         for invalid in ["aéaaa", "💚12", "12 456", "gg0000"] {
             assert_eq!(parse_hex_rgb(Some(invalid)), None);
         }
+    }
+
+    #[test]
+    fn legacy_tool_colors_gain_threshold_defaults_without_losing_custom_values() {
+        let settings: Settings = serde_json::from_str(
+            r##"{
+                "tool_colors": {
+                    "claude_primary": [16, 32, 48],
+                    "claude_secondary": [64, 80, 96],
+                    "codex_primary": [112, 128, 144],
+                    "codex_secondary": [160, 176, 192]
+                }
+            }"##,
+        )
+        .unwrap();
+
+        assert_eq!(settings.tool_colors.claude_primary, [16, 32, 48]);
+        assert_eq!(settings.tool_colors.codex_secondary, [160, 176, 192]);
+        assert_eq!(settings.tool_colors.warning, ToolColors::default().warning);
+        assert_eq!(settings.tool_colors.danger, ToolColors::default().danger);
+        assert!(settings.tool_colors.warning_on);
+        assert!(settings.tool_colors.danger_on);
+    }
+
+    #[test]
+    fn settings_input_persists_tool_threshold_colors_and_independent_toggles() {
+        let settings = Settings::from_input(SettingsInput {
+            tool_warning_color: Some("#123456".into()),
+            tool_danger_color: Some("#abcdef".into()),
+            tool_warning_color_on: false,
+            tool_danger_color_on: true,
+            ..SettingsInput::default()
+        });
+
+        assert_eq!(settings.tool_colors.warning, [0x12, 0x34, 0x56]);
+        assert_eq!(settings.tool_colors.danger, [0xab, 0xcd, 0xef]);
+        assert!(!settings.tool_colors.warning_on);
+        assert!(settings.tool_colors.danger_on);
     }
 
     #[test]

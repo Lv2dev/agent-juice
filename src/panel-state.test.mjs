@@ -53,7 +53,7 @@ test("extended palettes distinguish limits while monochrome unifies normal value
   assert.equal(colorForToolPercent(95, "claude", mono), "#ef4444");
 });
 
-test("tool palette accepts four persisted live colors without replacing warning semantics", () => {
+test("tool palette applies custom base and threshold colors with independent stage toggles", () => {
   const customized = {
     ...settings,
     tool_colors: {
@@ -61,6 +61,10 @@ test("tool palette accepts four persisted live colors without replacing warning 
       claude_secondary: [0x40, 0x50, 0x60],
       codex_primary: [0x70, 0x80, 0x90],
       codex_secondary: [0xa0, 0xb0, 0xc0],
+      warning: [0xb0, 0xc0, 0xd0],
+      danger: [0xd0, 0xc0, 0xb0],
+      warning_on: true,
+      danger_on: true,
     },
   };
 
@@ -68,8 +72,32 @@ test("tool palette accepts four persisted live colors without replacing warning 
   assert.equal(colorForToolPercent(50, "claude", customized, true), "#405060");
   assert.equal(colorForToolPercent(50, "codex", customized), "#708090");
   assert.equal(colorForToolPercent(50, "codex", customized, true), "#a0b0c0");
-  assert.equal(colorForToolPercent(80, "claude", customized), "#f59e0b");
-  assert.equal(colorForToolPercent(95, "codex", customized, true), "#db2777");
+  assert.equal(colorForToolPercent(80, "claude", customized), "#b0c0d0");
+  assert.equal(colorForToolPercent(95, "codex", customized, true), "#d0c0b0");
+
+  const dangerOff = {
+    ...customized,
+    tool_colors: { ...customized.tool_colors, danger_on: false },
+  };
+  assert.equal(colorForToolPercent(95, "codex", dangerOff, true), "#b0c0d0");
+
+  const warningOff = {
+    ...customized,
+    tool_colors: { ...customized.tool_colors, warning_on: false },
+  };
+  assert.equal(colorForToolPercent(80, "claude", warningOff), "#102030");
+  assert.equal(colorForToolPercent(95, "claude", warningOff), "#d0c0b0");
+
+  const bothOff = {
+    ...customized,
+    tool_colors: {
+      ...customized.tool_colors,
+      warning_on: false,
+      danger_on: false,
+    },
+  };
+  assert.equal(colorForToolPercent(80, "claude", bothOff), "#102030");
+  assert.equal(colorForToolPercent(95, "codex", bothOff, true), "#a0b0c0");
   assert.equal(toolBrandColor("claude", customized), "#102030");
   assert.equal(toolBrandColor("codex", customized), "#708090");
 });

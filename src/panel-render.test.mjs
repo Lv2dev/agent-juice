@@ -395,3 +395,108 @@ test("panel retries listeners, keeps newer events, and rolls back failed window 
   delete global.window;
   delete global.document;
 });
+
+test("panel bounds pending listeners, cleans late registrations, and preserves newer settings", async () => {
+  const windowListeners = {};
+  const eventHandlers = {};
+  const pendingListenerResolvers = [];
+  const attempts = new Map();
+  const cards = { claude: toolCardStub(), codex: toolCardStub() };
+  const originalSetInterval = global.setInterval;
+  let fallbackIntervals = 0;
+  let lateUnlistenCalls = 0;
+  let normalUnlistenCalls = 0;
+  let rejectSettings;
+  const pendingSettings = new Promise((_, reject) => {
+    rejectSettings = reject;
+  });
+
+  global.setInterval = (callback, delay) => {
+    fallbackIntervals += 1;
+    const timer = originalSetInterval(callback, delay);
+    timer.unref?.();
+    return timer;
+  };
+
+  global.window = {
+    addEventListener(name, handler) {
+      windowListeners[name] = handler;
+    },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return pendingSettings;
+          if (command === "get_status") return [];
+          return null;
+        },
+      },
+      event: {
+        listen(name, handler) {
+          attempts.set(name, (attempts.get(name) ?? 0) + 1);
+          if (name === "panel-visibility-updated") {
+            return new Promise((resolve) => pendingListenerResolvers.push(resolve));
+          }
+          eventHandlers[name] = handler;
+          return Promise.resolve(() => {
+            normalUnlistenCalls += 1;
+          });
+        },
+      },
+    },
+  };
+  global.document = {
+    hidden: false,
+    documentElement: { dataset: {}, removeAttribute() {} },
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === '[data-tool="claude"]') return cards.claude;
+      if (selector === '[data-tool="codex"]') return cards.codex;
+      return null;
+    },
+  };
+
+  try {
+    await import(`./panel.js?test=${Date.now()}-listener-timeout`);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    windowListeners["settings-updated"]?.({ detail: { display_basis: "used" } });
+    rejectSettings(new Error("late bootstrap failure"));
+    await new Promise((resolve) => setImmediate(resolve));
+    eventHandlers["status-updated"]?.({
+      payload: [{
+        tool: "codex",
+        captured_at: new Date().toISOString(),
+        primary: { used_percent: 10 },
+        secondary: { used_percent: 20 },
+        session: { active: true },
+      }],
+    });
+    assert.equal(cards.codex.querySelector(".p5h").querySelector(".val").textContent, "10%");
+
+    await new Promise((resolve) => setTimeout(resolve, 1_950));
+    assert.equal(attempts.get("panel-visibility-updated"), 3);
+    assert.equal(fallbackIntervals, 1);
+
+    pendingListenerResolvers[0](() => {
+      lateUnlistenCalls += 1;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(lateUnlistenCalls, 1);
+
+    windowListeners.pagehide?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(normalUnlistenCalls, 2);
+
+    for (const resolve of pendingListenerResolvers.slice(1)) {
+      resolve(() => {
+        lateUnlistenCalls += 1;
+      });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(lateUnlistenCalls, 3);
+  } finally {
+    global.setInterval = originalSetInterval;
+    delete global.window;
+    delete global.document;
+  }
+});

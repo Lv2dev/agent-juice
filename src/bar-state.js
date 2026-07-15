@@ -163,6 +163,23 @@ function limitModel(labelKey, limit, settings, now, language, tool, secondary = 
   };
 }
 
+function rgbSetting(value, fallback) {
+  if (!Array.isArray(value) || value.length !== 3) return fallback;
+  const bytes = value.map((part) => Math.round(Number(part)));
+  if (bytes.some((part) => !Number.isFinite(part))) return fallback;
+  return `#${bytes
+    .map((part) => Math.min(255, Math.max(0, part)).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function taskbarTextColor(settings, key, fallback) {
+  return rgbSetting(settings?.taskbar_text_colors?.[key], fallback);
+}
+
+function taskbarTextColorOn(settings, key) {
+  return boolSetting(settings?.taskbar_text_colors?.[`${key}_on`], false);
+}
+
 function tooltipResetLine(labelKey, reset, language) {
   const label = t(labelKey, language);
   if (!reset) return `${label} –`;
@@ -274,6 +291,22 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
     limitOrder: normalizeLimitOrder(merged.limit_order),
     indicatorStyle: normalizeIndicatorStyle(merged.indicator_style),
     indicatorEffectStyle: normalizeIndicatorEffectStyle(merged.indicator_effect_style),
+    indicatorTrackColorAuto: boolSetting(merged.indicator_track_color_auto, true),
+    indicatorTrackColor: rgbSetting(merged.indicator_track_color, "#6b7280"),
+    indicatorTrackOpacityPercent: numberRangeSetting(
+      merged.indicator_track_opacity_percent,
+      11,
+      0,
+      100,
+    ),
+    claudeTextColor: taskbarTextColor(merged, "claude", "#d79a32"),
+    claudeTextColorOn: taskbarTextColorOn(merged, "claude"),
+    codexTextColor: taskbarTextColor(merged, "codex", "#2fac7d"),
+    codexTextColorOn: taskbarTextColorOn(merged, "codex"),
+    infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
+    infoTextColorOn: taskbarTextColorOn(merged, "info"),
+    ringTextColor: taskbarTextColor(merged, "ring", "#6b7280"),
+    ringTextColorOn: taskbarTextColorOn(merged, "ring"),
     ringOn: merged.ring_on !== false,
     ringNumbersOn: boolSetting(merged.ring_numbers_on, true),
     ringNumberOutlineOn: boolSetting(merged.ring_number_outline_on, true),

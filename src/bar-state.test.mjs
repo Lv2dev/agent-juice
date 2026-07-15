@@ -215,6 +215,19 @@ test("barViewModel normalizes mode and ring settings", () => {
     limit_order: "secondary_first",
     indicator_style: "bar",
     indicator_effect_style: "glow",
+    indicator_track_color_auto: false,
+    indicator_track_color: [0x12, 0x34, 0x56],
+    indicator_track_opacity_percent: 37.5,
+    taskbar_text_colors: {
+      claude: [0x11, 0x22, 0x44],
+      claude_on: true,
+      codex: [0x33, 0x55, 0x77],
+      codex_on: false,
+      info: [0x44, 0x66, 0x88],
+      info_on: true,
+      ring: [0x55, 0x77, 0x99],
+      ring_on: true,
+    },
     ring_on: false,
     ring_numbers_on: false,
     ring_number_outline_on: false,
@@ -234,6 +247,17 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(full.limitOrder, "secondary_first");
   assert.equal(full.indicatorStyle, "bar");
   assert.equal(full.indicatorEffectStyle, "glow");
+  assert.equal(full.indicatorTrackColorAuto, false);
+  assert.equal(full.indicatorTrackColor, "#123456");
+  assert.equal(full.indicatorTrackOpacityPercent, 37.5);
+  assert.equal(full.claudeTextColor, "#112244");
+  assert.equal(full.claudeTextColorOn, true);
+  assert.equal(full.codexTextColor, "#335577");
+  assert.equal(full.codexTextColorOn, false);
+  assert.equal(full.infoTextColor, "#446688");
+  assert.equal(full.infoTextColorOn, true);
+  assert.equal(full.ringTextColor, "#557799");
+  assert.equal(full.ringTextColorOn, true);
   assert.equal(full.ringOn, false);
   assert.equal(full.ringNumbersOn, false);
   assert.equal(full.ringNumberOutlineOn, false);
@@ -255,11 +279,28 @@ test("barViewModel normalizes mode and ring settings", () => {
   const withoutResetTime = barViewModel([], { ...settings, full_reset_time_on: false });
   assert.equal(withoutResetTime.fullResetTimeOn, false);
 
-  const fallback = barViewModel([], { ...settings, bar_mode: "unknown" });
+  const fallback = barViewModel([], {
+    ...settings,
+    bar_mode: "unknown",
+    indicator_track_color_auto: "unexpected",
+    indicator_track_color: [1, 2],
+    indicator_track_opacity_percent: "unexpected",
+  });
   assert.equal(fallback.mode, "full");
   assert.equal(fallback.limitOrder, "primary_first");
   assert.equal(fallback.indicatorStyle, "ring");
   assert.equal(fallback.indicatorEffectStyle, "flat");
+  assert.equal(fallback.indicatorTrackColorAuto, true);
+  assert.equal(fallback.indicatorTrackColor, "#6b7280");
+  assert.equal(fallback.indicatorTrackOpacityPercent, 11);
+  assert.equal(fallback.claudeTextColor, "#d79a32");
+  assert.equal(fallback.claudeTextColorOn, false);
+  assert.equal(fallback.codexTextColor, "#2fac7d");
+  assert.equal(fallback.codexTextColorOn, false);
+  assert.equal(fallback.infoTextColor, "#6b7280");
+  assert.equal(fallback.infoTextColorOn, false);
+  assert.equal(fallback.ringTextColor, "#6b7280");
+  assert.equal(fallback.ringTextColorOn, false);
   assert.equal(fallback.ringNumbersOn, true);
   assert.equal(fallback.ringNumberOutlineOn, true);
   assert.equal(fallback.ringNumberOutlineWidthPx, 1.2);
@@ -282,6 +323,8 @@ test("barViewModel clamps ring geometry settings", () => {
     ring_gap_px: -4,
     ring_center_size_px: 99,
     indicator_effect_style: "unknown",
+    indicator_track_color: [999, -4, 12.6],
+    indicator_track_opacity_percent: 999,
     ring_number_outline_width_px: 99,
     ring_number_font_size_px: 99,
     ring_number_font_weight: 999,
@@ -295,6 +338,8 @@ test("barViewModel clamps ring geometry settings", () => {
   assert.equal(vm.ringGapPx, 2);
   assert.equal(vm.ringCenterSizePx, 32);
   assert.equal(vm.indicatorEffectStyle, "flat");
+  assert.equal(vm.indicatorTrackColor, "#ff000d");
+  assert.equal(vm.indicatorTrackOpacityPercent, 100);
   assert.equal(vm.ringNumberOutlineWidthPx, 4);
   assert.equal(vm.ringNumberFontSizePx, 16);
   assert.equal(vm.ringNumberFontWeight, 900);

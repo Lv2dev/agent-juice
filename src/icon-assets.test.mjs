@@ -27,6 +27,18 @@ function gifDimensions(path) {
   return [buffer.readUInt16LE(6), buffer.readUInt16LE(8)];
 }
 
+function isProjectGitWorktree() {
+  try {
+    const root = execFileSync("git", ["-C", projectRoot, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return resolve(root) === projectRoot;
+  } catch {
+    return false;
+  }
+}
+
 test("app and tray icons use the same vertical capsule mark as the settings logo", () => {
   const script = String.raw`
 import json
@@ -174,6 +186,10 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /Update checks and notifications/);
   assert.match(readme, /테마·팔레트·도구별 색상/);
   assert.match(readme, /Theme, palettes, and per-tool colors/);
+  assert.match(readme, /경고 시 색상 변경/);
+  assert.match(readme, /위험 시 색상 변경/);
+  assert.match(readme, /Recolor on warning/);
+  assert.match(readme, /Recolor on danger/);
   assert.match(readme, /정보와 로컬 처리 원칙/);
   assert.match(readme, /About and local processing/);
   assert.match(readme, /보조 모니터로 이동/);
@@ -188,13 +204,13 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
     ["juice-v014-panel-overview.png", [1240, 944]],
-    ["juice-v014-panel-appearance.png", [1240, 1224]],
-    ["juice-v014-panel-settings-full.png", [1240, 4824]],
-    ["juice-v014-panel-taskbar.png", [1240, 1630]],
-    ["juice-v014-panel-collection.png", [1240, 980]],
-    ["juice-v014-panel-effects.png", [1240, 1126]],
+    ["juice-v014-panel-appearance.png", [1240, 1436]],
+    ["juice-v014-panel-taskbar.png", [1240, 864]],
+    ["juice-v014-panel-collection.png", [1240, 1132]],
+    ["juice-v014-panel-effects.png", [1240, 2428]],
     ["juice-v014-panel-update.png", [1240, 588]],
     ["juice-v014-taskbar-modes.png", [1520, 584]],
+    ["juice-v014-taskbar-bars.png", [1520, 584]],
   ]);
 
   for (const [name, dimensions] of assets) {
@@ -262,7 +278,92 @@ print(json.dumps(heights))
   );
   assert.deepEqual(ringHeights, [[64, 64], [64, 64], [64, 64], [64, 64]]);
 
+  const taskbarBarsPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-bars.png");
+  const barBounds = JSON.parse(
+    execFileSync(
+      "python",
+      [
+        "-c",
+        `
+import json
+import sys
+from PIL import Image
+
+image = Image.open(sys.argv[1]).convert("RGB")
+tool_colors = [
+    [(215, 154, 50), (211, 107, 134)],
+    [(47, 172, 125), (77, 134, 214)],
+]
+rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
+columns = [(224, 850), (850, 1476)]
+bounds = []
+for top, bottom in rows:
+    row = []
+    for tool_index, (left, right) in enumerate(columns):
+        colors = tool_colors[tool_index]
+        points = [
+            (x, y)
+            for y in range(top, bottom)
+            for x in range(left, right)
+            if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
+        ]
+        row.append({
+            "width": max(x for x, _ in points) - min(x for x, _ in points) + 1,
+            "height": max(y for _, y in points) - min(y for _, y in points) + 1,
+        })
+    bounds.append(row)
+print(json.dumps(bounds))
+`,
+        taskbarBarsPath,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  for (const row of barBounds) {
+    for (const bounds of row) {
+      assert.ok(bounds.width >= 40, `horizontal indicator is too narrow: ${JSON.stringify(bounds)}`);
+      assert.ok(bounds.height <= 32, `horizontal indicator is too tall: ${JSON.stringify(bounds)}`);
+    }
+  }
+
+  assert.match(
+    readme,
+    /juice-v014-taskbar-modes\.png[\s\S]*juice-v014-taskbar-bars\.png/,
+  );
+  assert.match(readme, /같은 4개 모드를 원 대신 위아래 두 줄의 가로 바로 표시합니다/);
+  assert.match(readme, /The same four modes use two stacked horizontal bars instead of rings/);
+
   assert.doesNotMatch(readme, /docs\/assets\/juice-panel-/);
   assert.doesNotMatch(readme, /docs\/assets\/juice-taskbar-modes\.png/);
   assert.doesNotMatch(readme, /docs\/assets\/juice-v014-panel-about\.png/);
+  assert.doesNotMatch(readme, /docs\/assets\/juice-v014-panel-settings-full\.png/);
+  assert.match(readme, /\| 기본 \|[\s\S]*\| 수집 \|[\s\S]*\| 표시줄 \|[\s\S]*\| 색상 \|[\s\S]*\| 세부 \|/);
+  assert.match(readme, /\| General \|[\s\S]*\| Collection \|[\s\S]*\| Taskbar \|[\s\S]*\| Colors \|[\s\S]*\| Details \|/);
+  assert.doesNotMatch(readme, /\| 외형 \||\| 표시·수집 \||\| 원·바 세부 \|/);
+  assert.match(readme, /최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다/);
+  assert.match(readme, /숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다/);
+  assert.match(readme, /바에 마우스를 올리면 도구명과 사용 가능한 5h·주간 한도의 초기화까지 남은 시간을 보여줍니다/);
+  assert.match(readme, /On first launch, visible bars are placed from the left edge of the taskbar without overlapping/);
+  assert.match(readme, /Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars/);
+  assert.match(readme, /Hovering a bar shows the tool name and time remaining until each available 5-hour or weekly limit resets/);
+  assert.match(readme, /전체화면 숨김:[^\n]*신규 설치 기본값은 꺼짐입니다/);
+  assert.match(readme, /Fullscreen hiding:[^\n]*Off by default on a new installation/);
+  assert.doesNotMatch(readme, /\b(?:RAII|HWND|AppHang)\b|z-order/i);
+
+  if (isProjectGitWorktree()) {
+    assert.doesNotThrow(() =>
+      execFileSync(
+        "git",
+        [
+          "-C",
+          projectRoot,
+          "ls-files",
+          "--error-unmatch",
+          "--",
+          "docs/assets/juice-v014-taskbar-bars.png",
+        ],
+        { stdio: "pipe" },
+      ),
+    );
+  }
 });

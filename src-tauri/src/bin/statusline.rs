@@ -17,9 +17,19 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    let output = agent_juice::statusline::run_with_default_dir(&input);
+    let max_bytes = agent_juice::statusline::MAX_STATUSLINE_INPUT_BYTES;
+    let mut input = Vec::with_capacity(max_bytes + 1);
+    let _ = std::io::stdin()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut input);
+    let oversized = input.len() > max_bytes;
+    input.truncate(max_bytes);
+    let input = String::from_utf8_lossy(&input);
+    let output = if oversized {
+        agent_juice::statusline::run_without_original_with_default_dir(&input)
+    } else {
+        agent_juice::statusline::run_with_default_dir(&input)
+    };
     let _ = std::io::stdout().write_all(&output);
     ExitCode::SUCCESS
 }
