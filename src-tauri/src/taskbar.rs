@@ -3,16 +3,25 @@ use once_cell::sync::Lazy;
 #[cfg(windows)]
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
+    time::Duration,
 };
 #[cfg(windows)]
 use windows::{
     core::{w, BOOL, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, RECT},
+        Devices::Display::{
+            DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+            DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+            QDC_ONLY_ACTIVE_PATHS,
+        },
+        Foundation::{HWND, LPARAM, RECT, WPARAM},
         Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
         Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITORINFOEXW,
+            MONITOR_DEFAULTTONEAREST,
         },
         System::Threading::GetCurrentThreadId,
         UI::{
@@ -24,9 +33,10 @@ use windows::{
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW,
                 GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-                IsWindow, IsWindowVisible, PeekMessageW, SendMessageW, ShowWindow,
-                TranslateMessage, MSG, PM_REMOVE, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE,
-                WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+                IsWindow, IsWindowVisible, IsZoomed, PeekMessageW, SendMessageTimeoutW, ShowWindow,
+                ShowWindowAsync, TranslateMessage, MSG, PM_REMOVE, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+                SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
+                WS_POPUP,
             },
         },
     },
@@ -43,6 +53,202 @@ struct NativeTooltip {
 #[cfg(windows)]
 static NATIVE_TOOLTIPS: Lazy<Mutex<HashMap<isize, NativeTooltip>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(windows)]
+enum TooltipCommand {
+    Set {
+        parent: isize,
+        value: String,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    Show {
+        parent: isize,
+        visible: bool,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    Remove {
+        parent: isize,
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    Clear {
+        reply: mpsc::Sender<Result<usize, String>>,
+    },
+    #[cfg(test)]
+    CreateProbe {
+        reply: mpsc::Sender<Result<isize, String>>,
+    },
+    #[cfg(test)]
+    DestroyProbe {
+        hwnd: isize,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+}
+
+#[cfg(windows)]
+struct TooltipService {
+    sender: mpsc::SyncSender<TooltipCommand>,
+}
+
+#[cfg(windows)]
+impl TooltipService {
+    fn start() -> Self {
+        let (sender, receiver) = mpsc::sync_channel(64);
+        let _ = std::thread::Builder::new()
+            .name("juice-native-tooltip".into())
+            .spawn(move || {
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(16)) {
+                        Ok(command) => match command {
+                            TooltipCommand::Set {
+                                parent,
+                                value,
+                                reply,
+                            } => {
+                                let result = set_window_tooltip_direct(raw_hwnd(parent), &value)
+                                    .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                            TooltipCommand::Show {
+                                parent,
+                                visible,
+                                reply,
+                            } => {
+                                let result = show_window_tooltip_direct(raw_hwnd(parent), visible)
+                                    .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                            TooltipCommand::Remove { parent, reply } => {
+                                let result = remove_window_tooltip_direct(raw_hwnd(parent))
+                                    .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                            TooltipCommand::Clear { reply } => {
+                                let result = clear_current_thread_tooltips_direct()
+                                    .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                            #[cfg(test)]
+                            TooltipCommand::CreateProbe { reply } => {
+                                let result = unsafe {
+                                    CreateWindowExW(
+                                        Default::default(),
+                                        w!("STATIC"),
+                                        PCWSTR::null(),
+                                        WS_POPUP,
+                                        0,
+                                        0,
+                                        1,
+                                        1,
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                }
+                                .map(|hwnd| hwnd.0 as isize)
+                                .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                            #[cfg(test)]
+                            TooltipCommand::DestroyProbe { hwnd, reply } => {
+                                let result = unsafe { DestroyWindow(raw_hwnd(hwnd)) }
+                                    .map_err(|err| err.to_string());
+                                let _ = reply.send(result);
+                            }
+                        },
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    pump_current_thread_messages();
+                }
+                let _ = clear_current_thread_tooltips_direct();
+            });
+        Self { sender }
+    }
+}
+
+#[cfg(windows)]
+static NATIVE_TOOLTIP_SERVICE: Lazy<TooltipService> = Lazy::new(TooltipService::start);
+
+#[cfg(windows)]
+const TOOLTIP_SERVICE_TIMEOUT: Duration = Duration::from_millis(150);
+
+#[cfg(windows)]
+fn raw_hwnd(value: isize) -> HWND {
+    HWND(value as *mut core::ffi::c_void)
+}
+
+#[cfg(windows)]
+fn request_tooltip<T>(
+    build: impl FnOnce(mpsc::Sender<Result<T, String>>) -> TooltipCommand,
+) -> anyhow::Result<T> {
+    let (reply, response) = mpsc::channel();
+    NATIVE_TOOLTIP_SERVICE
+        .sender
+        .try_send(build(reply))
+        .map_err(|err| anyhow::anyhow!("native tooltip worker unavailable: {err}"))?;
+    response
+        .recv_timeout(TOOLTIP_SERVICE_TIMEOUT)
+        .map_err(|err| anyhow::anyhow!("native tooltip worker timed out: {err}"))?
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(windows)]
+struct OwnedNativeWindow(HWND);
+
+#[cfg(windows)]
+impl OwnedNativeWindow {
+    fn new(hwnd: HWND) -> Self {
+        Self(hwnd)
+    }
+
+    fn hwnd(&self) -> HWND {
+        self.0
+    }
+
+    fn release(mut self) -> HWND {
+        let hwnd = self.0;
+        self.0 = HWND(std::ptr::null_mut());
+        hwnd
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedNativeWindow {
+    fn drop(&mut self) {
+        if !self.0 .0.is_null() {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+}
+
+#[cfg(windows)]
+const NATIVE_TOOLTIP_MESSAGE_TIMEOUT_MS: u32 = 100;
+
+#[cfg(windows)]
+fn send_tooltip_message(
+    hwnd: HWND,
+    message: u32,
+    wparam: Option<WPARAM>,
+    lparam: Option<LPARAM>,
+) -> anyhow::Result<isize> {
+    let mut result = 0usize;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            message,
+            wparam.unwrap_or(WPARAM(0)),
+            lparam.unwrap_or(LPARAM(0)),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            NATIVE_TOOLTIP_MESSAGE_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    if sent.0 == 0 {
+        anyhow::bail!("native taskbar tooltip message timed out or failed: {message:#x}");
+    }
+    Ok(result as isize)
+}
 
 #[cfg(windows)]
 fn tracking_tool_info(tooltip: HWND, text: &[u16]) -> TTTOOLINFOW {
@@ -129,6 +335,7 @@ pub struct WindowCoverageCandidate {
     pub visible: bool,
     pub minimized: bool,
     pub cloaked: bool,
+    pub maximized: bool,
     pub rect: DockRect,
     pub monitor: DockRect,
     pub work_area: DockRect,
@@ -144,6 +351,8 @@ pub struct ShellTaskbarWindow {
     pub bottom: i32,
     pub monitor: DockRect,
     pub key: String,
+    pub device_key: String,
+    pub legacy_key: String,
     pub primary: bool,
 }
 
@@ -153,8 +362,8 @@ pub fn hide_window(hwnd: HWND) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("cannot hide a null HWND"));
     }
 
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
+    if !unsafe { ShowWindowAsync(hwnd, SW_HIDE).as_bool() } {
+        anyhow::bail!("failed to schedule native taskbar bar hide");
     }
     Ok(())
 }
@@ -182,6 +391,15 @@ pub fn pump_current_thread_messages() {
 
 #[cfg(windows)]
 pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
+    request_tooltip(|reply| TooltipCommand::Set {
+        parent: parent.0 as isize,
+        value: value.to_string(),
+        reply,
+    })
+}
+
+#[cfg(windows)]
+fn set_window_tooltip_direct(parent: HWND, value: &str) -> anyhow::Result<()> {
     if parent.0.is_null() {
         return Err(anyhow::anyhow!("cannot attach a tooltip to a null HWND"));
     }
@@ -214,14 +432,12 @@ pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
                     stored.text = next.clone();
                 }
             }
-            unsafe {
-                SendMessageW(
-                    tooltip,
-                    TTM_UPDATETIPTEXTW,
-                    None,
-                    Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
-                );
-            }
+            send_tooltip_message(
+                tooltip,
+                TTM_UPDATETIPTEXTW,
+                None,
+                Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+            )?;
             return Ok(());
         }
     }
@@ -230,7 +446,7 @@ pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
         .unwrap_or_else(|err| err.into_inner())
         .remove(&key);
 
-    let tooltip = unsafe {
+    let tooltip = OwnedNativeWindow::new(unsafe {
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             TOOLTIPS_CLASSW,
@@ -245,24 +461,20 @@ pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
             None,
             None,
         )?
-    };
+    });
     let text = Arc::new(wide(value));
-    let info = tracking_tool_info(tooltip, &text);
-    let added = unsafe {
-        SendMessageW(
-            tooltip,
-            TTM_ADDTOOLW,
-            None,
-            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
-        )
-    };
-    if added.0 == 0 {
-        let _ = unsafe { DestroyWindow(tooltip) };
+    let info = tracking_tool_info(tooltip.hwnd(), &text);
+    let added = send_tooltip_message(
+        tooltip.hwnd(),
+        TTM_ADDTOOLW,
+        None,
+        Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+    )?;
+    if added == 0 {
         return Err(anyhow::anyhow!("failed to register native taskbar tooltip"));
     }
-    unsafe {
-        SendMessageW(tooltip, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(360)));
-    }
+    let _ = send_tooltip_message(tooltip.hwnd(), TTM_SETMAXTIPWIDTH, None, Some(LPARAM(360)));
+    let tooltip = tooltip.release();
     NATIVE_TOOLTIPS
         .lock()
         .unwrap_or_else(|err| err.into_inner())
@@ -279,6 +491,14 @@ pub fn set_window_tooltip(parent: HWND, value: &str) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn remove_window_tooltip(parent: HWND) -> anyhow::Result<bool> {
+    request_tooltip(|reply| TooltipCommand::Remove {
+        parent: parent.0 as isize,
+        reply,
+    })
+}
+
+#[cfg(windows)]
+fn remove_window_tooltip_direct(parent: HWND) -> anyhow::Result<bool> {
     let key = parent.0 as isize;
     let Some(current) = NATIVE_TOOLTIPS
         .lock()
@@ -297,36 +517,47 @@ pub fn remove_window_tooltip(parent: HWND) -> anyhow::Result<bool> {
     let tooltip = HWND(current.hwnd as *mut core::ffi::c_void);
     let result = if unsafe { IsWindow(Some(tooltip)).as_bool() } {
         let info = tracking_tool_info(tooltip, &current.text);
+        let deactivate = send_tooltip_message(
+            tooltip,
+            TTM_TRACKACTIVATE,
+            Some(WPARAM(0)),
+            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+        );
         unsafe {
-            SendMessageW(
-                tooltip,
-                TTM_TRACKACTIVATE,
-                Some(windows::Win32::Foundation::WPARAM(0)),
-                Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
-            );
             let _ = ShowWindow(tooltip, SW_HIDE);
-            SendMessageW(
-                tooltip,
-                TTM_DELTOOLW,
-                None,
-                Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
-            );
-            DestroyWindow(tooltip)
         }
+        let remove = send_tooltip_message(
+            tooltip,
+            TTM_DELTOOLW,
+            None,
+            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+        );
+        let destroy = unsafe { DestroyWindow(tooltip) };
+        deactivate
+            .and(remove)
+            .and_then(|_| destroy.map_err(Into::into))
     } else {
         Ok(())
     };
 
+    result?;
+    if unsafe { IsWindow(Some(tooltip)).as_bool() } {
+        anyhow::bail!("native tooltip window still exists after destroy");
+    }
     NATIVE_TOOLTIPS
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .remove(&key);
-    result?;
     Ok(true)
 }
 
 #[cfg(windows)]
 pub fn clear_current_thread_tooltips() -> anyhow::Result<usize> {
+    request_tooltip(|reply| TooltipCommand::Clear { reply })
+}
+
+#[cfg(windows)]
+fn clear_current_thread_tooltips_direct() -> anyhow::Result<usize> {
     let owner_thread_id = unsafe { GetCurrentThreadId() };
     let parents = NATIVE_TOOLTIPS
         .lock()
@@ -340,7 +571,7 @@ pub fn clear_current_thread_tooltips() -> anyhow::Result<usize> {
     let mut first_error = None;
     for parent in parents {
         let hwnd = HWND(parent as *mut core::ffi::c_void);
-        match remove_window_tooltip(hwnd) {
+        match remove_window_tooltip_direct(hwnd) {
             Ok(true) => removed += 1,
             Ok(false) => {}
             Err(err) if first_error.is_none() => first_error = Some(err),
@@ -365,15 +596,12 @@ pub fn native_tooltip_registry_count_for_test() -> usize {
 
 #[cfg(windows)]
 fn tooltip_bubble_size(tooltip: HWND, info: &TTTOOLINFOW) -> anyhow::Result<(i32, i32)> {
-    let packed = unsafe {
-        SendMessageW(
-            tooltip,
-            TTM_GETBUBBLESIZE,
-            None,
-            Some(LPARAM((info as *const TTTOOLINFOW) as isize)),
-        )
-    }
-    .0 as u32;
+    let packed = send_tooltip_message(
+        tooltip,
+        TTM_GETBUBBLESIZE,
+        None,
+        Some(LPARAM((info as *const TTTOOLINFOW) as isize)),
+    )? as u32;
     let size = ((packed & 0xffff) as i32, ((packed >> 16) & 0xffff) as i32);
     if size.0 <= 0 || size.1 <= 0 {
         Err(anyhow::anyhow!(
@@ -386,6 +614,15 @@ fn tooltip_bubble_size(tooltip: HWND, info: &TTTOOLINFOW) -> anyhow::Result<(i32
 
 #[cfg(windows)]
 pub fn show_window_tooltip(parent: HWND, visible: bool) -> anyhow::Result<()> {
+    request_tooltip(|reply| TooltipCommand::Show {
+        parent: parent.0 as isize,
+        visible,
+        reply,
+    })
+}
+
+#[cfg(windows)]
+fn show_window_tooltip_direct(parent: HWND, visible: bool) -> anyhow::Result<()> {
     let key = parent.0 as isize;
     let current = NATIVE_TOOLTIPS
         .lock()
@@ -430,22 +667,20 @@ pub fn show_window_tooltip(parent: HWND, visible: bool) -> anyhow::Result<()> {
         let bubble_size = tooltip_bubble_size(tooltip, &info)?;
         let (x, y) = taskbar_tooltip_anchor(bar, work_area, bubble_size);
         let packed_position = ((y as i16 as u16 as u32) << 16) | x as i16 as u16 as u32;
-        unsafe {
-            SendMessageW(
-                tooltip,
-                TTM_TRACKPOSITION,
-                None,
-                Some(LPARAM(packed_position as isize)),
-            );
-        }
-    }
-    unsafe {
-        SendMessageW(
+        send_tooltip_message(
             tooltip,
-            TTM_TRACKACTIVATE,
-            Some(windows::Win32::Foundation::WPARAM(visible as usize)),
-            Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
-        );
+            TTM_TRACKPOSITION,
+            None,
+            Some(LPARAM(packed_position as isize)),
+        )?;
+    }
+    send_tooltip_message(
+        tooltip,
+        TTM_TRACKACTIVATE,
+        Some(WPARAM(visible as usize)),
+        Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
+    )?;
+    unsafe {
         let _ = ShowWindow(tooltip, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
     }
     Ok(())
@@ -527,12 +762,14 @@ fn visible_window_coverage_with_filter(
             continue;
         }
 
-        fullscreen |= rect_covers_monitor(candidate.rect, candidate.monitor);
-        maximized_like |= rect_covers_work_area_without_covering_monitor(
-            candidate.rect,
-            candidate.monitor,
-            candidate.work_area,
-        );
+        fullscreen |=
+            !candidate.maximized && rect_covers_monitor(candidate.rect, candidate.monitor);
+        maximized_like |= candidate.maximized
+            || rect_covers_work_area_without_covering_monitor(
+                candidate.rect,
+                candidate.monitor,
+                candidate.work_area,
+            );
     }
 
     (fullscreen, maximized_like)
@@ -645,6 +882,7 @@ fn coverage_candidate_for_window(hwnd: HWND) -> Option<WindowCoverageCandidate> 
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: IsZoomed(hwnd).as_bool(),
             rect: rect_to_dock(window_rect)?,
             monitor: rect_to_dock(monitor_info.rcMonitor)?,
             work_area: rect_to_dock(monitor_info.rcWork)?,
@@ -907,6 +1145,86 @@ pub fn taskbar_monitor_key(monitor: DockRect) -> String {
     )
 }
 
+pub fn taskbar_monitor_device_key(device: &str) -> String {
+    format!("device:{}", device.trim().to_ascii_lowercase())
+}
+
+pub fn taskbar_monitor_path_key(device_path: &str) -> String {
+    format!("monitor-path:{}", device_path.trim().to_ascii_lowercase())
+}
+
+#[cfg(windows)]
+fn displayconfig_monitor_path(gdi_device: &str) -> Option<String> {
+    fn utf16(value: &[u16]) -> String {
+        let len = value
+            .iter()
+            .position(|item| *item == 0)
+            .unwrap_or(value.len());
+        String::from_utf16_lossy(&value[..len])
+    }
+
+    let mut path_count = 0u32;
+    let mut mode_count = 0u32;
+    if unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    }
+    .0 != 0
+    {
+        return None;
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    if unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    }
+    .0 != 0
+    {
+        return None;
+    }
+    paths.truncate(path_count as usize);
+
+    for path in paths {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0
+            || !utf16(&source.viewGdiDeviceName).eq_ignore_ascii_case(gdi_device)
+        {
+            continue;
+        }
+
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut target.header) } == 0 {
+            let device_path = utf16(&target.monitorDevicePath);
+            if !device_path.is_empty() {
+                return Some(device_path);
+            }
+        }
+    }
+    None
+}
+
 pub fn dock_rect_for_taskbar_target(
     target: &TaskbarTarget,
     desired_width: i32,
@@ -978,16 +1296,34 @@ fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<S
         if monitor.0.is_null() {
             return Err(anyhow::anyhow!("no monitor for Shell_TrayWnd"));
         }
-        let mut monitor_info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        let mut monitor_info = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        if !GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+        if !GetMonitorInfoW(monitor, &mut monitor_info.monitorInfo).as_bool() {
             return Err(anyhow::anyhow!("failed to read Shell_TrayWnd monitor"));
         }
 
-        let monitor = rect_to_dock(monitor_info.rcMonitor)
+        let monitor = rect_to_dock(monitor_info.monitorInfo.rcMonitor)
             .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd monitor rectangle"))?;
+        let device_len = monitor_info
+            .szDevice
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(monitor_info.szDevice.len());
+        let device = String::from_utf16_lossy(&monitor_info.szDevice[..device_len]);
+        let legacy_key = taskbar_monitor_key(monitor);
+        let device_key = if device.is_empty() {
+            legacy_key.clone()
+        } else {
+            taskbar_monitor_device_key(&device)
+        };
+        let key = displayconfig_monitor_path(&device)
+            .map(|path| taskbar_monitor_path_key(&path))
+            .unwrap_or_else(|| device_key.clone());
         Ok(ShellTaskbarWindow {
             hwnd,
             left: rect.left,
@@ -995,7 +1331,9 @@ fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<S
             right: rect.right,
             bottom: rect.bottom,
             monitor,
-            key: taskbar_monitor_key(monitor),
+            key,
+            device_key,
+            legacy_key,
             primary,
         })
     }
@@ -1041,7 +1379,12 @@ pub fn shell_taskbar_window_for_key(preferred_key: &str) -> anyhow::Result<Shell
     let taskbars = shell_taskbar_windows()?;
     taskbars
         .iter()
-        .find(|taskbar| !preferred_key.is_empty() && taskbar.key == preferred_key)
+        .find(|taskbar| {
+            !preferred_key.is_empty()
+                && (taskbar.key == preferred_key
+                    || taskbar.device_key == preferred_key
+                    || taskbar.legacy_key == preferred_key)
+        })
         .or_else(|| taskbars.iter().find(|taskbar| taskbar.primary))
         .or_else(|| taskbars.first())
         .cloned()
@@ -1217,7 +1560,35 @@ mod tooltip_tests {
     }
 
     #[test]
-    fn tooltip_registry_removal_preserves_the_owner_thread_contract() {
+    fn owned_native_window_destroys_an_unreleased_hwnd() {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let raw = hwnd.0 as isize;
+        assert!(unsafe { IsWindow(Some(hwnd)).as_bool() });
+
+        drop(OwnedNativeWindow::new(hwnd));
+
+        let destroyed = HWND(raw as *mut core::ffi::c_void);
+        assert!(!unsafe { IsWindow(Some(destroyed)).as_bool() });
+    }
+
+    #[test]
+    fn tooltip_service_preserves_owner_contract_without_blocking_the_caller() {
         let parent = 0x1234_5678isize;
         let tooltip = 0x1234_5679isize;
         let baseline = native_tooltip_registry_count_for_test();
@@ -1234,15 +1605,36 @@ mod tooltip_tests {
             );
         assert_eq!(native_tooltip_registry_count_for_test(), baseline + 1);
 
-        let error = std::thread::spawn(move || {
-            remove_window_tooltip(HWND(parent as *mut core::ffi::c_void)).unwrap_err()
-        })
-        .join()
-        .unwrap();
+        let started = std::time::Instant::now();
+        let error = remove_window_tooltip(HWND(parent as *mut core::ffi::c_void)).unwrap_err();
         assert!(error.to_string().contains("owner thread"));
+        assert!(started.elapsed() <= Duration::from_secs(1));
         assert_eq!(native_tooltip_registry_count_for_test(), baseline + 1);
 
-        assert!(remove_window_tooltip(HWND(parent as *mut core::ffi::c_void)).unwrap());
+        assert!(remove_window_tooltip_direct(HWND(parent as *mut core::ffi::c_void)).unwrap());
         assert_eq!(native_tooltip_registry_count_for_test(), baseline);
+    }
+
+    #[test]
+    fn tooltip_service_pumps_window_messages_while_idle() {
+        let raw = request_tooltip(|reply| TooltipCommand::CreateProbe { reply }).unwrap();
+        let probe = raw_hwnd(raw);
+
+        std::thread::sleep(Duration::from_millis(40));
+        let mut result = 0usize;
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                probe,
+                0,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                250,
+                Some(&mut result),
+            )
+        };
+        assert_ne!(sent.0, 0);
+        request_tooltip(|reply| TooltipCommand::DestroyProbe { hwnd: raw, reply }).unwrap();
+        assert!(!unsafe { IsWindow(Some(probe)).as_bool() });
     }
 }

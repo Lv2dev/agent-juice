@@ -3,6 +3,9 @@ use chrono::{DateTime, Duration, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -18,6 +21,8 @@ const CHECK_INTERVAL_HOURS: i64 = 24;
 const HTTP_TIMEOUT_SECS: &str = "5";
 
 static UPDATE_STATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static PENDING_NOTIFICATIONS: Lazy<Mutex<HashSet<(PathBuf, String)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -42,6 +47,36 @@ pub struct UpdateCheckResult {
     pub checked_at: Option<String>,
     pub checked_now: bool,
     pub error: Option<String>,
+}
+
+pub struct PreparedNotification {
+    path: PathBuf,
+    version: String,
+    pending: bool,
+}
+
+impl PreparedNotification {
+    pub fn commit(mut self) -> anyhow::Result<bool> {
+        let result = commit_notification_at(&self.path, &self.version);
+        self.release_pending();
+        result
+    }
+
+    fn release_pending(&mut self) {
+        if self.pending {
+            PENDING_NOTIFICATIONS
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&(self.path.clone(), self.version.clone()));
+            self.pending = false;
+        }
+    }
+}
+
+impl Drop for PreparedNotification {
+    fn drop(&mut self) {
+        self.release_pending();
+    }
 }
 
 #[derive(Deserialize)]
@@ -156,23 +191,58 @@ where
     Ok(result_from_state(current_version, &state, true))
 }
 
-pub fn claim_notification(version: &str) -> anyhow::Result<bool> {
+pub fn prepare_notification(version: &str) -> anyhow::Result<Option<PreparedNotification>> {
     let path = state_path().ok_or_else(|| anyhow::anyhow!("no update state path"))?;
-    claim_notification_at(&path, version)
+    prepare_notification_at(&path, version)
 }
 
-pub fn claim_notification_at(path: &Path, version: &str) -> anyhow::Result<bool> {
+pub fn prepare_notification_at(
+    path: &Path,
+    version: &str,
+) -> anyhow::Result<Option<PreparedNotification>> {
+    parse_version(version).ok_or_else(|| anyhow::anyhow!("invalid notification version"))?;
+    let _guard = UPDATE_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let state = load_state_from(path);
+    if !notification_is_newer(state.last_notified_version.as_deref(), version) {
+        return Ok(None);
+    }
+
+    let key = (path.to_path_buf(), version.to_string());
+    if !PENDING_NOTIFICATIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(key)
+    {
+        return Ok(None);
+    }
+    Ok(Some(PreparedNotification {
+        path: path.to_path_buf(),
+        version: version.to_string(),
+        pending: true,
+    }))
+}
+
+fn commit_notification_at(path: &Path, version: &str) -> anyhow::Result<bool> {
     parse_version(version).ok_or_else(|| anyhow::anyhow!("invalid notification version"))?;
     let _guard = UPDATE_STATE_LOCK
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let mut state = load_state_from(path);
-    if state.last_notified_version.as_deref() == Some(version) {
+    if !notification_is_newer(state.last_notified_version.as_deref(), version) {
         return Ok(false);
     }
     state.last_notified_version = Some(version.to_string());
     save_state_to(path, &state)?;
     Ok(true)
+}
+
+fn notification_is_newer(last_notified: Option<&str>, candidate: &str) -> bool {
+    let Some(last_notified) = last_notified.and_then(parse_version) else {
+        return true;
+    };
+    parse_version(candidate).is_some_and(|candidate| candidate > last_notified)
 }
 
 fn check_is_due(state: &UpdateState, now: DateTime<Utc>) -> bool {
@@ -263,6 +333,12 @@ fn fetch_latest_release() -> anyhow::Result<String> {
         concat!("Juice/", env!("CARGO_PKG_VERSION")),
         GITHUB_LATEST_API,
     ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x08000000);
+    }
     collector::command_output_with_input(
         command,
         None,
@@ -308,7 +384,19 @@ fn save_state_to_with(
     }
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), sequence));
-    std::fs::write(&temp, serde_json::to_vec_pretty(state)?)?;
+    let contents = serde_json::to_vec_pretty(state)?;
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&contents)?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
     match replace(path, &temp) {
         Ok(()) => Ok(()),
         Err(error) => {

@@ -32,8 +32,9 @@ Juice는 현재 PC에 로그인된 Claude Code와 Codex CLI의 **5시간 한도�
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
 | 로컬 우선 수집 | 현재 PC의 Claude Code 로그인/statusline과 Codex app-server/rollout만 사용합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
-| 도구별 색상 | Claude와 Codex의 5h·주간 정상색을 각각 지정하고, 경고·위험 의미색은 그대로 유지합니다. |
+| 도구별 색상 | Claude와 Codex의 5h·주간 기본색과 경고·위험색을 지정하고, 단계별 색상 변경을 각각 켜거나 끕니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
+| 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
 | 도구별 독립 바 | Claude와 Codex를 각각 표시하거나 숨기고, 원하는 위치와 모니터로 따로 이동할 수 있습니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
 | 업데이트 알림 | 하루 한 번 최신 정식 릴리즈를 확인하고 자동 설치 없이 알림과 릴리즈 링크만 제공합니다. |
@@ -53,6 +54,12 @@ Juice는 두 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
   <img src="docs/assets/juice-v014-taskbar-modes.png" alt="Juice 작업표시줄 4가지 바 모드" width="760">
 </p>
 
+<p align="center">
+  <img src="docs/assets/juice-v014-taskbar-bars.png" alt="Juice 작업표시줄 가로 바 4가지 모드" width="760">
+</p>
+
+<p align="center"><sub>같은 4개 모드를 원 대신 위아래 두 줄의 가로 바로 표시합니다. 이중원과 링4는 가로 바를 선택하면 같은 2줄 압축 표시를 사용합니다.</sub></p>
+
 Juice에는 **4가지 바 모드**가 있습니다.
 
 | 모드 | 구성 |
@@ -65,6 +72,9 @@ Juice에는 **4가지 바 모드**가 있습니다.
 - 원 대신 위아래 두 줄의 가로 바로 바꿀 수 있습니다.
 - 5h/주간 표시 순서, 링 숫자, 숫자 윤곽, 링 크기·두께·간격과 실제 중앙 공간 지름을 0.1px 단위로 조절할 수 있습니다.
 - Claude와 Codex 바는 서로 다른 투명 창입니다. 각각 직접 드래그하며 모니터별 위치가 저장됩니다.
+- 최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다.
+- 숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다.
+- 바에 마우스를 올리면 도구명과 사용 가능한 5h·주간 한도의 초기화까지 남은 시간을 보여줍니다.
 - 바 우클릭 메뉴의 `새로고침`은 일반 캐시를 우회해 로컬 수집을 다시 실행합니다.
 - 트레이 메뉴에서 전체 바 표출을 일시중지하거나 재개할 수 있습니다.
 
@@ -85,6 +95,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 </p>
 
 원과 위아래 가로 바는 같은 표현 스타일을 공유합니다.
+미사용 영역도 하나의 배경 설정을 공유합니다. 기본은 기존 가로 바와 같은 테마 적응색·농도 11%이며, `테마 색상 사용`을 끄면 배경색과 0~100% 농도를 직접 지정할 수 있습니다.
 
 | 스타일 | 표현 |
 | --- | --- |
@@ -103,33 +114,27 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 </p>
 
 - 기본 테마는 Windows 시스템 설정을 따르며 라이트와 다크를 직접 고정할 수 있습니다.
-- 9개 팔레트 중 `도구별`을 선택하면 Claude 5h, Claude 주간, Codex 5h, Codex 주간의 정상색을 각각 지정할 수 있습니다.
-- 색상은 즉시 저장되고 모든 바 모드에 함께 적용됩니다. 경고·위험 구간은 현재 팔레트의 의미색을 유지해 상태 인지가 흐려지지 않습니다.
+- 9개 팔레트 중 `도구별`을 선택하면 Claude 5h, Claude 주간, Codex 5h, Codex 주간의 기본색을 각각 지정할 수 있습니다.
+- 공통 경고색과 위험색도 직접 지정하며, `경고 시 색상 변경`과 `위험 시 색상 변경`을 서로 독립적으로 켜거나 끌 수 있습니다.
+- 위험 색상 변경만 끄면 위험 구간에서도 경고색을 유지하고, 두 변경을 모두 끄면 모든 구간에서 도구별 기본색을 유지합니다. 색상과 토글은 즉시 저장되어 모든 원·바 모드에 적용됩니다.
 
 ### 설정 구성
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="Juice 작업표시줄과 원 바 설정" width="620">
+  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="Juice 5탭 설정의 표시줄 탭" width="620">
 </p>
 
-설정창은 실제 앱과 같은 순서로 구성됩니다.
+설정 카드는 기능별 5개 탭으로 나뉘며 업데이트와 정보는 별도 카드로 분리됩니다.
 
-| 섹션 | 설정할 수 있는 항목 |
+| 탭·카드 | 설정할 수 있는 항목 |
 | --- | --- |
-| 외형 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, 9개 팔레트와 도구별 4색 지정 |
-| 표시·수집 | 잔여량/사용량 기준, 같은 기준의 경고·위험 임계값, 수집주기, 오래됨 표시 기준, Claude 계정 자동 수집 |
-| 작업표시줄 | 4개 바 모드, 한도 순서, 원/바 표시, 전체화면·최대화 숨김, 도구별 표시 |
-| 원·바 세부 | 링, 숫자, 윤곽과 고급 크기·두께·간격·폰트 조절 |
-| 시스템 | Windows 자동시작과 Claude statusline 원본 복원 |
-| 업데이트 | 업데이트 자동 확인, 수동 확인, 릴리즈 페이지, 최근 확인 결과 |
-| 정보 | 프로그램 설명, 현재 버전, 로컬 처리 원칙 |
-
-<details>
-  <summary>전체 설정 구성 보기</summary>
-  <p align="center">
-    <img src="docs/assets/juice-v014-panel-settings-full.png" alt="Juice 전체 설정 구성" width="620">
-  </p>
-</details>
+| 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
+| 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, Claude statusline 원본 복원 |
+| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 전체화면·최대화 숨김, 도구별 표시 |
+| 색상 | 9개 팔레트, 도구·한도별 기본 4색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
+| 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
+| 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 릴리즈 페이지, 최근 확인 결과 |
+| 정보 카드 | 프로그램 설명, 현재 버전, 로컬 처리 원칙 |
 
 ### 업데이트 확인과 알림
 
@@ -145,7 +150,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 
 ### 정보와 로컬 처리 원칙
 
-`정보`는 현재 버전과 프로그램 역할, 로컬 처리 원칙만 보여줍니다. 업데이트 동작과 상태는 별도의 `업데이트` 섹션에 모아 서로 섞이지 않습니다.
+`정보` 카드는 현재 버전과 프로그램 역할, 로컬 처리 원칙만 보여줍니다. 업데이트 동작과 상태는 별도의 `업데이트` 카드에 모아 서로 섞이지 않습니다.
 
 ### Claude 계정 사용량 자동 수집
 
@@ -153,7 +158,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
   <img src="docs/assets/juice-v014-panel-collection.png" alt="Juice Claude 계정 사용량 자동 수집 설정" width="620">
 </p>
 
-**Claude 계정 사용량 자동 수집**은 일반 `표시·수집` 기능이며 기본값은 **켜짐**입니다.
+**Claude 계정 사용량 자동 수집**은 `수집` 탭의 일반 기능이며 기본값은 **켜짐**입니다.
 
 - 옵션을 켜면 Claude Code가 관리하는 로컬 로그인을 사용해 계정의 5시간·주간 usage를 직접 조회합니다. Claude 채팅이나 모델 턴은 전송하지 않습니다.
 - OAuth 토큰은 Claude Code 자격 증명 파일에서 호출 시점에만 읽고, 프로세스 인자나 로그에 기록하지 않습니다.
@@ -175,8 +180,8 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 - **테마:** 기본값은 시스템 테마이며 라이트와 다크를 직접 선택할 수 있습니다.
 - **언어:** 시스템 언어를 따르거나 한국어/영어를 고정할 수 있습니다.
 - **폰트:** Windows 작업표시줄과 맞춘 시스템 폰트가 기본이며 Pretendard를 선택할 수 있습니다.
-- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 네 정상색을 따로 지정하고, 단색은 정상 상태를 한 색으로 통일하며 두 모드 모두 경고·위험 의미색은 유지합니다.
-- **전체화면 숨김:** 같은 모니터의 전체화면 앱을 감지하면 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
+- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 네 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
+- **전체화면 숨김:** 신규 설치 기본값은 꺼짐입니다. 켜면 같은 모니터의 전체화면 앱을 감지할 때 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
 - **다중 모니터:** 각 바를 원하는 모니터 작업표시줄로 직접 끌어 놓으면 모니터와 상대 위치를 기억합니다.
 - **오래됨 표시:** 마지막 기록이 설정한 시간보다 오래되면 값이 오래된 상태임을 표시합니다.
 - **업데이트:** 최신 정식 릴리즈를 하루 한 번 확인하며 자동 다운로드나 자동 설치는 하지 않습니다.
@@ -222,8 +227,9 @@ Juice reads the **5-hour and weekly limits** from Claude Code and the Codex CLI 
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
 | Local-first collection | Uses the local Claude Code login/statusline and Codex app-server/rollout data. |
 | Live settings | Changes are saved and applied without a Save button. |
-| Per-tool colors | Assign separate normal colors to Claude and Codex 5-hour/weekly values while preserving warning and danger semantics. |
+| Per-tool colors | Assign separate base colors to Claude and Codex 5-hour/weekly values, customize warning and danger colors, and toggle each threshold recolor independently. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
+| Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
 | Independent tool bars | Claude and Codex can be shown, hidden, moved, and assigned to monitors separately. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
 | Update notices | Checks the latest stable release once a day and offers notifications and a release link without automatic installation. |
@@ -243,6 +249,12 @@ Juice reuses each tool's existing local login and never asks you to enter accoun
   <img src="docs/assets/juice-v014-taskbar-modes.png" alt="Four Juice taskbar display modes" width="760">
 </p>
 
+<p align="center">
+  <img src="docs/assets/juice-v014-taskbar-bars.png" alt="Four Juice taskbar modes using horizontal bar indicators" width="760">
+</p>
+
+<p align="center"><sub>The same four modes use two stacked horizontal bars instead of rings. Dual ring and Four rings use the same compact two-line indicator when bars are selected.</sub></p>
+
 Juice provides **four bar modes**.
 
 | Mode | Layout |
@@ -255,6 +267,9 @@ Juice provides **four bar modes**.
 - Switch from rings to two stacked horizontal bars.
 - Adjust limit order, numbers, number outline, ring size, thickness, spacing, and the real center opening in 0.1px steps.
 - Claude and Codex use separate transparent windows, so each can be dragged independently and remembered per monitor.
+- On first launch, visible bars are placed from the left edge of the taskbar without overlapping.
+- Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars.
+- Hovering a bar shows the tool name and time remaining until each available 5-hour or weekly limit resets.
 - The taskbar context menu `Refresh` action bypasses the normal cache and recollects local status.
 - Pause or resume all taskbar bars from the Juice tray menu.
 
@@ -275,6 +290,7 @@ Claude and Codex are separate transparent windows, so either bar can be dragged 
 </p>
 
 Rings and stacked horizontal bars share one visual style.
+Their unused areas also share one background setting. It defaults to the previous horizontal-bar appearance with a theme-adaptive color at 11% opacity. Turn off `Use theme color` to choose a custom background color and 0–100% opacity.
 
 | Style | Appearance |
 | --- | --- |
@@ -293,31 +309,27 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 </p>
 
 - The default theme follows Windows, with explicit light and dark overrides.
-- With the `Per tool` palette, Claude 5-hour, Claude weekly, Codex 5-hour, and Codex weekly normal colors can be assigned independently.
-- Colors save immediately and apply to every taskbar mode. Warning and danger ranges retain the palette's semantic colors so state changes remain recognizable.
+- With the `Per tool` palette, Claude 5-hour, Claude weekly, Codex 5-hour, and Codex weekly base colors can be assigned independently.
+- Shared warning and danger colors are customizable, and `Recolor on warning` and `Recolor on danger` can be toggled independently.
+- Disabling only danger recoloring keeps the warning color in the danger range; disabling both keeps each per-tool base color throughout. Colors and toggles save immediately and apply to every ring and bar mode.
 
 ### Settings layout
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="Juice taskbar and indicator settings" width="620">
+  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="The Taskbar tab in Juice's five-tab settings" width="620">
 </p>
 
-| Section | Controls |
-| --- | --- |
-| Appearance | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, nine palettes, and four per-tool colors |
-| Display & collection | Remaining/usage basis, matching warning/danger thresholds, collection interval, stale threshold, Claude account collection |
-| Taskbar | Four modes, limit order, ring/bar display, fullscreen/maximized hiding, visible tools |
-| Ring & bar details | Ring, numbers, outline, plus advanced size, thickness, spacing, and font controls |
-| System | Windows autostart and restoration of the original Claude statusline command |
-| Updates | Automatic and manual checks, Releases page, and the latest check result |
-| About | Product description, current version, and local-processing policy |
+The settings card is split into five task-focused tabs. Updates and About remain separate cards.
 
-<details>
-  <summary>View the complete settings layout</summary>
-  <p align="center">
-    <img src="docs/assets/juice-v014-panel-settings-full.png" alt="Complete Juice settings layout" width="620">
-  </p>
-</details>
+| Tab or card | Controls |
+| --- | --- |
+| General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
+| Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, Claude statusline restore |
+| Taskbar | Four modes, limit order, ring/horizontal-bar display, fullscreen/maximized hiding, visible tools |
+| Colors | Nine palettes, four tool/limit base colors, warning/danger colors and toggles, name/info/ring-number text colors |
+| Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
+| Updates card | Automatic and manual checks, Releases page, and the latest check result |
+| About card | Product description, current version, and local-processing policy |
 
 ### Update checks and notifications
 
@@ -333,7 +345,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 
 ### About and local processing
 
-`About` contains only the current version, product purpose, and local-processing policy. Update behavior and status live in the separate `Updates` section.
+The `About` card contains only the current version, product purpose, and local-processing policy. Update behavior and status live in the separate `Updates` card.
 
 ### Automatic Claude account usage collection
 
@@ -341,7 +353,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
   <img src="docs/assets/juice-v014-panel-collection.png" alt="Juice Claude account usage collection setting" width="620">
 </p>
 
-**Claude account usage auto-collection** is a regular Display & collection option and is **on by default**.
+**Claude account usage auto-collection** is a regular option in the `Collection` tab and is **on by default**.
 
 - When enabled, Juice uses the local Claude Code login to read the account 5-hour and weekly usage directly. It sends no Claude chat or model turn.
 - OAuth tokens are read only at request time from Claude Code credentials and are never placed in process arguments or logs.
@@ -363,8 +375,8 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 - **Theme:** Follows the system by default, with explicit light and dark choices.
 - **Language:** Follows the system or locks the UI to Korean or English.
 - **Font:** Uses the Windows taskbar-style system font by default, with Pretendard available.
-- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes four independent normal colors; Monochrome unifies normal values. Both preserve warning and danger semantics.
-- **Fullscreen hiding:** Hides each bar when a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
+- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes four base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
+- **Fullscreen hiding:** Off by default on a new installation. When enabled, it hides each bar while a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
 - **Multiple monitors:** Drag each bar onto a monitor's taskbar to remember that monitor and relative position.
 - **Stale state:** Marks data as old after the configured time since the last record.
 - **Updates:** Checks the latest stable release once a day without automatic download or installation.

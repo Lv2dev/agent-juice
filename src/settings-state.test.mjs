@@ -22,6 +22,9 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       maximized_hide_on: true,
       indicator_style: "bar",
       indicator_effect_style: "glow",
+      indicator_track_color_auto: false,
+      indicator_track_color: [0x12, 0x34, 0x56],
+      indicator_track_opacity_percent: 37.5,
       ring_on: false,
       ring_numbers_on: false,
       ring_number_outline_on: true,
@@ -51,6 +54,20 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
         claude_secondary: [0x40, 0x50, 0x60],
         codex_primary: [0x70, 0x80, 0x90],
         codex_secondary: [0xa0, 0xb0, 0xc0],
+        warning: [0xb0, 0xc0, 0xd0],
+        danger: [0xd0, 0xc0, 0xb0],
+        warning_on: false,
+        danger_on: true,
+      },
+      taskbar_text_colors: {
+        claude: [0x11, 0x22, 0x44],
+        claude_on: true,
+        codex: [0x33, 0x55, 0x77],
+        codex_on: false,
+        info: [0x44, 0x66, 0x88],
+        info_on: true,
+        ring: [0x55, 0x77, 0x99],
+        ring_on: true,
       },
     }),
     {
@@ -67,6 +84,9 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       maximizedHideOn: true,
       indicatorStyle: "bar",
       indicatorEffectStyle: "glow",
+      indicatorTrackColorAuto: false,
+      indicatorTrackColor: "#123456",
+      indicatorTrackOpacityPercent: 37.5,
       ringOn: false,
       ringNumbersOn: false,
       ringNumberOutlineOn: true,
@@ -98,6 +118,18 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       claudeSecondaryColor: "#405060",
       codexPrimaryColor: "#708090",
       codexSecondaryColor: "#a0b0c0",
+      toolWarningColor: "#b0c0d0",
+      toolDangerColor: "#d0c0b0",
+      toolWarningColorOn: false,
+      toolDangerColorOn: true,
+      claudeTextColor: "#112244",
+      claudeTextColorOn: true,
+      codexTextColor: "#335577",
+      codexTextColorOn: false,
+      infoTextColor: "#446688",
+      infoTextColorOn: true,
+      ringTextColor: "#557799",
+      ringTextColorOn: true,
     },
   );
 
@@ -130,6 +162,9 @@ test("payloadFromEntries creates save_settings input payload", () => {
     maximized_hide_on: "on",
     indicator_style: "bar",
     indicator_effect_style: "depth",
+    indicator_track_color_auto: "on",
+    indicator_track_color: "#123456",
+    indicator_track_opacity_percent: "37.5",
     ring_on: "on",
     ring_numbers_on: "on",
     ring_number_outline_on: "on",
@@ -161,6 +196,16 @@ test("payloadFromEntries creates save_settings input payload", () => {
     claude_secondary_color: "#405060",
     codex_primary_color: "#708090",
     codex_secondary_color: "#a0b0c0",
+    tool_warning_color: "#b0c0d0",
+    tool_danger_color: "#d0c0b0",
+    tool_warning_color_on: "on",
+    claude_text_color: "#112244",
+    claude_text_color_on: "on",
+    codex_text_color: "#335577",
+    info_text_color: "#446688",
+    info_text_color_on: "on",
+    ring_text_color: "#557799",
+    ring_text_color_on: "on",
   });
 
   assert.deepEqual(payload, {
@@ -177,6 +222,9 @@ test("payloadFromEntries creates save_settings input payload", () => {
     maximized_hide_on: true,
     indicator_style: "bar",
     indicator_effect_style: "depth",
+    indicator_track_color_auto: true,
+    indicator_track_color: "#123456",
+    indicator_track_opacity_percent: 37.5,
     ring_on: true,
     ring_numbers_on: true,
     ring_number_outline_on: true,
@@ -208,6 +256,18 @@ test("payloadFromEntries creates save_settings input payload", () => {
     claude_secondary_color: "#405060",
     codex_primary_color: "#708090",
     codex_secondary_color: "#a0b0c0",
+    tool_warning_color: "#b0c0d0",
+    tool_danger_color: "#d0c0b0",
+    tool_warning_color_on: true,
+    tool_danger_color_on: false,
+    claude_text_color: "#112244",
+    claude_text_color_on: true,
+    codex_text_color: "#335577",
+    codex_text_color_on: false,
+    info_text_color: "#446688",
+    info_text_color_on: true,
+    ring_text_color: "#557799",
+    ring_text_color_on: true,
   });
 });
 
@@ -222,7 +282,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ language: "en" }).language, "en");
   assert.equal(formStateFromSettings({ language: "unexpected" }).language, "system");
   assert.equal(formStateFromSettings({}).fontMode, "system");
-  assert.equal(formStateFromSettings({}).fullscreenHideOn, true);
+  assert.equal(formStateFromSettings({}).fullscreenHideOn, false);
   assert.equal(formStateFromSettings({}).fullResetTimeOn, true);
   assert.equal(
     formStateFromSettings({ full_reset_time_on: false }).fullResetTimeOn,
@@ -231,6 +291,9 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).maximizedHideOn, false);
   assert.equal(formStateFromSettings({}).indicatorStyle, "ring");
   assert.equal(formStateFromSettings({}).indicatorEffectStyle, "flat");
+  assert.equal(formStateFromSettings({}).indicatorTrackColorAuto, true);
+  assert.equal(formStateFromSettings({}).indicatorTrackColor, "#6b7280");
+  assert.equal(formStateFromSettings({}).indicatorTrackOpacityPercent, 11);
   assert.equal(formStateFromSettings({ indicator_effect_style: "breathe" }).indicatorEffectStyle, "breathe");
   assert.equal(formStateFromSettings({ indicator_effect_style: "unexpected" }).indicatorEffectStyle, "flat");
   assert.equal(formStateFromSettings({}).limitOrder, "primary_first");
@@ -262,6 +325,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ bar_text_font_weight: 999 }).barTextFontWeight, 900);
   assert.equal(formStateFromSettings({ bar_content_gap_px: 99 }).barContentGapPx, 24);
   assert.equal(formStateFromSettings({ bar_content_gap_px: -1 }).barContentGapPx, 0);
+  assert.equal(formStateFromSettings({}).claudeTaskbarOffsetRatio, 0);
+  assert.equal(formStateFromSettings({}).codexTaskbarOffsetRatio, 0);
   assert.equal(formStateFromSettings({ taskbar_offset_ratio: 0.2 }).claudeTaskbarOffsetRatio, 0.2);
   assert.equal(formStateFromSettings({ taskbar_offset_ratio: 0.2 }).codexTaskbarOffsetRatio, 0.2);
   assert.equal(formStateFromSettings({ claude_taskbar_offset_ratio: 2 }).claudeTaskbarOffsetRatio, 1);
@@ -274,6 +339,18 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#d36b86");
   assert.equal(formStateFromSettings({}).codexPrimaryColor, "#2fac7d");
   assert.equal(formStateFromSettings({}).codexSecondaryColor, "#4d86d6");
+  assert.equal(formStateFromSettings({}).toolWarningColor, "#f59e0b");
+  assert.equal(formStateFromSettings({}).toolDangerColor, "#ef4444");
+  assert.equal(formStateFromSettings({}).toolWarningColorOn, true);
+  assert.equal(formStateFromSettings({}).toolDangerColorOn, true);
+  assert.equal(formStateFromSettings({}).claudeTextColor, "#d79a32");
+  assert.equal(formStateFromSettings({}).claudeTextColorOn, false);
+  assert.equal(formStateFromSettings({}).codexTextColor, "#2fac7d");
+  assert.equal(formStateFromSettings({}).codexTextColorOn, false);
+  assert.equal(formStateFromSettings({}).infoTextColor, "#6b7280");
+  assert.equal(formStateFromSettings({}).infoTextColorOn, false);
+  assert.equal(formStateFromSettings({}).ringTextColor, "#6b7280");
+  assert.equal(formStateFromSettings({}).ringTextColorOn, false);
   assert.equal(formStateFromSettings({ update_check_on: false }).updateCheckOn, false);
   assert.equal(
     formStateFromSettings({ claude_usage_auto_refresh_lab_on: false }).claudeAccountAutoCollectOn,
@@ -289,6 +366,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     font_mode: "unexpected",
     indicator_style: "unexpected",
     indicator_effect_style: "unexpected",
+    indicator_track_opacity_percent: "999",
     limit_order: "unexpected",
     ring_size_px: "99",
     ring_thickness_px: "99",
@@ -315,6 +393,9 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.maximized_hide_on, false);
   assert.equal(payload.indicator_style, "ring");
   assert.equal(payload.indicator_effect_style, "flat");
+  assert.equal(payload.indicator_track_color_auto, false);
+  assert.equal(payload.indicator_track_color, "#6b7280");
+  assert.equal(payload.indicator_track_opacity_percent, 100);
   assert.equal(payload.limit_order, "primary_first");
   assert.equal(payload.ring_numbers_on, false);
   assert.equal(payload.ring_number_outline_on, false);

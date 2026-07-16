@@ -11,11 +11,11 @@ const taskbarSource = readFileSync(
   "utf8",
 ).replace(/\r\n?/g, "\n");
 
-test("Windows taskbar bars are hidden with native ShowWindow", () => {
+test("Windows taskbar bars are hidden with non-blocking native ShowWindowAsync", () => {
   const hideFn = libSource.match(/fn hide_taskbar_bar[\s\S]*?\n}\n\n#\[cfg\(windows\)\]/)?.[0] ?? "";
 
   assert.match(taskbarSource, /pub fn hide_window\(/);
-  assert.match(taskbarSource, /ShowWindow/);
+  assert.match(taskbarSource, /ShowWindowAsync\(hwnd, SW_HIDE\)/);
   assert.match(taskbarSource, /SW_HIDE/);
   assert.match(hideFn, /taskbar::hide_window/);
 });

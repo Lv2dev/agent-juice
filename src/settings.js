@@ -11,6 +11,8 @@ const toastText = document.querySelector("[data-settings-toast-text]");
 const customRow = document.querySelector("[data-custom-palette]");
 const monoRow = document.querySelector("[data-mono-palette]");
 const toolColorRow = document.querySelector("[data-tool-palette]");
+const indicatorTrackCustomColorRow = document.querySelector("[data-indicator-track-custom-color]");
+const taskbarTextColorRows = document.querySelectorAll?.("[data-taskbar-text-color]") ?? [];
 const fullResetRow = document.querySelector("[data-full-reset-toggle]");
 const palettePicker = document.querySelector("[data-palette-picker]");
 const effectPicker = document.querySelector("[data-effect-picker]");
@@ -18,6 +20,8 @@ const updateBand = document.querySelector("#update-band");
 const updateVersionEl = document.querySelector("[data-update-version]");
 const updateStatusEl = document.querySelector("#update-check-status");
 const appVersionEls = document.querySelectorAll?.("[data-app-version]") ?? [];
+const settingsTabs = [...(document.querySelectorAll?.("[data-settings-tab]") ?? [])];
+const settingsTabPanels = [...(document.querySelectorAll?.("[data-settings-tab-panel]") ?? [])];
 let autosaveTimer = null;
 let isHydrating = false;
 let hasLoadedSettings = false;
@@ -31,6 +35,10 @@ let toastHideTimer = null;
 let settingsEventGeneration = 0;
 let quitListenerReady = false;
 let quitFlushPromise = null;
+let quitAttemptGeneration = 0;
+let listenerLifecycleGeneration = 0;
+let listenersDisposed = false;
+const activeUnlisteners = new Set();
 const SETTINGS_LOAD_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
@@ -68,6 +76,10 @@ function setSettingsFormEnabled(enabled) {
   form.setAttribute?.("aria-busy", String(!enabled));
   for (const control of form.querySelectorAll?.("input, select, button") ?? []) {
     control.disabled = !enabled;
+  }
+  if (enabled) {
+    updateIndicatorTrackColorAvailability();
+    updateTaskbarTextColorAvailability();
   }
 }
 
@@ -196,6 +208,51 @@ function syncRangeNumberEditors() {
   }
 }
 
+function updateIndicatorTrackColorAvailability() {
+  const autoColor = form?.elements.namedItem("indicator_track_color_auto");
+  const customColor = form?.elements.namedItem("indicator_track_color");
+  if (!customColor) return;
+  const unavailable = autoColor?.checked !== false;
+  customColor.setAttribute?.("aria-disabled", String(unavailable));
+  customColor.ariaDisabled = String(unavailable);
+  customColor.inert = unavailable;
+  customColor.tabIndex = unavailable ? -1 : 0;
+  if (indicatorTrackCustomColorRow?.dataset) {
+    indicatorTrackCustomColorRow.dataset.disabled = String(unavailable);
+  }
+}
+
+function updateTaskbarTextColorAvailability() {
+  for (const row of taskbarTextColorRows) {
+    const key = row.dataset?.taskbarTextColor;
+    if (!key) continue;
+    const enabled = form?.elements.namedItem(`${key}_text_color_on`)?.checked === true;
+    const color = form?.elements.namedItem(`${key}_text_color`);
+    if (!color) continue;
+    color.setAttribute?.("aria-disabled", String(!enabled));
+    color.ariaDisabled = String(!enabled);
+    color.inert = !enabled;
+    color.tabIndex = enabled ? 0 : -1;
+    if (row.dataset) row.dataset.disabled = String(!enabled);
+  }
+}
+
+function selectSettingsTab(value, focus = false) {
+  const selected = settingsTabs.find((tab) => tab.dataset?.settingsTab === value);
+  if (!selected) return;
+
+  for (const tab of settingsTabs) {
+    const active = tab === selected;
+    tab.setAttribute?.("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  }
+  for (const panel of settingsTabPanels) {
+    panel.hidden = panel.dataset?.settingsTabPanel !== value;
+  }
+  if (form?.dataset) form.dataset.settingsTab = value;
+  if (focus) selected.focus?.();
+}
+
 function updateOutputs() {
   if (!form) return;
   const pairs = [
@@ -203,6 +260,7 @@ function updateOutputs() {
     ["danger_threshold", "danger-output"],
     ["poll_interval_secs", "poll-output"],
     ["stale_after_secs", "stale-output"],
+    ["indicator_track_opacity_percent", "indicator-track-opacity-output"],
     ["ring_number_outline_width_px", "ring-number-outline-width-output"],
     ["ring_size_px", "ring-size-output"],
     ["ring_thickness_px", "ring-thickness-output"],
@@ -222,6 +280,8 @@ function updateOutputs() {
     updateRangeProgress(field);
   }
   syncRangeNumberEditors();
+  updateIndicatorTrackColorAvailability();
+  updateTaskbarTextColorAvailability();
 
   const palette = form.elements.namedItem("palette")?.value ?? "traffic";
   if (customRow) customRow.hidden = palette !== "custom";
@@ -296,6 +356,9 @@ function fillForm(settings) {
   setField("maximized_hide_on", state.maximizedHideOn);
   setField("indicator_style", state.indicatorStyle);
   setField("indicator_effect_style", state.indicatorEffectStyle);
+  setField("indicator_track_color_auto", state.indicatorTrackColorAuto);
+  setField("indicator_track_color", state.indicatorTrackColor);
+  setField("indicator_track_opacity_percent", state.indicatorTrackOpacityPercent);
   setField("ring_on", state.ringOn);
   setField("ring_numbers_on", state.ringNumbersOn);
   setField("ring_number_outline_on", state.ringNumberOutlineOn);
@@ -327,6 +390,18 @@ function fillForm(settings) {
   setField("claude_secondary_color", state.claudeSecondaryColor);
   setField("codex_primary_color", state.codexPrimaryColor);
   setField("codex_secondary_color", state.codexSecondaryColor);
+  setField("tool_warning_color", state.toolWarningColor);
+  setField("tool_danger_color", state.toolDangerColor);
+  setField("tool_warning_color_on", state.toolWarningColorOn);
+  setField("tool_danger_color_on", state.toolDangerColorOn);
+  setField("claude_text_color", state.claudeTextColor);
+  setField("claude_text_color_on", state.claudeTextColorOn);
+  setField("codex_text_color", state.codexTextColor);
+  setField("codex_text_color_on", state.codexTextColorOn);
+  setField("info_text_color", state.infoTextColor);
+  setField("info_text_color_on", state.infoTextColorOn);
+  setField("ring_text_color", state.ringTextColor);
+  setField("ring_text_color_on", state.ringTextColorOn);
   applyTheme({ theme: state.theme });
   applyFont({ font_mode: state.fontMode });
   applyTranslations({ language: state.language });
@@ -428,11 +503,19 @@ function enqueueLatestSettingsSave() {
 
 async function flushSettingsAndQuit() {
   if (quitFlushPromise) return quitFlushPromise;
-  quitFlushPromise = (async () => {
+  const generation = ++quitAttemptGeneration;
+  const attempt = (async () => {
     await enqueueLatestSettingsSave();
     await invoke("complete_app_quit");
   })();
-  return quitFlushPromise;
+  quitFlushPromise = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (quitAttemptGeneration === generation && quitFlushPromise === attempt) {
+      quitFlushPromise = null;
+    }
+  }
 }
 
 function scheduleAutosave() {
@@ -488,6 +571,65 @@ async function runAction(action) {
   }
 }
 
+function unlistenSafely(unlisten) {
+  if (typeof unlisten !== "function") return;
+  try {
+    Promise.resolve(unlisten()).catch(() => {});
+  } catch {
+    // Listener teardown is best-effort while the WebView is closing.
+  }
+}
+
+function cleanupListeners() {
+  if (listenersDisposed) return;
+  listenersDisposed = true;
+  listenerLifecycleGeneration += 1;
+  quitListenerReady = false;
+  const unlisteners = [...activeUnlisteners];
+  activeUnlisteners.clear();
+  for (const unlisten of unlisteners) unlistenSafely(unlisten);
+}
+
+function registerListenerAttempt(listen, eventName, handler) {
+  const lifecycleGeneration = listenerLifecycleGeneration;
+  let timedOut = false;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`${eventName} listener registration timed out`));
+    }, LISTENER_REGISTRATION_TIMEOUT_MS);
+
+    let registration;
+    try {
+      registration = listen(eventName, handler);
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+
+    Promise.resolve(registration).then(
+      (unlisten) => {
+        clearTimeout(timer);
+        if (
+          timedOut ||
+          listenersDisposed ||
+          lifecycleGeneration !== listenerLifecycleGeneration
+        ) {
+          unlistenSafely(unlisten);
+          if (!timedOut) reject(new Error(`${eventName} listener lifecycle ended`));
+          return;
+        }
+        resolve(unlisten);
+      },
+      (error) => {
+        clearTimeout(timer);
+        if (!timedOut) reject(error);
+      },
+    );
+  });
+}
+
 async function bindSettingsUpdates() {
   const listen = tauriApi().event?.listen;
   if (!listen) return;
@@ -495,23 +637,10 @@ async function bindSettingsUpdates() {
   const register = async (eventName, handler, critical = false) => {
     for (const delay of LISTENER_RETRY_DELAYS_MS) {
       if (delay) await wait(delay);
+      if (listenersDisposed) return;
       try {
-        await new Promise((resolve, reject) => {
-          const timer = setTimeout(
-            () => reject(new Error(`${eventName} listener registration timed out`)),
-            LISTENER_REGISTRATION_TIMEOUT_MS,
-          );
-          Promise.resolve(listen(eventName, handler)).then(
-            (value) => {
-              clearTimeout(timer);
-              resolve(value);
-            },
-            (error) => {
-              clearTimeout(timer);
-              reject(error);
-            },
-          );
-        });
+        const unlisten = await registerListenerAttempt(listen, eventName, handler);
+        if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
         if (critical) quitListenerReady = true;
         return;
       } catch {
@@ -528,6 +657,10 @@ async function bindSettingsUpdates() {
     },
     true,
   );
+  void register("app-quit-cancelled", () => {
+    quitAttemptGeneration += 1;
+    quitFlushPromise = null;
+  });
   void register("settings-updated", (event) => {
       if (
         localRevision === savedRevision &&
@@ -545,11 +678,20 @@ async function bindSettingsUpdates() {
     });
 }
 
+window.addEventListener?.("pagehide", cleanupListeners);
+window.addEventListener?.("beforeunload", cleanupListeners);
+
 if (form) {
   form.addEventListener("input", handleSettingsMutation);
   form.addEventListener("change", handleSettingsMutation);
   form.addEventListener("submit", (event) => event.preventDefault());
   form.addEventListener("click", (event) => {
+    const settingsTab = event.target?.closest?.("[data-settings-tab]");
+    if (settingsTab) {
+      selectSettingsTab(settingsTab.dataset.settingsTab);
+      return;
+    }
+
     const paletteOption = event.target?.closest?.("[data-palette-value]");
     if (paletteOption) {
       setField("palette", paletteOption.dataset.paletteValue);
@@ -568,6 +710,23 @@ if (form) {
     if (action) runAction(action).catch((error) => setStatus(String(error), "error"));
   });
   form.addEventListener("keydown", (event) => {
+    const settingsTab = event.target?.closest?.("[data-settings-tab]");
+    if (settingsTab) {
+      const current = settingsTabs.indexOf(settingsTab);
+      if (current < 0) return;
+
+      let next = current;
+      if (event.key === "ArrowRight") next = (current + 1) % settingsTabs.length;
+      else if (event.key === "ArrowLeft") next = (current - 1 + settingsTabs.length) % settingsTabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = settingsTabs.length - 1;
+      else if (![" ", "Enter"].includes(event.key)) return;
+
+      event.preventDefault();
+      selectSettingsTab(settingsTabs[next].dataset.settingsTab, true);
+      return;
+    }
+
     const option = event.target?.closest?.("[data-palette-value], [data-effect-value]");
     if (!option) return;
     const isPalette = option.dataset.paletteValue !== undefined;
@@ -595,6 +754,7 @@ if (form) {
     selected.focus?.();
     scheduleAutosave();
   });
+  selectSettingsTab("general");
   setSettingsFormEnabled(false);
   bindSettingsUpdates();
   loadSettings();

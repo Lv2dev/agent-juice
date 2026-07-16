@@ -18,6 +18,7 @@ const MAX_COMMAND_LINE_BYTES: usize = 256 * 1024;
 const TASKKILL_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_ROLLOUT_DEPTH: usize = 4;
 const MAX_ROLLOUT_CANDIDATES: usize = 16_384;
+const MAX_ROLLOUT_ENTRIES: usize = 65_536;
 pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 
@@ -28,17 +29,12 @@ struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn attach(child: &Child) -> anyhow::Result<Self> {
-        use std::os::windows::io::AsRawHandle;
+    fn create() -> anyhow::Result<Self> {
         use windows::{
             core::PCWSTR,
-            Win32::{
-                Foundation::HANDLE,
-                System::JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                },
+            Win32::System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
         };
 
@@ -53,9 +49,31 @@ impl ProcessTree {
                 std::ptr::from_ref(&limits).cast(),
                 std::mem::size_of_val(&limits) as u32,
             )?;
-            AssignProcessToJobObject(tree.job, HANDLE(child.as_raw_handle()))?;
         }
         Ok(tree)
+    }
+
+    fn assign(&self, child: &Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::JobObjects::AssignProcessToJobObject};
+
+        unsafe { AssignProcessToJobObject(self.job, HANDLE(child.as_raw_handle()))? };
+        Ok(())
+    }
+
+    fn resume(child: &Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtResumeProcess(process_handle: *mut std::ffi::c_void) -> i32;
+        }
+
+        let status = unsafe { NtResumeProcess(child.as_raw_handle()) };
+        if status < 0 {
+            anyhow::bail!("NtResumeProcess failed with NTSTATUS 0x{status:08x}");
+        }
+        Ok(())
     }
 
     fn terminate(&self) -> bool {
@@ -76,8 +94,16 @@ struct ProcessTree;
 
 #[cfg(not(windows))]
 impl ProcessTree {
-    fn attach(_child: &Child) -> anyhow::Result<Self> {
+    fn create() -> anyhow::Result<Self> {
         Ok(Self)
+    }
+
+    fn assign(&self, _child: &Child) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn resume(_child: &Child) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn terminate(&self) -> bool {
@@ -95,6 +121,39 @@ fn wait_for_exit_until(child: &mut Child, deadline: Instant) -> bool {
             Ok(None) | Err(_) => return false,
         }
     }
+}
+
+fn spawn_in_process_tree(
+    command: &mut Command,
+    cleanup_deadline: Instant,
+) -> anyhow::Result<(Child, ProcessTree)> {
+    spawn_in_process_tree_with_hook(command, cleanup_deadline, |_| Ok(()))
+}
+
+fn spawn_in_process_tree_with_hook(
+    command: &mut Command,
+    cleanup_deadline: Instant,
+    after_suspended_spawn: impl FnOnce(&Child) -> anyhow::Result<()>,
+) -> anyhow::Result<(Child, ProcessTree)> {
+    let tree = ProcessTree::create()?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+
+        command.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
+    }
+
+    let mut child = command.spawn()?;
+    if let Err(error) = after_suspended_spawn(&child)
+        .and_then(|()| tree.assign(&child))
+        .and_then(|()| ProcessTree::resume(&child))
+    {
+        terminate_process_tree_until(&mut child, Some(&tree), cleanup_deadline);
+        return Err(error);
+    }
+    Ok((child, tree))
 }
 
 fn terminate_process_tree_until(child: &mut Child, tree: Option<&ProcessTree>, deadline: Instant) {
@@ -221,6 +280,7 @@ fn deadline_expired(deadline: Option<Instant>) -> bool {
 enum RolloutScanOutcome {
     Complete,
     Deadline,
+    EntryLimit,
     CandidateLimit,
     IoError,
 }
@@ -230,6 +290,7 @@ fn walk(
     depth: usize,
     out: &mut Vec<PathBuf>,
     deadline: Option<Instant>,
+    entries_remaining: &mut usize,
 ) -> RolloutScanOutcome {
     if deadline_expired(deadline) {
         return RolloutScanOutcome::Deadline;
@@ -238,22 +299,26 @@ fn walk(
         return RolloutScanOutcome::Complete;
     }
 
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
+    let Ok(mut read_dir) = std::fs::read_dir(dir) else {
         return RolloutScanOutcome::IoError;
     };
-    let mut entries = Vec::new();
-    for entry in read_dir {
-        let Ok(entry) = entry else {
-            return RolloutScanOutcome::IoError;
-        };
-        entries.push(entry);
-    }
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
-
-    for entry in entries {
+    loop {
         if deadline_expired(deadline) {
             return RolloutScanOutcome::Deadline;
         }
+        if *entries_remaining == 0 {
+            return RolloutScanOutcome::EntryLimit;
+        }
+        let Some(entry) = read_dir.next() else {
+            return RolloutScanOutcome::Complete;
+        };
+        *entries_remaining -= 1;
+        if deadline_expired(deadline) {
+            return RolloutScanOutcome::Deadline;
+        }
+        let Ok(entry) = entry else {
+            return RolloutScanOutcome::IoError;
+        };
         if out.len() >= MAX_ROLLOUT_CANDIDATES {
             return RolloutScanOutcome::CandidateLimit;
         }
@@ -265,7 +330,7 @@ fn walk(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let outcome = walk(&path, depth + 1, out, deadline);
+            let outcome = walk(&path, depth + 1, out, deadline, entries_remaining);
             if outcome != RolloutScanOutcome::Complete {
                 return outcome;
             }
@@ -278,7 +343,6 @@ fn walk(
             out.push(path);
         }
     }
-    RolloutScanOutcome::Complete
 }
 
 pub fn list_rollouts(sessions_dir: &Path) -> Vec<PathBuf> {
@@ -289,8 +353,23 @@ fn list_rollouts_with_deadline(
     sessions_dir: &Path,
     deadline: Option<Instant>,
 ) -> (Vec<PathBuf>, RolloutScanOutcome) {
+    list_rollouts_with_entry_budget(sessions_dir, deadline, MAX_ROLLOUT_ENTRIES)
+}
+
+fn list_rollouts_with_entry_budget(
+    sessions_dir: &Path,
+    deadline: Option<Instant>,
+    entry_budget: usize,
+) -> (Vec<PathBuf>, RolloutScanOutcome) {
     let mut rollouts = Vec::new();
-    let outcome = walk(sessions_dir, 0, &mut rollouts, deadline);
+    let mut entries_remaining = entry_budget;
+    let outcome = walk(
+        sessions_dir,
+        0,
+        &mut rollouts,
+        deadline,
+        &mut entries_remaining,
+    );
     (rollouts, outcome)
 }
 
@@ -307,20 +386,35 @@ fn recent_rollouts_with_deadline(
     limit: usize,
     deadline: Option<Instant>,
 ) -> (Vec<PathBuf>, RolloutScanOutcome) {
+    recent_rollouts_with_entry_budget(sessions_dir, limit, deadline, MAX_ROLLOUT_ENTRIES)
+}
+
+fn recent_rollouts_with_entry_budget(
+    sessions_dir: &Path,
+    limit: usize,
+    deadline: Option<Instant>,
+    entry_budget: usize,
+) -> (Vec<PathBuf>, RolloutScanOutcome) {
     if limit == 0 {
         return (Vec::new(), RolloutScanOutcome::Complete);
     }
 
-    let (rollouts, outcome) = list_rollouts_with_deadline(sessions_dir, deadline);
+    let (rollouts, outcome) = list_rollouts_with_entry_budget(sessions_dir, deadline, entry_budget);
     if outcome != RolloutScanOutcome::Complete || deadline_expired(deadline) {
         return (rollouts, outcome);
     }
     let mut candidates = Vec::with_capacity(rollouts.len());
     for path in rollouts {
+        if deadline_expired(deadline) {
+            return (Vec::new(), RolloutScanOutcome::Deadline);
+        }
         let Ok(modified) = std::fs::metadata(&path).and_then(|metadata| metadata.modified()) else {
             return (Vec::new(), RolloutScanOutcome::IoError);
         };
         candidates.push((modified, path));
+    }
+    if deadline_expired(deadline) {
+        return (Vec::new(), RolloutScanOutcome::Deadline);
     }
     let mut rollouts = candidates;
     rollouts.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
@@ -377,6 +471,28 @@ impl RolloutCache {
         now: Instant,
         deadline: Option<Instant>,
     ) -> Vec<PathBuf> {
+        self.recent_with_entry_budget(
+            sessions_dir,
+            limit,
+            force,
+            max_age,
+            now,
+            deadline,
+            MAX_ROLLOUT_ENTRIES,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recent_with_entry_budget(
+        &mut self,
+        sessions_dir: &Path,
+        limit: usize,
+        force: bool,
+        max_age: Duration,
+        now: Instant,
+        deadline: Option<Instant>,
+        entry_budget: usize,
+    ) -> Vec<PathBuf> {
         if limit == 0 {
             return Vec::new();
         }
@@ -393,7 +509,7 @@ impl RolloutCache {
 
         if should_scan {
             let (candidates, outcome) =
-                recent_rollouts_with_deadline(sessions_dir, limit, deadline);
+                recent_rollouts_with_entry_budget(sessions_dir, limit, deadline, entry_budget);
             if outcome == RolloutScanOutcome::Complete {
                 self.entry = Some(RolloutCacheEntry {
                     sessions_dir: sessions_dir.to_path_buf(),
@@ -509,24 +625,26 @@ fn codex_account_rate_limits_response_with_command(
 ) -> anyhow::Result<String> {
     let deadline = Instant::now() + timeout;
     let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let tree = match ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(err) => {
-            terminate_process_tree_until(&mut child, None, hard_deadline);
-            return Err(err);
-        }
-    };
+        .stderr(Stdio::piped());
+    let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline)?;
 
     let result = (|| {
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("codex app-server stdout unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("codex app-server stderr unavailable"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("codex app-server stdin unavailable"))?;
+
         let (tx, rx) = mpsc::sync_channel(16);
         let (stdout_done_tx, stdout_done_rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -549,10 +667,6 @@ fn codex_account_rate_limits_response_with_command(
             let _ = stdout_done_tx.send(());
         });
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("codex app-server stderr unavailable"))?;
         let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let result = read_bounded_to_end(
@@ -563,10 +677,6 @@ fn codex_account_rate_limits_response_with_command(
             let _ = stderr_tx.send(result);
         });
 
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("codex app-server stdin unavailable"))?;
         let requests = [
             serde_json::json!({
                 "jsonrpc": "2.0",
@@ -728,22 +838,15 @@ pub(crate) fn command_output_with_input(
 ) -> anyhow::Result<String> {
     let deadline = Instant::now() + timeout;
     let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
-    let mut child = command
+    command
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let tree = match ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(err) => {
-            terminate_process_tree_until(&mut child, None, hard_deadline);
-            return Err(err);
-        }
-    };
+        .stderr(Stdio::piped());
+    let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline)?;
     let stdout = child
         .stdout
         .take()
@@ -966,6 +1069,130 @@ mod tests {
         if std::env::var_os("AGENT_JUICE_FAKE_QUICK").is_some() {
             println!("recovered");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fake_spawn_marker_child() {
+        let Some(marker) = std::env::var_os("AGENT_JUICE_SUSPENDED_SPAWN_MARKER") else {
+            return;
+        };
+        std::fs::write(marker, b"started").unwrap();
+    }
+
+    #[test]
+    fn rollout_entry_budget_bounds_large_non_rollout_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-rollout-entry-budget-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..128 {
+            std::fs::write(root.join(format!("noise-{index:03}.jsonl")), b"{}\n").unwrap();
+        }
+
+        let (rollouts, outcome) = list_rollouts_with_entry_budget(&root, None, 16);
+
+        assert!(rollouts.is_empty());
+        assert_eq!(outcome, RolloutScanOutcome::EntryLimit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn entry_budget_incomplete_scan_preserves_cache_and_retries() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-rollout-entry-cache-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("rollout-existing.jsonl");
+        std::fs::write(&existing, b"{}\n").unwrap();
+        let now = Instant::now();
+        let mut cache = RolloutCache::default();
+        assert_eq!(
+            cache
+                .recent_with_entry_budget(&root, 1, false, Duration::from_secs(60), now, None, 16,),
+            vec![existing.clone()]
+        );
+
+        std::thread::sleep(Duration::from_millis(20));
+        let newest = root.join("rollout-newest.jsonl");
+        std::fs::write(&newest, b"{}\n").unwrap();
+        let mut noise = Vec::new();
+        for index in 0..32 {
+            let path = root.join(format!("noise-{index:02}.jsonl"));
+            std::fs::write(&path, b"{}\n").unwrap();
+            noise.push(path);
+        }
+
+        assert_eq!(
+            cache.recent_with_entry_budget(
+                &root,
+                1,
+                true,
+                Duration::from_secs(60),
+                now + Duration::from_secs(1),
+                None,
+                8,
+            ),
+            vec![existing]
+        );
+
+        for path in noise {
+            std::fs::remove_file(path).unwrap();
+        }
+        assert_eq!(
+            cache.recent_with_entry_budget(
+                &root,
+                1,
+                true,
+                Duration::from_secs(60),
+                now + Duration::from_secs(2),
+                None,
+                8,
+            ),
+            vec![newest]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn child_cannot_run_before_job_assignment() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-suspended-spawn-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let marker = root.join("started.txt");
+        let mut command = test_process("collector::tests::fake_spawn_marker_child");
+        command.env("AGENT_JUICE_SUSPENDED_SPAWN_MARKER", &marker);
+
+        let marker_during_attach = marker.clone();
+        let (mut child, tree) = spawn_in_process_tree_with_hook(
+            &mut command,
+            Instant::now() + Duration::from_secs(1),
+            move |_| {
+                std::thread::sleep(Duration::from_millis(150));
+                anyhow::ensure!(
+                    !marker_during_attach.exists(),
+                    "suspended child ran before Job assignment"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(wait_for_exit_until(
+            &mut child,
+            Instant::now() + Duration::from_secs(2)
+        ));
+        drop(tree);
+        assert!(marker.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1195,22 +1422,30 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn timeout_terminates_the_entire_process_tree() {
+    fn repeated_timeouts_leave_no_descendants_or_pipe_readers() {
         let root = std::env::temp_dir().join(format!(
             "agent-juice-process-tree-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let marker = root.join("descendant-survived.txt");
-        let mut command = test_process("collector::tests::process_tree_parent_child");
-        command.env("AGENT_JUICE_PROCESS_TREE_PARENT", "1");
-        command.env("AGENT_JUICE_PROCESS_TREE_MARKER", &marker);
+        let mut markers = Vec::new();
+        for attempt in 0..3 {
+            let marker = root.join(format!("descendant-survived-{attempt}.txt"));
+            let mut command = test_process("collector::tests::process_tree_parent_child");
+            command.env("AGENT_JUICE_PROCESS_TREE_PARENT", "1");
+            command.env("AGENT_JUICE_PROCESS_TREE_MARKER", &marker);
 
-        let started = Instant::now();
-        let result = claude_usage_output_with_command(command, Duration::from_millis(200));
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(2));
+            let started = Instant::now();
+            let error =
+                claude_usage_output_with_command(command, Duration::from_millis(200)).unwrap_err();
+            assert!(
+                error.to_string().contains("command timed out"),
+                "pipe reader did not close: {error:#}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+            markers.push(marker);
+        }
 
         let mut next = test_process("collector::tests::fake_quick_child");
         next.env("AGENT_JUICE_FAKE_QUICK", "1");
@@ -1218,7 +1453,10 @@ mod tests {
         assert!(recovered.contains("recovered"));
 
         std::thread::sleep(Duration::from_millis(1_400));
-        assert!(!marker.exists(), "descendant survived the timeout");
+        assert!(
+            markers.iter().all(|marker| !marker.exists()),
+            "a descendant survived a timeout"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

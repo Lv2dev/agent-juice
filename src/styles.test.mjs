@@ -33,6 +33,14 @@ const rustConfig = readFileSync(resolve(here, "../src-tauri/src/config.rs"), "ut
   /\r\n?/g,
   "\n",
 );
+const rustUpdate = readFileSync(resolve(here, "../src-tauri/src/update.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
+const rustTaskbar = readFileSync(resolve(here, "../src-tauri/src/taskbar.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
 const gitignore = readFileSync(resolve(here, "../.gitignore"), "utf8").replace(/\r\n?/g, "\n");
 function readOptional(path) {
   return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";
@@ -41,9 +49,13 @@ function readOptional(path) {
 const readme = readOptional(resolve(here, "../README.md"));
 const pushAllowlist = readOptional(resolve(here, "../.ai/scripts/verify-git-push-allowlist.ps1"));
 const releaseVerifier = readOptional(resolve(here, "../.ai/scripts/verify-release-installer.ps1"));
+const installedLifecycleVerifier = readOptional(
+  resolve(here, "../.ai/scripts/verify-installed-lifecycle.ps1"),
+);
 const taskbarMoveVerifier = readOptional(resolve(here, "../.ai/scripts/verify-taskbar-native-move.ps1"));
 const statuslineVerifier = readOptional(resolve(here, "../.ai/scripts/verify-statusline-bridge.ps1"));
 const runtimeVerifier = readOptional(resolve(here, "../.ai/scripts/verify-g3.86-runtime.ps1"));
+const runtimeRestoreVerifier = readOptional(resolve(here, "../.ai/scripts/verify-g3.103-runtime.ps1"));
 const cargoConfig = readOptional(resolve(here, "../.cargo/config.toml"));
 const windowsCi = readOptional(resolve(here, "../.github/workflows/windows-ci.yml"));
 const runtimeSmoke = readOptional(resolve(here, "../.github/scripts/runtime-smoke.ps1"));
@@ -78,7 +90,7 @@ function markupSection(name) {
   for (const tag of ["fieldset", "section"]) {
     const match = panelMarkup.match(
       new RegExp(
-        `<${tag} class="[^"]*" data-settings-section="${name}">(?<body>[\\s\\S]*?)</${tag}>`,
+        `<${tag}\\b(?=[^>]*class="[^"]*")(?=[^>]*data-settings-section="${name}")[^>]*>(?<body>[\\s\\S]*?)</${tag}>`,
       ),
     );
     if (match) return match.groups?.body ?? "";
@@ -453,6 +465,52 @@ test("taskbar orientation is explicit so short horizontal bars stay vertically c
   assert.match(verticalQuad, /flex-direction: column/);
 });
 
+test("taskbar overlay cannot synchronously couple the Juice event loop to Explorer", () => {
+  assert.doesNotMatch(rustLib, /pub mod appbar|apply_taskbar_owned_bar/);
+  assert.match(rustLib, /fn apply_taskbar_overlay/);
+  assert.match(rustLib, /GWLP_HWNDPARENT,\s*0,\s*"taskbar owner detach"/);
+  assert.match(rustLib, /SWP_ASYNCWINDOWPOS/);
+  assert.match(rustLib, /SWP_NOOWNERZORDER/);
+  assert.match(rustLib, /owner == 0/);
+  assert.match(rustLib, /fn taskbar_bar_window_is_shell_covered/);
+  assert.match(rustLib, /fn taskbar_bar_hit_is_shell_cover/);
+  assert.match(rustLib, /let shell_covered = visible && taskbar_bar_window_is_shell_covered/);
+  assert.doesNotMatch(rustTaskbar, /\bSendMessageW\s*\(/);
+  assert.match(rustTaskbar, /SendMessageTimeoutW/);
+  assert.match(rustTaskbar, /SMTO_ABORTIFHUNG \| SMTO_BLOCK/);
+  assert.match(rustTaskbar, /NATIVE_TOOLTIP_MESSAGE_TIMEOUT_MS: u32 = 100/);
+  assert.match(rustTaskbar, /struct OwnedNativeWindow\(HWND\)/);
+  assert.match(rustTaskbar, /let tooltip = OwnedNativeWindow::new/);
+  assert.match(rustTaskbar, /let tooltip = tooltip\.release\(\)/);
+  assert.match(rustLib, /fn try_taskbar_layout_gate/);
+  assert.doesNotMatch(rustLib, /TASKBAR_LAYOUT_GATE\s*\.lock\(\)/);
+  assert.match(
+    rustLib,
+    /let mut actions[\s\S]*taskbar_window_handle\(manager, tool\)[\s\S]*let _layout_guard = try_taskbar_layout_gate/,
+  );
+  const dockApply = rustLib.match(/fn apply_taskbar_dock_with_snapshot[\s\S]*?\n}\n\n#\[cfg\(windows\)\]\nfn taskbar_dock_signature/)?.[0] ?? "";
+  assert.doesNotMatch(dockApply, /get_webview_window|\.hwnd\(\)/);
+  assert.match(
+    rustLib,
+    /let _layout_guard = try_taskbar_layout_gate[\s\S]*taskbar_window_handle\(manager, tool\) != Some\(handle\)[\s\S]*window_is_valid\(hwnd\)[\s\S]*Action::Position\(_, _, rect\) => apply_taskbar_overlay/,
+  );
+});
+
+test("taskbar first-run placement uses persisted per-tool state and retries after shell recovery", () => {
+  assert.match(rustConfig, /pub claude_taskbar_target_initialized: bool/);
+  assert.match(rustConfig, /pub codex_taskbar_target_initialized: bool/);
+  assert.match(rustConfig, /fn apply_legacy_taskbar_target_state/);
+  assert.match(rustLib, /fn pending_taskbar_target_ratios/);
+  assert.match(rustLib, /fn initialize_pending_taskbar_targets/);
+  assert.match(rustLib, /if taskbar_targets_need_initialization\(&settings\)/);
+  assert.match(rustLib, /pending target initialization failed/);
+  assert.match(rustLib, /requested\.claude_taskbar_target_initialized = current\.claude_taskbar_target_initialized/);
+  assert.match(
+    rustLib,
+    /if !taskbar_target_initialized\(settings, tool\)[\s\S]*actions\.push\(Action::Hide\(tool, handle\)\)/,
+  );
+});
+
 test("dual ring center number stays inside the ring hole", () => {
   const ring = cssBlock('.bar-shell[data-mode="dual"] .bar-ring');
   const worst = cssBlock(".bar-worst");
@@ -488,7 +546,7 @@ test("dual ring center number stays inside the ring hole", () => {
   assert.match(quadSvg, /position: absolute/);
   assert.match(quadNumber, /place-items: center/);
   assert.match(quadNumber, /inset: 0/);
-  assert.doesNotMatch(quadNumber, /transform:/);
+  assert.match(quadNumber, /transform: translateY\(-0\.055em\)/);
   assert.match(quadNumber, /font-variant-numeric: tabular-nums/);
   assert.match(quadNumber, /font-size: var\(--ring-number-font-size\)/);
   assert.match(quadNumber, /font-weight: var\(--ring-number-font-weight\)/);
@@ -497,7 +555,7 @@ test("dual ring center number stays inside the ring hole", () => {
   assert.match(worst, /inset: 0/);
   assert.match(worst, /display: grid/);
   assert.match(worst, /place-items: center/);
-  assert.doesNotMatch(worst, /transform:/);
+  assert.match(worst, /transform: translateY\(-0\.055em\)/);
   assert.match(worst, /font-variant-numeric: tabular-nums/);
   assert.match(worst, /text-align: center/);
 });
@@ -517,6 +575,20 @@ test("taskbar ring markup uses SVG strokes instead of masked conic gradients", (
   assert.doesNotMatch(css, /mask: radial-gradient/);
 });
 
+test("zero-length ring arcs and their effects are hidden in every ring layout", () => {
+  assert.match(barJs, /--primary-ring-visibility[\s\S]*first\.percent != null && first\.percent > 0/);
+  assert.match(barJs, /--secondary-ring-visibility[\s\S]*second\.percent != null && second\.percent > 0/);
+  assert.match(cssBlock(".outer-arc,\n.outer-effect"), /visibility: var\(--primary-ring-visibility\)/);
+  assert.match(cssBlock(".inner-arc,\n.inner-effect"), /visibility: var\(--secondary-ring-visibility\)/);
+  assert.match(cssBlock(".quad-arc"), /visibility: var\(--quad-ring-visibility\)/);
+  assert.match(
+    css,
+    /\.quad-effect\s*\{\s*--ring-color: var\(--quad-color\);[\s\S]*?visibility: var\(--quad-ring-visibility\)/,
+  );
+  assert.match(cssBlock(".quad-primary"), /--quad-ring-visibility: var\(--primary-ring-visibility\)/);
+  assert.match(cssBlock(".quad-secondary"), /--quad-ring-visibility: var\(--secondary-ring-visibility\)/);
+});
+
 test("taskbar SVG ring strokes scale with the viewBox instead of screen pixels", () => {
   const track = cssBlock(".ring-track");
   const arc = cssBlock(".ring-arc");
@@ -531,11 +603,15 @@ test("taskbar ring number visibility and outline are configurable", () => {
   const outlineOn = cssBlock('.bar-shell[data-number-outline="on"] .bar-worst,\n.bar-shell[data-number-outline="on"] .quad-number');
 
   assert.match(panelMarkup, /name="fullscreen_hide_on"/);
+  assert.doesNotMatch(panelMarkup, /name="fullscreen_hide_on"[^>]*checked/);
   assert.match(panelMarkup, /name="maximized_hide_on"/);
   assert.match(panelMarkup, />전체창 숨김</);
   assert.match(rustConfig, /maximized_hide_on/);
   assert.match(rustLib, /visible_windows_coverage/);
   assert.match(panelMarkup, /name="indicator_style"/);
+  assert.match(panelMarkup, /name="indicator_track_color_auto"[^>]*checked/);
+  assert.match(panelMarkup, /name="indicator_track_color"[^>]*value="#6b7280"/);
+  assert.match(panelMarkup, /name="indicator_track_opacity_percent"[\s\S]*?min="0"[\s\S]*?max="100"[\s\S]*?value="11"/);
   assert.match(panelMarkup, /name="limit_order"/);
   assert.match(panelMarkup, />한도 순서</);
   assert.match(rustConfig, /limit_order/);
@@ -553,8 +629,9 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="bar_text_font_size_px"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="bar_content_gap_px"[\s\S]*?min="0"[\s\S]*?max="24"[\s\S]*?step="0\.1"/);
   assert.match(panelMarkup, /name="bar_content_gap_px"[\s\S]*?value="14"/);
-  assert.equal((panelMarkup.match(/data-range-number-for=/g) ?? []).length, 10);
+  assert.equal((panelMarkup.match(/data-range-number-for=/g) ?? []).length, 11);
   for (const name of [
+    "indicator_track_opacity_percent",
     "ring_center_size_px",
     "ring_number_font_size_px",
     "ring_number_font_weight",
@@ -664,14 +741,30 @@ test("taskbar overlay base has no blur, filter, text shadow, transition, or anim
 
 test("styles include restrained panel motion with a reduced-motion escape hatch", () => {
   const settingsCardOpen = cssBlock(".settings-card[open] .settings-form");
-  const settingsAdvancedOpen = cssBlock(".settings-advanced[open] .settings-advanced-grid");
+  const settingsTabOpen = cssBlock(".settings-tab-panel:not([hidden])");
 
   assert.match(css, /@keyframes panel-in/);
   assert.match(css, /@keyframes live-breathe/);
   assert.match(css, /@keyframes settings-expand/);
+  assert.match(css, /@keyframes settings-tab-in/);
   assert.match(settingsCardOpen, /animation:\s*settings-expand/);
-  assert.match(settingsAdvancedOpen, /animation:\s*settings-expand/);
+  assert.match(settingsTabOpen, /animation:\s*settings-tab-in/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test("settings disclosure uses a familiar right-to-down Lucide chevron", () => {
+  const icon = cssBlock(".settings-disclosure-icon");
+  const openIcon = cssBlock(".settings-card[open] .settings-disclosure-icon");
+
+  assert.match(panelMarkup, /<summary>[\s\S]*<svg class="settings-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">[\s\S]*<path d="m9 18 6-6-6-6"><\/path>[\s\S]*<\/svg>[\s\S]*<\/summary>/);
+  assert.match(icon, /width:\s*16px/);
+  assert.match(icon, /height:\s*16px/);
+  assert.match(icon, /stroke-width:\s*1\.75/);
+  assert.match(icon, /stroke-linecap:\s*round/);
+  assert.match(icon, /stroke-linejoin:\s*round/);
+  assert.match(icon, /transform:\s*rotate\(0deg\)/);
+  assert.match(openIcon, /transform:\s*rotate\(90deg\)/);
+  assert.doesNotMatch(css, /\.settings-card summary::after/);
 });
 
 test("settings controls keep glass at the card level and use quiet flat rows", () => {
@@ -680,7 +773,7 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   const toolTint = cssBlock(".tool-card::before");
   const form = cssBlock(".settings-form");
   const section = cssBlock(".settings-section");
-  const legend = cssBlock(".settings-section legend");
+  const panelLegend = cssBlock(".settings-tab-panel > legend");
   const summaryAccent = cssBlock(".settings-card summary .settings-title::before");
   const rowSurface = cssBlock(".field-row,\n.range-row,\n.toggle-row,\n.swatch-row,\n.field-grid label");
   const select =
@@ -695,9 +788,9 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   const toggleSpan = cssBlock(".toggle-row > span:not(.toggle-copy)");
   const toggleCopy = cssBlock(".toggle-copy");
   const toggleTitle = cssBlock(".toggle-title");
-  const advanced = cssBlock(".settings-advanced");
-  const advancedSummary = cssBlock(".settings-advanced summary");
-  const advancedGrid = cssBlock(".settings-advanced-grid");
+  const subgroup = cssBlock(".settings-subgroup");
+  const subgroupHeading = cssBlock(".settings-subgroup h3");
+  const subgroupGrid = cssBlock(".settings-subgroup-grid");
   const rangeTrack = css.match(
     /input\[type="range"\]::-webkit-slider-runnable-track\s*\{(?<body>[^}]+)\}/,
   )?.groups?.body ?? "";
@@ -723,10 +816,9 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   assert.match(form, /grid-template-columns: minmax\(0,\s*1fr\)/);
   assert.match(section, /border-top: 1px solid/);
   assert.doesNotMatch(section, /box-shadow:/);
-  assert.match(legend, /border-left: 3px solid/);
-  assert.match(legend, /background: color-mix/);
-  assert.doesNotMatch(legend, /position: sticky/);
-  assert.doesNotMatch(legend, /z-index:/);
+  assert.match(panelLegend, /position: absolute/);
+  assert.match(panelLegend, /clip: rect\(0 0 0 0\)/);
+  assert.match(panelLegend, /white-space: nowrap/);
   assert.match(rowSurface, /background: transparent/);
   assert.match(rowSurface, /border-bottom: 1px solid/);
   assert.match(rowSurface, /box-shadow: none/);
@@ -771,18 +863,67 @@ test("settings controls keep glass at the card level and use quiet flat rows", (
   assert.match(toggleCopy, /flex-direction: column/);
   assert.match(toggleCopy, /align-items: flex-start/);
   assert.match(toggleTitle, /font-weight: 740/);
-  assert.match(advanced, /grid-column:\s*1 \/ -1/);
-  assert.match(advanced, /border-top:/);
-  assert.doesNotMatch(advanced, /background:/);
-  assert.doesNotMatch(advanced, /box-shadow:/);
-  assert.match(advancedSummary, /cursor:\s*pointer/);
-  assert.match(advancedGrid, /display:\s*grid/);
+  assert.match(subgroup, /grid-column:\s*1 \/ -1/);
+  assert.doesNotMatch(subgroup, /background:/);
+  assert.doesNotMatch(subgroup, /box-shadow:/);
+  assert.doesNotMatch(subgroupHeading, /cursor:\s*pointer/);
+  assert.match(subgroupGrid, /display:\s*grid/);
   assert.doesNotMatch(button, /backdrop-filter/);
   assert.match(button, /box-shadow: none/);
   assert.doesNotMatch(button, /linear-gradient/);
   assert.doesNotMatch(buttonHover, /transform:/);
   assert.doesNotMatch(panelMarkup, /type="submit"/);
   assert.doesNotMatch(panelMarkup, />저장</);
+});
+
+test("ring and horizontal bar tracks share one configurable neutral background", () => {
+  const shell = cssBlock(".bar-shell");
+  const limitBar = cssBlock(".limit-bar");
+  const expression = "color-mix(in srgb, var(--indicator-track-color) var(--indicator-track-opacity), transparent)";
+  const escapedExpression = expression.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const ringTrackRule = css.match(/\.ring-track\s*\{\s*stroke:\s*([^;]+);/s)?.[1]?.trim();
+
+  assert.match(shell, /--indicator-track-color: var\(--text\)/);
+  assert.match(shell, /--indicator-track-opacity: 11%/);
+  assert.equal(ringTrackRule, expression);
+  assert.match(limitBar, new RegExp(`background:\\s*${escapedExpression}`));
+  assert.doesNotMatch(ringTrackRule, /--tool-brand|--text-faint/);
+  assert.match(panelMarkup, /data-indicator-track-custom-color/);
+  assert.match(panelMarkup, /data-range-number-for="indicator_track_opacity_percent"/);
+  assert.match(settingsJs, /updateIndicatorTrackColorAvailability/);
+  assert.doesNotMatch(settingsJs, /customColor\.disabled\s*=/);
+  assert.match(cssBlock('.indicator-track-color-row[data-disabled="true"] input'), /pointer-events: none/);
+  assert.match(readme, /기본은 기존 가로 바와 같은 테마 적응색·농도 11%/);
+  assert.match(readme, /theme-adaptive color at 11% opacity/);
+  assert.match(cssBlock(".indicator-track-field"), /grid-column:\s*1 \/ -1/);
+  assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.indicator-track-grid\s*\{[\s\S]*grid-template-columns: 1fr/);
+});
+
+test("taskbar text colors are independently configurable without changing automatic defaults", () => {
+  const colors = markupSection("colors");
+  const shell = cssBlock(".bar-shell");
+  const claude = cssBlock('.bar-shell[data-claude-text-color="custom"] .bar-tool[data-tool="claude"] .bar-tool-name');
+  const codex = cssBlock('.bar-shell[data-codex-text-color="custom"] .bar-tool[data-tool="codex"] .bar-tool-name');
+  const info = cssBlock('.bar-shell[data-info-text-color="custom"] .bar-line,\n.bar-shell[data-info-text-color="custom"] .primary-reset,\n.bar-shell[data-info-text-color="custom"] .secondary-reset');
+  const ring = cssBlock('.bar-shell[data-ring-text-color="custom"] .bar-worst,\n.bar-shell[data-ring-text-color="custom"] .quad-number');
+
+  assert.match(colors, /data-taskbar-text-color="claude"[\s\S]*name="claude_text_color_on"[\s\S]*name="claude_text_color"/);
+  assert.match(colors, /data-taskbar-text-color="codex"[\s\S]*name="codex_text_color_on"[\s\S]*name="codex_text_color"/);
+  assert.match(colors, /data-taskbar-text-color="info"[\s\S]*name="info_text_color_on"[\s\S]*name="info_text_color"/);
+  assert.match(colors, /data-taskbar-text-color="ring"[\s\S]*name="ring_text_color_on"[\s\S]*name="ring_text_color"/);
+  assert.match(shell, /--claude-text-color: #d79a32/);
+  assert.match(shell, /--codex-text-color: #2fac7d/);
+  assert.match(shell, /--info-text-color: #6b7280/);
+  assert.match(shell, /--ring-text-color: #6b7280/);
+  assert.match(claude, /color: var\(--claude-text-color\)/);
+  assert.match(codex, /color: var\(--codex-text-color\)/);
+  assert.match(info, /color: var\(--info-text-color\)/);
+  assert.match(ring, /color: var\(--ring-text-color\)/);
+  assert.match(settingsJs, /updateTaskbarTextColorAvailability/);
+  assert.match(settingsJs, /color\.inert = !enabled/);
+  assert.doesNotMatch(settingsJs, /(?:claude|codex|info|ring)_text_color[^\n]*\.disabled\s*=/);
+  assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.taskbar-text-color-grid\s*\{[\s\S]*grid-template-columns: 1fr/);
+  assert.match(css, /data-state="stale"[\s\S]*color-mix\(in srgb, var\(--ring-text-color\) 62%, var\(--text-muted\)\)/);
 });
 
 test("autosave completion uses a centered transient toast outside the scrolling shell", () => {
@@ -831,26 +972,38 @@ test("palette picker exposes stable swatches and a clear selected state", () => 
 
 test("settings form groups controls into logical sections without changing field names", () => {
   const sections = [
-    ...panelMarkup.matchAll(/<(?:fieldset|section) class="[^"]*" data-settings-section="([^"]+)">/g),
+    ...panelMarkup.matchAll(/<(?:fieldset|section)\b[^>]*data-settings-section="([^"]+)"[^>]*>/g),
   ].map((match) => match[1]);
-  const indicatorSection = markupSection("indicator");
+  const detailsSection = markupSection("details");
 
-  assert.deepEqual(sections, ["appearance", "limits", "taskbar", "indicator", "system", "update", "about"]);
+  assert.deepEqual(sections, ["general", "colors", "collection", "taskbar", "details", "update", "about"]);
   assert.match(panelMarkup, /<details class="settings-card" open>/);
+  const tabs = [...panelMarkup.matchAll(/data-settings-tab="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(tabs, ["general", "collection", "taskbar", "colors", "details"]);
+  assert.match(panelMarkup, /class="settings-tabs"[\s\S]*role="tablist"[\s\S]*data-i18n-aria-label="aria\.settingsTabs"/);
+  for (const name of tabs) {
+    assert.match(panelMarkup, new RegExp(`id="settings-tab-${name}"[\\s\\S]*aria-controls="settings-panel-${name}"`));
+    assert.match(panelMarkup, new RegExp(`id="settings-panel-${name}"[\\s\\S]*role="tabpanel"[\\s\\S]*aria-labelledby="settings-tab-${name}"`));
+  }
+  assert.match(cssBlock(".settings-tabs"), /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(cssBlock('.settings-tabs button[aria-selected="true"]'), /var\(--accent\)/);
+  assert.match(cssBlock(".settings-tabs button:focus-visible"), /outline: 2px solid var\(--focus-ring\)/);
+  assert.match(cssBlock(".settings-tab-panel[hidden]"), /display: none/);
+  assert.match(css, /@media \(max-width: 380px\)[\s\S]*\.settings-tabs\s*\{[\s\S]*repeat\(6, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.settings-tabs button:nth-child\(4\)\s*\{[\s\S]*grid-column: 2 \/ span 2/);
+  assert.match(css, /\.settings-tabs button:nth-child\(5\)\s*\{[\s\S]*grid-column: 4 \/ span 2/);
+  assert.match(settingsJs, /function selectSettingsTab\(value, focus = false\)/);
+  assert.match(settingsJs, /event\.key === "ArrowRight"[\s\S]*event\.key === "ArrowLeft"[\s\S]*event\.key === "Home"[\s\S]*event\.key === "End"/);
 
-  assert.match(markupSection("appearance"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="palette"/);
-  assert.match(markupSection("limits"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"/);
-  assert.match(markupSection("limits"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
+  assert.match(markupSection("general"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="autostart_on"/);
+  assert.match(markupSection("collection"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"[\s\S]*data-action="restore-statusline"/);
+  assert.match(markupSection("collection"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="full_reset_time_on"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
-  assert.match(indicatorSection, /name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"/);
-  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="typography" open>[\s\S]*name="ring_number_font_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*<\/details>/);
-  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">/);
-  assert.match(indicatorSection, /<summary data-i18n="advanced\.indicator">고급 조정<\/summary>/);
-  assert.match(indicatorSection, /name="indicator_effect_style"[\s\S]*data-effect-value="flat"[\s\S]*data-effect-value="breathe"/);
-  assert.match(indicatorSection, /name="ring_center_size_px"[\s\S]*<details class="settings-advanced" data-settings-advanced="typography"/);
-  assert.match(indicatorSection, /<details class="settings-advanced" data-settings-advanced="indicator">[\s\S]*name="ring_number_outline_width_px"[\s\S]*name="ring_size_px"[\s\S]*name="ring_gap_px"[\s\S]*<\/details>/);
-  assert.match(markupSection("system"), /name="autostart_on"[\s\S]*data-action="restore-statusline"/);
-  assert.doesNotMatch(markupSection("system"), /id="settings-status"/);
+  assert.match(detailsSection, /data-settings-subgroup="appearance"[\s\S]*name="indicator_effect_style"[\s\S]*name="indicator_track_opacity_percent"/);
+  assert.match(detailsSection, /data-settings-subgroup="ring-display"[\s\S]*name="ring_on"[\s\S]*name="ring_numbers_on"[\s\S]*name="ring_number_outline_on"[\s\S]*name="ring_center_size_px"/);
+  assert.match(detailsSection, /data-settings-subgroup="typography"[\s\S]*name="ring_number_font_size_px"[\s\S]*name="bar_text_font_weight"[\s\S]*name="bar_content_gap_px"/);
+  assert.match(detailsSection, /data-settings-subgroup="geometry"[\s\S]*name="ring_number_outline_width_px"[\s\S]*name="ring_size_px"[\s\S]*name="ring_gap_px"/);
+  assert.doesNotMatch(detailsSection, /<details|settings-advanced/);
   assert.match(markupSection("update"), /name="update_check_on"[\s\S]*data-action="check-updates"[\s\S]*data-action="open-releases"[\s\S]*id="update-check-status"/);
   assert.doesNotMatch(markupSection("about"), /name="update_check_on"|data-action="check-updates"/);
   assert.match(panelMarkup, /<form id="settings-form" class="settings-layout">[\s\S]*<section class="settings-utility-card update-card" data-settings-section="update">[\s\S]*<\/section>\s*<\/form>/);
@@ -860,17 +1013,18 @@ test("settings form groups controls into logical sections without changing field
   assert.doesNotMatch(cssBlock(".settings-save-state"), /position:\s*fixed/);
   assert.doesNotMatch(cssBlock(".settings-save-state"), /background:|border:/);
   assert.equal(sections.at(-1), "about");
-  assert.match(markupSection("limits"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
+  assert.match(markupSection("collection"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
   assert.doesNotMatch(panelMarkup, /claude_usage_auto_refresh_lab_on/);
 
-  const paletteOptions = [...markupSection("appearance").matchAll(/data-palette-value="([^"]+)"/g)]
+  const paletteOptions = [...markupSection("colors").matchAll(/data-palette-value="([^"]+)"/g)]
     .map((match) => match[1]);
   assert.deepEqual(paletteOptions, [
     "traffic", "signal", "ocean", "forest", "sunset", "cvd", "cool", "mono", "custom",
   ]);
-  assert.match(markupSection("appearance"), /role="radiogroup"[\s\S]*name="mono_color"[\s\S]*name="custom_safe"/);
-  assert.match(markupSection("appearance"), /data-tool-palette[\s\S]*name="claude_primary_color"[\s\S]*name="claude_secondary_color"[\s\S]*name="codex_primary_color"[\s\S]*name="codex_secondary_color"/);
+  assert.match(markupSection("colors"), /role="radiogroup"[\s\S]*name="mono_color"[\s\S]*name="custom_safe"/);
+  assert.match(markupSection("colors"), /data-tool-palette[\s\S]*name="claude_primary_color"[\s\S]*name="claude_secondary_color"[\s\S]*name="codex_primary_color"[\s\S]*name="codex_secondary_color"[\s\S]*name="tool_warning_color"[\s\S]*name="tool_warning_color_on"[\s\S]*name="tool_danger_color"[\s\S]*name="tool_danger_color_on"/);
+  assert.match(css, /\.tool-threshold-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
@@ -879,23 +1033,51 @@ test("settings form groups controls into logical sections without changing field
 });
 
 test("indicator effect presets are previewed, opt-in, and motion-safe", () => {
-  const indicatorSection = markupSection("indicator");
-  const effectValues = [...indicatorSection.matchAll(/data-effect-value="([^"]+)"/g)]
+  const detailsSection = markupSection("details");
+  const effectValues = [...detailsSection.matchAll(/data-effect-value="([^"]+)"/g)]
     .map((match) => match[1]);
   const flat = cssBlock('.bar-shell[data-effect="flat"] .ring-effect-shadow');
   const soft = cssBlock('.bar-shell[data-effect="soft"] .ring-effect-shadow');
+  const softBar = cssBlock('.bar-shell[data-effect="soft"] .limit-bar::after');
   const depth = cssBlock('.bar-shell[data-effect="depth"] .ring-effect-shadow');
+  const depthBar = cssBlock('.bar-shell[data-effect="depth"] .limit-bar::after');
   const glow = cssBlock('.bar-shell[data-effect="glow"] .ring-effect-shadow');
+  const glowBar = cssBlock('.bar-shell[data-effect="glow"] .limit-bar::after');
   const breathe = cssBlock('.bar-shell[data-effect="breathe"] .bar-tool[data-state="live"] .ring-effect-shadow');
+  const breatheBar = cssBlock('.bar-shell[data-effect="breathe"] .bar-tool[data-state="live"] .limit-bar::after');
+  const staleEffects = cssBlock('.bar-tool[data-state="stale"] .ring-effect,\n.bar-tool[data-state="stale"] .limit-bar::after');
+  const staleBreatheRing = cssBlock('.bar-shell[data-effect="breathe"] .bar-tool[data-state="stale"] .ring-effect-shadow');
+  const staleBreatheBar = cssBlock('.bar-shell[data-effect="breathe"] .bar-tool[data-state="stale"] .limit-bar::after');
+  const ringEffect = cssBlock('.ring-effect');
+  const softInset = cssBlock('.bar-shell[data-effect="soft"] .outer-effect.ring-effect-shadow,\n.bar-shell[data-effect="soft"] .quad-effect.ring-effect-shadow');
+  const depthShadowInset = cssBlock('.bar-shell[data-effect="depth"] .outer-effect.ring-effect-shadow,\n.bar-shell[data-effect="depth"] .quad-effect.ring-effect-shadow');
+  const depthHighlightInset = cssBlock('.bar-shell[data-effect="depth"] .outer-effect.ring-effect-highlight,\n.bar-shell[data-effect="depth"] .quad-effect.ring-effect-highlight');
+  const glowInset = cssBlock('.bar-shell[data-effect="glow"] .outer-effect.ring-effect-shadow,\n.bar-shell[data-effect="glow"] .quad-effect.ring-effect-shadow');
 
   assert.deepEqual(effectValues, ["flat", "soft", "depth", "glow", "breathe"]);
   assert.match(panelMarkup, /name="indicator_effect_style" value="flat"/);
   assert.match(barMarkup, /data-effect="flat"/);
   assert.equal(flat, "");
-  assert.match(soft, /opacity: 0\.24/);
+  assert.match(ringEffect, /r: calc\(var\(--ring-radius\) - var\(--effect-radius-inset\)\)/);
+  assert.match(ringEffect, /stroke-linecap: butt/);
+  assert.match(soft, /opacity: 0\.34/);
+  assert.match(softBar, /opacity: 0\.38/);
+  assert.match(softBar, /transform: translateY\(0\.8px\)/);
+  assert.match(softInset, /--effect-radius-inset: 3/);
   assert.match(depth, /opacity: 0\.42/);
+  assert.match(depthBar, /opacity: 0\.32/);
+  assert.match(depthShadowInset, /--effect-radius-inset: 2\.7/);
+  assert.match(depthHighlightInset, /--effect-radius-inset: 1\.4/);
   assert.match(glow, /stroke-width: calc\(var\(--effect-stroke\) \+ 7\)/);
+  assert.match(glowBar, /opacity: 0\.46/);
+  assert.match(glowBar, /transform: scaleY\(1\.35\)/);
+  assert.match(glowInset, /--effect-radius-inset: 3\.5/);
   assert.match(breathe, /animation: indicator-breathe 2\.8s/);
+  assert.match(breatheBar, /animation: indicator-bar-breathe 2\.8s/);
+  assert.match(staleEffects, /animation: none/);
+  assert.doesNotMatch(staleEffects, /opacity: 0/);
+  assert.match(staleBreatheRing, /opacity: 0\.24/);
+  assert.match(staleBreatheBar, /opacity: 0\.24/);
   assert.doesNotMatch(`${soft}\n${depth}\n${glow}\n${breathe}`, /filter:/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*data-effect="breathe"[\s\S]*animation: none !important/);
   assert.doesNotMatch(css, /data-state="stale"[^}]*indicator-breathe/);
@@ -918,10 +1100,23 @@ test("about and update sections keep product copy separate from guarded update c
   assert.match(settingsJs, /invoke\("open_release_page", \{ url:/);
   assert.match(rustLib, /plugin\(tauri_plugin_notification::init\(\)\)/);
   assert.match(rustLib, /spawn_update_check\(app\.handle\(\)\.clone\(\)\)/);
+  const notification = rustLib.match(/fn show_update_notification[\s\S]*?\n}\n\nfn notification_uses_korean/)?.[0] ?? "";
+  assert.match(notification, /Settings::try_load\(\)/);
+  assert.match(notification, /if !settings\.update_check_on/);
+  assert.ok(notification.indexOf("Settings::try_load()") < notification.indexOf("prepare_notification"));
+  assert.ok(notification.indexOf("notification.commit()") > notification.indexOf(".show()"));
   assert.match(rustLib, /ensure_panel_command\(window\.label\(\)\)\?/);
   assert.doesNotMatch(tauriConfig.app.security.csp, /github\.com/);
   assert.match(i18nJs, /"status\.updateFailed": "업데이트를 확인하지 못했습니다/);
   assert.match(i18nJs, /"status\.updateFailed": "Could not check for updates/);
+});
+
+test("manual update checks keep the Windows curl process hidden", () => {
+  assert.match(rustUpdate, /#\[cfg\(windows\)\][\s\S]*use std::os::windows::process::CommandExt;/);
+  assert.match(
+    rustUpdate,
+    /fn fetch_latest_release\(\)[\s\S]*command\.creation_flags\(0x08000000\);[\s\S]*command_output_with_input/,
+  );
 });
 
 test("public README and release template are the only tracked markdown exceptions", (t) => {
@@ -941,7 +1136,7 @@ test("public README and release template are the only tracked markdown exception
 });
 
 test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {
-  const limitsSection = markupSection("limits");
+  const limitsSection = markupSection("collection");
 
   assert.match(panelMarkup, />수집주기</);
   assert.match(panelMarkup, />오래됨</);
@@ -1063,6 +1258,23 @@ test("release installer verifier protects real app processes, Run key, and short
   assert.match(releaseVerifier, /"\/UPDATE"/);
 });
 
+test("installer verifiers wait for asynchronous NSIS cleanup before recovery", (t) => {
+  if (!releaseVerifier || !installedLifecycleVerifier) {
+    return t.skip("private .ai installer verifiers are unavailable");
+  }
+
+  assert.match(releaseVerifier, /Wait-PathsRemoved -Paths @\(\$AppExe, \$BridgeExe\)/);
+  assert.match(installedLifecycleVerifier, /function Wait-InstalledBinariesRemoved/);
+  assert.match(installedLifecycleVerifier, /\[step\] \$Operation/);
+  assert.match(installedLifecycleVerifier, /ExecutableUnlockTimeoutSeconds = 360/);
+  assert.match(installedLifecycleVerifier, /\[IO\.File\]::Open\(\$FilePath, "Open", "Read", "None"\)/);
+  assert.match(installedLifecycleVerifier, /could not start within \$\{TimeoutSeconds\}s/);
+  assert.match(
+    installedLifecycleVerifier,
+    /Invoke-BoundedProcess \$Uninstaller[^\n]+\n\s+Wait-InstalledBinariesRemoved/,
+  );
+});
+
 test("taskbar native move verifier restores user settings after debug probes", (t) => {
   if (!taskbarMoveVerifier) return t.skip("private .ai taskbar verifier is unavailable");
 
@@ -1124,10 +1336,10 @@ test("taskbar movement is persisted only by the native drag loop final save", ()
   assert.match(rustLib, /taskbar_physical_length_for_window\(logical_length, taskbar\.hwnd\)/);
 });
 
-test("local build and test concurrency is capped at four", () => {
+test("local build and test concurrency follows host defaults", () => {
   const packageJson = JSON.parse(readFileSync(resolve(here, "../package.json"), "utf8"));
-  assert.match(cargoConfig, /jobs\s*=\s*4/);
-  assert.match(packageJson.scripts.test, /--test-concurrency=4/);
+  assert.doesNotMatch(cargoConfig, /jobs\s*=/);
+  assert.doesNotMatch(packageJson.scripts.test, /--test-concurrency/);
 });
 
 test("Windows CI pins external actions to full commit SHAs", () => {
@@ -1145,7 +1357,7 @@ test("Windows CI pins external actions to full commit SHAs", () => {
 test("taskbar idle and drag paths reuse snapshots instead of repeated disk and shell scans", () => {
   const dragLoop = rustLib.match(/fn spawn_taskbar_drag_loop[\s\S]*?\n}\n\nfn spawn_taskbar_visibility_loop/)?.[0] ?? "";
   const visibilityLoop = rustLib.match(/fn spawn_taskbar_visibility_loop[\s\S]*?\n}\n\n#\[tauri::command\]/)?.[0] ?? "";
-  assert.equal((dragLoop.match(/Settings::load\(\)/g) ?? []).length, 1);
+  assert.equal((dragLoop.match(/Settings::try_load\(\)/g) ?? []).length, 1);
   assert.match(dragLoop, /drag_monitor_key/);
   assert.match(visibilityLoop, /taskbar_dock_snapshot/);
   assert.match(visibilityLoop, /apply_taskbar_dock_with_snapshot/);
@@ -1161,6 +1373,9 @@ test("tray quit flushes pending settings before native cleanup and exit", () => 
   assert.match(settingsJs, /enqueueLatestSettingsSave/);
   assert.match(settingsJs, /flushSettingsAndQuit/);
   assert.match(settingsJs, /register\(\s*"app-quit-requested"/);
+  assert.match(settingsJs, /register\("app-quit-cancelled"/);
+  assert.match(settingsJs, /quitFlushPromise = null/);
+  assert.match(rustLib, /async fn save_settings[\s\S]*spawn_blocking/);
   assert.doesNotMatch(rustLib, /tray_quit_menu_id\(\)\s*=>\s*app\.exit/);
 });
 
@@ -1182,7 +1397,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.6"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.7"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {
@@ -1200,4 +1415,10 @@ test("runtime verifier enforces deterministic hang and resource budgets", (t) =>
   assert.match(runtimeVerifier, /thread growth .* exceeded/);
   assert.match(runtimeVerifier, /working set growth .* exceeded/);
   assert.match(runtimeVerifier, /private memory growth .* exceeded/);
+});
+
+test("runtime verifier restores the installed app with a normal startup state", (t) => {
+  if (!runtimeRestoreVerifier) return t.skip("private .ai runtime wrapper is unavailable");
+  assert.match(runtimeRestoreVerifier, /Start-Process -FilePath \$InstalledExe/);
+  assert.doesNotMatch(runtimeRestoreVerifier, /Start-Process -FilePath \$InstalledExe[^\r\n]*-WindowStyle Hidden/);
 });

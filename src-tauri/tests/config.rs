@@ -5,7 +5,7 @@ use std::{
 };
 
 use agent_juice::{
-    config::{Settings, SettingsInput, ToolColors},
+    config::{Settings, SettingsInput, TaskbarTextColors, ToolColors},
     render::Palette,
 };
 use serde_json::Value;
@@ -50,6 +50,7 @@ fn settings_update_rejects_malformed_json_and_preserves_bytes() {
     fs::write(&path, original).unwrap();
 
     assert_eq!(Settings::load_from(&path).poll_interval_secs, 60);
+    assert!(Settings::try_load_from(&path).is_err());
     assert!(Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
 }
@@ -75,8 +76,28 @@ fn settings_update_rejects_read_failure_without_replacing_the_path() {
     let path = root.join("settings.json");
     fs::create_dir_all(&path).unwrap();
 
+    assert!(Settings::try_load_from(&path).is_err());
     assert!(Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).is_err());
     assert!(path.is_dir());
+}
+
+#[test]
+fn strict_settings_load_uses_defaults_only_for_a_missing_file() {
+    let root = temp_root("strict-load");
+    let missing = root.join("missing.json");
+    let loaded = Settings::try_load_from(&missing).unwrap();
+    assert_eq!(
+        serde_json::to_value(loaded).unwrap(),
+        serde_json::to_value(Settings::default()).unwrap()
+    );
+
+    let malformed = root.join("malformed.json");
+    fs::write(&malformed, b"{").unwrap();
+    assert!(Settings::try_load_from(&malformed).is_err());
+
+    let non_object = root.join("non-object.json");
+    fs::write(&non_object, b"[]").unwrap();
+    assert!(Settings::try_load_from(&non_object).is_err());
 }
 
 #[test]
@@ -87,7 +108,43 @@ fn settings_update_uses_defaults_only_when_the_file_is_missing() {
     let updated = Settings::update_at(&path, |settings| settings.poll_interval_secs = 5).unwrap();
 
     assert_eq!(updated.poll_interval_secs, 5);
+    assert_eq!(updated.taskbar_offset_ratio, 0.0);
+    assert_eq!(updated.claude_taskbar_offset_ratio, 0.0);
+    assert_eq!(updated.codex_taskbar_offset_ratio, 0.0);
+    assert!(!updated.claude_taskbar_target_initialized);
+    assert!(!updated.codex_taskbar_target_initialized);
+    assert!(!updated.fullscreen_hide_on);
     assert_eq!(read_json(&path)["poll_interval_secs"], 5);
+}
+
+#[test]
+fn existing_settings_without_taskbar_offsets_keep_the_legacy_center_default() {
+    let root = temp_root("legacy-taskbar-default");
+    let path = root.join("settings.json");
+    fs::write(&path, "{}").unwrap();
+
+    let loaded = Settings::load_from(&path);
+
+    assert_eq!(loaded.taskbar_offset_ratio, 0.5);
+    assert_eq!(loaded.claude_taskbar_offset_ratio, 0.5);
+    assert_eq!(loaded.codex_taskbar_offset_ratio, 0.5);
+    assert!(loaded.claude_taskbar_target_initialized);
+    assert!(loaded.codex_taskbar_target_initialized);
+    assert!(loaded.fullscreen_hide_on);
+}
+
+#[test]
+fn legacy_explicit_zero_taskbar_position_is_not_treated_as_a_first_run() {
+    let root = temp_root("legacy-explicit-zero-taskbar");
+    let path = root.join("settings.json");
+    fs::write(&path, r#"{"taskbar_offset_ratio":0}"#).unwrap();
+
+    let loaded = Settings::load_from(&path);
+
+    assert_eq!(loaded.claude_taskbar_offset_ratio, 0.0);
+    assert_eq!(loaded.codex_taskbar_offset_ratio, 0.0);
+    assert!(loaded.claude_taskbar_target_initialized);
+    assert!(loaded.codex_taskbar_target_initialized);
 }
 
 #[test]
@@ -110,6 +167,9 @@ fn settings_update_migrates_and_clamps_valid_settings_before_mutation() {
     assert_eq!(updated.ring_thickness_px, 6.5);
     assert_eq!(updated.ring_gap_px, 8.5);
     assert_eq!(updated.ring_center_size_px, 9.5);
+    assert!(updated.indicator_track_color_auto);
+    assert_eq!(updated.indicator_track_color, [0x6b, 0x72, 0x80]);
+    assert_eq!(updated.indicator_track_opacity_percent, 11.0);
     assert!(!updated.show_codex);
 
     let saved = read_json(&path);
@@ -130,6 +190,20 @@ fn settings_roundtrip_and_legacy_defaults() {
             claude_secondary: [0x44, 0x55, 0x66],
             codex_primary: [0x77, 0x88, 0x99],
             codex_secondary: [0xaa, 0xbb, 0xcc],
+            warning: [0xde, 0xad, 0x01],
+            danger: [0xbe, 0xef, 0x02],
+            warning_on: false,
+            danger_on: true,
+        },
+        taskbar_text_colors: TaskbarTextColors {
+            claude: [0x12, 0x34, 0x56],
+            claude_on: true,
+            codex: [0x23, 0x45, 0x67],
+            codex_on: false,
+            info: [0x34, 0x56, 0x78],
+            info_on: true,
+            ring: [0x45, 0x67, 0x89],
+            ring_on: true,
         },
         warn_threshold: 65.0,
         danger_threshold: 85.0,
@@ -143,6 +217,9 @@ fn settings_roundtrip_and_legacy_defaults() {
         maximized_hide_on: true,
         indicator_style: "bar".into(),
         indicator_effect_style: "glow".into(),
+        indicator_track_color_auto: false,
+        indicator_track_color: [0x12, 0x34, 0x56],
+        indicator_track_opacity_percent: 37.5,
         ring_on: false,
         ring_numbers_on: false,
         ring_number_outline_on: true,
@@ -166,6 +243,8 @@ fn settings_roundtrip_and_legacy_defaults() {
         codex_taskbar_offset_ratio: 0.85,
         claude_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
         codex_taskbar_monitor_key: "monitor:1920,0,2560,1440".into(),
+        claude_taskbar_target_initialized: true,
+        codex_taskbar_target_initialized: true,
         show_claude: false,
         show_codex: true,
         claude_account_auto_collect_on: true,
@@ -176,6 +255,7 @@ fn settings_roundtrip_and_legacy_defaults() {
 
     assert!(matches!(loaded.palette, Palette::Cool));
     assert_eq!(loaded.tool_colors, settings.tool_colors);
+    assert_eq!(loaded.taskbar_text_colors, settings.taskbar_text_colors);
     assert_eq!(loaded.warn_threshold, 65.0);
     assert_eq!(loaded.danger_threshold, 85.0);
     assert_eq!(loaded.display_basis, "used");
@@ -188,6 +268,9 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(loaded.maximized_hide_on);
     assert_eq!(loaded.indicator_style, "bar");
     assert_eq!(loaded.indicator_effect_style, "glow");
+    assert!(!loaded.indicator_track_color_auto);
+    assert_eq!(loaded.indicator_track_color, [0x12, 0x34, 0x56]);
+    assert_eq!(loaded.indicator_track_opacity_percent, 37.5);
     assert!(!loaded.ring_on);
     assert!(!loaded.ring_numbers_on);
     assert!(loaded.ring_number_outline_on);
@@ -211,6 +294,8 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.codex_taskbar_offset_ratio, 0.85);
     assert_eq!(loaded.claude_taskbar_monitor_key, "monitor:0,0,1920,1080");
     assert_eq!(loaded.codex_taskbar_monitor_key, "monitor:1920,0,2560,1440");
+    assert!(loaded.claude_taskbar_target_initialized);
+    assert!(loaded.codex_taskbar_target_initialized);
     assert!(!loaded.show_claude);
     assert!(loaded.show_codex);
     assert!(loaded.claude_account_auto_collect_on);
@@ -256,6 +341,8 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.codex_taskbar_offset_ratio, 0.3);
     assert_eq!(legacy.claude_taskbar_monitor_key, "");
     assert_eq!(legacy.codex_taskbar_monitor_key, "");
+    assert!(legacy.claude_taskbar_target_initialized);
+    assert!(legacy.codex_taskbar_target_initialized);
     assert!(legacy.show_claude);
     assert!(legacy.show_codex);
     assert!(legacy.claude_account_auto_collect_on);
@@ -317,6 +404,7 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
         claude_secondary: [0xa6, 0x5f, 0x72],
         codex_primary: [0x12, 0x34, 0x56],
         codex_secondary: [0x4f, 0x76, 0xa6],
+        ..ToolColors::default()
     };
     fs::write(
         &path,
@@ -648,6 +736,9 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         maximized_hide_on: true,
         indicator_style: "bar".into(),
         indicator_effect_style: "depth".into(),
+        indicator_track_color_auto: false,
+        indicator_track_color: Some("#123456".into()),
+        indicator_track_opacity_percent: 37.5,
         ring_on: false,
         ring_numbers_on: false,
         ring_number_outline_on: true,
@@ -682,6 +773,18 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         claude_secondary_color: Some("#405060".into()),
         codex_primary_color: Some("#708090".into()),
         codex_secondary_color: Some("#a0b0c0".into()),
+        tool_warning_color: Some("#b0c0d0".into()),
+        tool_danger_color: Some("#d0c0b0".into()),
+        tool_warning_color_on: false,
+        tool_danger_color_on: true,
+        claude_text_color: Some("#112244".into()),
+        claude_text_color_on: true,
+        codex_text_color: Some("#335577".into()),
+        codex_text_color_on: false,
+        info_text_color: Some("#446688".into()),
+        info_text_color_on: true,
+        ring_text_color: Some("#557799".into()),
+        ring_text_color_on: true,
     };
 
     let settings = Settings::from_input(input);
@@ -697,6 +800,23 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
             claude_secondary: [0x40, 0x50, 0x60],
             codex_primary: [0x70, 0x80, 0x90],
             codex_secondary: [0xa0, 0xb0, 0xc0],
+            warning: [0xb0, 0xc0, 0xd0],
+            danger: [0xd0, 0xc0, 0xb0],
+            warning_on: false,
+            danger_on: true,
+        }
+    );
+    assert_eq!(
+        settings.taskbar_text_colors,
+        TaskbarTextColors {
+            claude: [0x11, 0x22, 0x44],
+            claude_on: true,
+            codex: [0x33, 0x55, 0x77],
+            codex_on: false,
+            info: [0x44, 0x66, 0x88],
+            info_on: true,
+            ring: [0x55, 0x77, 0x99],
+            ring_on: true,
         }
     );
     assert_eq!(settings.warn_threshold, 72.0);
@@ -711,6 +831,9 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(settings.maximized_hide_on);
     assert_eq!(settings.indicator_style, "bar");
     assert_eq!(settings.indicator_effect_style, "depth");
+    assert!(!settings.indicator_track_color_auto);
+    assert_eq!(settings.indicator_track_color, [0x12, 0x34, 0x56]);
+    assert_eq!(settings.indicator_track_opacity_percent, 37.5);
     assert!(!settings.ring_on);
     assert!(!settings.ring_numbers_on);
     assert!(settings.ring_number_outline_on);
@@ -740,6 +863,21 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(!settings.show_claude);
     assert!(settings.show_codex);
     assert!(settings.claude_account_auto_collect_on);
+}
+
+#[test]
+fn legacy_settings_keep_all_taskbar_text_colors_automatic() {
+    let root = temp_root("legacy-text-colors");
+    let path = root.join("settings.json");
+    fs::write(&path, r#"{"palette":"Traffic","show_claude":true}"#).unwrap();
+
+    let loaded = Settings::load_from(&path);
+
+    assert_eq!(loaded.taskbar_text_colors, TaskbarTextColors::default());
+    assert!(!loaded.taskbar_text_colors.claude_on);
+    assert!(!loaded.taskbar_text_colors.codex_on);
+    assert!(!loaded.taskbar_text_colors.info_on);
+    assert!(!loaded.taskbar_text_colors.ring_on);
 }
 
 #[test]
@@ -774,6 +912,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
         font_mode: "unknown".into(),
         indicator_style: "unexpected".into(),
         indicator_effect_style: "unexpected".into(),
+        indicator_track_opacity_percent: 999.0,
         limit_order: "unexpected".into(),
         ring_size_px: 99.0,
         ring_thickness_px: 99.0,
@@ -795,10 +934,13 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.display_basis, "remaining");
     assert_eq!(settings.language, "system");
     assert_eq!(settings.font_mode, "system");
-    assert!(settings.fullscreen_hide_on);
+    assert!(!settings.fullscreen_hide_on);
     assert!(!settings.maximized_hide_on);
     assert_eq!(settings.indicator_style, "ring");
     assert_eq!(settings.indicator_effect_style, "flat");
+    assert!(settings.indicator_track_color_auto);
+    assert_eq!(settings.indicator_track_color, [0x6b, 0x72, 0x80]);
+    assert_eq!(settings.indicator_track_opacity_percent, 100.0);
     assert_eq!(settings.limit_order, "primary_first");
     assert!(settings.ring_numbers_on);
     assert!(settings.ring_number_outline_on);

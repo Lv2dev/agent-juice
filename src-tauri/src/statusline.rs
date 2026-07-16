@@ -1,6 +1,7 @@
 use crate::paths;
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -9,11 +10,12 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const MAX_ORIGINAL_COMMAND_LEN: usize = 4096;
-const MAX_ORIGINAL_INPUT_BYTES: usize = 1024 * 1024;
+pub const MAX_STATUSLINE_INPUT_BYTES: usize = 1024 * 1024;
+pub const MAX_CLAUDE_SESSION_FILES: usize = 64;
 const MAX_ORIGINAL_OUTPUT_BYTES: usize = 256 * 1024;
 const ORIGINAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
@@ -28,17 +30,12 @@ struct ProcessTree {
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn attach(child: &Child) -> anyhow::Result<Self> {
-        use std::os::windows::io::AsRawHandle;
+    fn create() -> anyhow::Result<Self> {
         use windows::{
             core::PCWSTR,
-            Win32::{
-                Foundation::HANDLE,
-                System::JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                },
+            Win32::System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             },
         };
 
@@ -53,9 +50,31 @@ impl ProcessTree {
                 std::ptr::from_ref(&limits).cast(),
                 std::mem::size_of_val(&limits) as u32,
             )?;
-            AssignProcessToJobObject(tree.job, HANDLE(child.as_raw_handle()))?;
         }
         Ok(tree)
+    }
+
+    fn assign(&self, child: &Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::JobObjects::AssignProcessToJobObject};
+
+        unsafe { AssignProcessToJobObject(self.job, HANDLE(child.as_raw_handle()))? };
+        Ok(())
+    }
+
+    fn resume(child: &Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtResumeProcess(process_handle: *mut std::ffi::c_void) -> i32;
+        }
+
+        let status = unsafe { NtResumeProcess(child.as_raw_handle()) };
+        if status < 0 {
+            anyhow::bail!("NtResumeProcess failed with NTSTATUS 0x{status:08x}");
+        }
+        Ok(())
     }
 
     fn terminate(&self) -> bool {
@@ -76,8 +95,16 @@ struct ProcessTree;
 
 #[cfg(not(windows))]
 impl ProcessTree {
-    fn attach(_child: &Child) -> anyhow::Result<Self> {
+    fn create() -> anyhow::Result<Self> {
         Ok(Self)
+    }
+
+    fn assign(&self, _child: &Child) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn resume(_child: &Child) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn terminate(&self) -> bool {
@@ -90,20 +117,34 @@ pub fn aj_dir() -> Option<PathBuf> {
 }
 
 pub fn run_with_default_dir(input: &str) -> Vec<u8> {
+    run_with_default_dir_policy(input, true)
+}
+
+pub fn run_without_original_with_default_dir(input: &str) -> Vec<u8> {
+    run_with_default_dir_policy(input, false)
+}
+
+fn run_with_default_dir_policy(input: &str, allow_original: bool) -> Vec<u8> {
     match aj_dir() {
-        Some(dir) => run_with_dir(input, &dir),
+        Some(dir) => run_with_dir_policy(input, &dir, allow_original),
         None => fallback_line(serde_json::from_str::<Value>(input).ok().as_ref()).into_bytes(),
     }
 }
 
 pub fn run_with_dir(input: &str, dir: &Path) -> Vec<u8> {
+    run_with_dir_policy(input, dir, true)
+}
+
+fn run_with_dir_policy(input: &str, dir: &Path, allow_original: bool) -> Vec<u8> {
     let parsed = serde_json::from_str::<Value>(input).ok();
     if let Some(value) = parsed.as_ref() {
         let _ = forward_subset(value, dir);
     }
 
-    if let Some(output) = run_original(input, dir) {
-        return output;
+    if allow_original {
+        if let Some(output) = run_original(input, dir) {
+            return output;
+        }
     }
 
     fallback_line(parsed.as_ref()).into_bytes()
@@ -126,7 +167,87 @@ fn forward_subset(value: &Value, dir: &Path) -> std::io::Result<PathBuf> {
 
     let path = dir.join(format!("claude_last.{safe}.json"));
     replace_file(&path, subset.to_string().as_bytes())?;
+    let _ = prune_session_files(dir, &path);
     Ok(path)
+}
+
+struct SessionFile {
+    path: PathBuf,
+    modified: SystemTime,
+}
+
+fn prune_session_files(dir: &Path, current_path: &Path) -> std::io::Result<()> {
+    let mut candidates: Vec<_> = fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !(name.starts_with("claude_last.") && name.ends_with(".json")) {
+                return None;
+            }
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some(SessionFile {
+                path: entry.path(),
+                modified,
+            })
+        })
+        .collect();
+    if candidates.len() <= MAX_CLAUDE_SESSION_FILES {
+        return Ok(());
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut keep = HashSet::with_capacity(MAX_CLAUDE_SESSION_FILES);
+    if candidates
+        .iter()
+        .any(|candidate| candidate.path == current_path)
+    {
+        keep.insert(current_path.to_path_buf());
+    }
+    if let Some(latest_valid) = candidates
+        .iter()
+        .find(|candidate| is_valid_session_file(&candidate.path))
+    {
+        keep.insert(latest_valid.path.clone());
+    }
+    for candidate in &candidates {
+        if keep.len() >= MAX_CLAUDE_SESSION_FILES {
+            break;
+        }
+        keep.insert(candidate.path.clone());
+    }
+
+    for candidate in candidates {
+        if !keep.contains(&candidate.path) {
+            let _ = fs::remove_file(candidate.path);
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_session_file(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut contents = Vec::with_capacity(16 * 1024);
+    if file
+        .take(MAX_STATUSLINE_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut contents)
+        .is_err()
+        || contents.len() > MAX_STATUSLINE_INPUT_BYTES
+    {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&contents).is_ok_and(|value| value.is_object())
 }
 
 fn safe_session_id(session_id: &str) -> String {
@@ -201,6 +322,9 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 }
 
 fn run_original(input: &str, dir: &Path) -> Option<Vec<u8>> {
+    if input.len() > MAX_STATUSLINE_INPUT_BYTES {
+        return None;
+    }
     let original = verified_original_command(dir)?;
     let original = original.trim();
     if original.is_empty() {
@@ -241,27 +365,50 @@ fn verified_original_command(dir: &Path) -> Option<String> {
     }
 }
 
-fn run_shell(program: &str, args: &[&str], original: &str, input: &str) -> Option<Vec<u8>> {
-    if input.len() > MAX_ORIGINAL_INPUT_BYTES {
-        return None;
+fn spawn_in_process_tree(
+    command: &mut Command,
+    cleanup_deadline: Instant,
+) -> anyhow::Result<(Child, ProcessTree)> {
+    spawn_in_process_tree_with_hook(command, cleanup_deadline, |_| Ok(()))
+}
+
+fn spawn_in_process_tree_with_hook(
+    command: &mut Command,
+    cleanup_deadline: Instant,
+    after_suspended_spawn: impl FnOnce(&Child) -> anyhow::Result<()>,
+) -> anyhow::Result<(Child, ProcessTree)> {
+    let tree = ProcessTree::create()?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+
+        command.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
     }
+
+    let mut child = command.spawn()?;
+    if let Err(error) = after_suspended_spawn(&child)
+        .and_then(|()| tree.assign(&child))
+        .and_then(|()| ProcessTree::resume(&child))
+    {
+        terminate_process_tree_until(&mut child, Some(&tree), cleanup_deadline);
+        return Err(error);
+    }
+    Ok((child, tree))
+}
+
+fn run_shell(program: &str, args: &[&str], original: &str, input: &str) -> Option<Vec<u8>> {
     let deadline = Instant::now() + ORIGINAL_COMMAND_TIMEOUT;
     let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .arg(original)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let tree = match ProcessTree::attach(&child) {
-        Ok(tree) => tree,
-        Err(_) => {
-            terminate_process_tree_until(&mut child, None, hard_deadline);
-            return None;
-        }
-    };
+        .stderr(Stdio::null());
+    let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline).ok()?;
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -410,5 +557,87 @@ mod tests {
             read_bounded_to_end(std::io::Cursor::new(oversized), MAX_ORIGINAL_OUTPUT_BYTES)
                 .is_err()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn suspended_child_cannot_run_before_job_assignment() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-suspended-spawn-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("started.txt");
+        let mut command = Command::new("cmd");
+        command
+            .args(["/D", "/C"])
+            .arg(format!("echo started>{}", marker.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let marker_during_attach = marker.clone();
+        let (mut child, tree) = spawn_in_process_tree_with_hook(
+            &mut command,
+            Instant::now() + Duration::from_secs(1),
+            move |_| {
+                std::thread::sleep(Duration::from_millis(150));
+                anyhow::ensure!(
+                    !marker_during_attach.exists(),
+                    "suspended statusLine child ran before Job assignment"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(wait_for_exit_until(
+            &mut child,
+            Instant::now() + Duration::from_secs(2)
+        ));
+        drop(tree);
+        assert!(marker.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_prune_keeps_current_and_latest_valid_within_cap() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-prune-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let current = root.join("claude_last.current.json");
+        fs::write(&current, r#"{"session_id":"current"}"#).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let latest_valid = root.join("claude_last.latest-valid.json");
+        fs::write(&latest_valid, r#"{"session_id":"latest-valid"}"#).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        for index in 0..(MAX_CLAUDE_SESSION_FILES + 5) {
+            fs::write(
+                root.join(format!("claude_last.malformed-{index:03}.json")),
+                "{malformed",
+            )
+            .unwrap();
+        }
+
+        prune_session_files(&root, &current).unwrap();
+
+        let retained = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("claude_last.") && name.ends_with(".json")
+            })
+            .count();
+        assert_eq!(retained, MAX_CLAUDE_SESSION_FILES);
+        assert!(current.exists());
+        assert!(latest_valid.exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

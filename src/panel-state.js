@@ -7,21 +7,34 @@ export const DEFAULT_SETTINGS = {
   poll_interval_secs: 60,
   full_reset_time_on: true,
   palette: "Traffic",
+  taskbar_text_colors: {
+    claude: [0xd7, 0x9a, 0x32],
+    claude_on: false,
+    codex: [0x2f, 0xac, 0x7d],
+    codex_on: false,
+    info: [0x6b, 0x72, 0x80],
+    info_on: false,
+    ring: [0x6b, 0x72, 0x80],
+    ring_on: false,
+  },
   theme: "system",
   language: "system",
   font_mode: "system",
-  taskbar_offset_ratio: 0.5,
-  claude_taskbar_offset_ratio: 0.5,
-  codex_taskbar_offset_ratio: 0.5,
+  taskbar_offset_ratio: 0,
+  claude_taskbar_offset_ratio: 0,
+  codex_taskbar_offset_ratio: 0,
   show_claude: true,
   show_codex: true,
   claude_account_auto_collect_on: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
   ring_number_outline_width_px: 1.2,
-  fullscreen_hide_on: true,
+  fullscreen_hide_on: false,
   indicator_style: "ring",
   indicator_effect_style: "flat",
+  indicator_track_color_auto: true,
+  indicator_track_color: [0x6b, 0x72, 0x80],
+  indicator_track_opacity_percent: 11,
   ring_size_px: 36,
   ring_thickness_px: 4,
   ring_gap_px: 6,
@@ -69,6 +82,15 @@ function configuredToolColor(settings, tool, secondary) {
   const fallback = TOOL_SAFE[tool]?.[secondary ? 1 : 0] ?? UNKNOWN_COLOR;
   const key = `${tool}_${secondary ? "secondary" : "primary"}`;
   return rgbColor(settings?.tool_colors?.[key], fallback);
+}
+
+function configuredToolThresholdColor(settings, level) {
+  const index = level === "danger" ? 2 : 1;
+  return rgbColor(settings?.tool_colors?.[level], RAMP.Traffic[index]);
+}
+
+function toolThresholdColorOn(settings, level) {
+  return settings?.tool_colors?.[`${level}_on`] !== false;
 }
 
 export function toolBrandColor(tool, settings = DEFAULT_SETTINGS) {
@@ -172,8 +194,15 @@ export function colorForToolPercent(
   const ramps = paletteRamps(set.palette);
   const index = value >= danger ? 2 : value >= warn ? 1 : 0;
 
-  if (index === 0 && ramps.name === "Traffic" && TOOL_SAFE[tool]) {
-    return configuredToolColor(set, tool, secondary);
+  if (ramps.name === "Traffic" && TOOL_SAFE[tool]) {
+    const base = configuredToolColor(set, tool, secondary);
+    if (index === 2 && toolThresholdColorOn(set, "danger")) {
+      return configuredToolThresholdColor(set, "danger");
+    }
+    if (index >= 1 && toolThresholdColorOn(set, "warning")) {
+      return configuredToolThresholdColor(set, "warning");
+    }
+    return base;
   }
   return (secondary ? ramps.secondary : ramps.primary)[index];
 }

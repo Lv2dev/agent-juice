@@ -2,10 +2,10 @@ use agent_juice::taskbar::{
     dock_rect_for_taskbar, dock_rect_for_taskbar_at_offset, dock_rect_for_taskbar_drag_at_point,
     dock_rect_for_taskbar_target, drag_rect_for_logical_length_at_dpi,
     offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect, rect_covers_monitor,
-    rect_covers_work_area_without_covering_monitor, taskbar_monitor_key,
-    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key, taskbar_tooltip_anchor,
-    visible_window_coverage_on_monitor, window_coverage_is_ignored, DockRect, TaskbarTarget,
-    WindowCoverageCandidate,
+    rect_covers_work_area_without_covering_monitor, taskbar_monitor_device_key,
+    taskbar_monitor_key, taskbar_monitor_path_key, taskbar_target_by_key_or_primary,
+    taskbar_target_for_point_or_key, taskbar_tooltip_anchor, visible_window_coverage_on_monitor,
+    window_coverage_is_ignored, DockRect, TaskbarTarget, WindowCoverageCandidate,
 };
 
 #[test]
@@ -425,6 +425,7 @@ fn visible_window_coverage_scans_past_excluded_foreground_windows() {
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: false,
             rect: DockRect {
                 x: 400,
                 y: 200,
@@ -439,6 +440,7 @@ fn visible_window_coverage_scans_past_excluded_foreground_windows() {
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: false,
             rect: monitor,
             monitor,
             work_area,
@@ -448,6 +450,48 @@ fn visible_window_coverage_scans_past_excluded_foreground_windows() {
     assert_eq!(
         visible_window_coverage_on_monitor(&candidates, &[1], monitor),
         (true, false)
+    );
+}
+
+#[test]
+fn iszoomed_window_is_maximized_even_when_its_frame_covers_the_monitor() {
+    let monitor = DockRect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let candidate = WindowCoverageCandidate {
+        hwnd: 1,
+        visible: true,
+        minimized: false,
+        cloaked: false,
+        maximized: true,
+        rect: monitor,
+        monitor,
+        work_area: DockRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1032,
+        },
+    };
+
+    assert_eq!(
+        visible_window_coverage_on_monitor(&[candidate], &[], monitor),
+        (false, true)
+    );
+}
+
+#[test]
+fn monitor_device_key_is_stable_across_case_and_surrounding_space() {
+    assert_eq!(
+        taskbar_monitor_device_key(r"  \\.\DISPLAY2  "),
+        r"device:\\.\display2"
+    );
+    assert_eq!(
+        taskbar_monitor_path_key("  MONITOR\\ACME123\\{ABC}  "),
+        "monitor-path:monitor\\acme123\\{abc}"
     );
 }
 
@@ -484,6 +528,7 @@ fn visible_window_coverage_ignores_other_monitor_maximized_windows() {
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: true,
             rect: secondary_work_area,
             monitor: secondary_monitor,
             work_area: secondary_work_area,
@@ -493,6 +538,7 @@ fn visible_window_coverage_ignores_other_monitor_maximized_windows() {
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: false,
             rect: DockRect {
                 x: 300,
                 y: 300,
@@ -531,6 +577,7 @@ fn visible_window_coverage_ignores_cloaked_monitor_cover_windows() {
             visible: true,
             minimized: false,
             cloaked: true,
+            maximized: false,
             rect: primary_monitor,
             monitor: primary_monitor,
             work_area: primary_work_area,
@@ -540,6 +587,7 @@ fn visible_window_coverage_ignores_cloaked_monitor_cover_windows() {
             visible: true,
             minimized: false,
             cloaked: false,
+            maximized: false,
             rect: DockRect {
                 x: 300,
                 y: 300,

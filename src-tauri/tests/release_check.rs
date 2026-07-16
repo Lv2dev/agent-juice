@@ -1,6 +1,6 @@
 use agent_juice::update::{
-    check_for_update_at, claim_notification_at, is_release_url_allowed, is_update_available,
-    load_state_from, parse_latest_release, UpdateState,
+    check_for_update_at, is_release_url_allowed, is_update_available, load_state_from,
+    parse_latest_release, prepare_notification_at, UpdateState,
 };
 use chrono::{Duration, TimeZone, Utc};
 use std::{
@@ -116,15 +116,37 @@ fn automatic_checks_throttle_for_24_hours_and_manual_checks_bypass_cache() {
 }
 
 #[test]
-fn notification_claim_is_persisted_once_per_version() {
+fn notification_is_persisted_only_after_successful_commit() {
     let path = temp_path("notification");
-    assert!(claim_notification_at(&path, "0.1.3").unwrap());
-    assert!(!claim_notification_at(&path, "0.1.3").unwrap());
-    assert!(claim_notification_at(&path, "0.1.4").unwrap());
+    assert_eq!(load_state_from(&path).last_notified_version, None);
+
+    let failed_display = prepare_notification_at(&path, "0.1.3").unwrap().unwrap();
+    assert!(prepare_notification_at(&path, "0.1.3").unwrap().is_none());
+    drop(failed_display);
+
+    let successful_display = prepare_notification_at(&path, "0.1.3").unwrap().unwrap();
+    assert!(successful_display.commit().unwrap());
+    assert!(prepare_notification_at(&path, "0.1.3").unwrap().is_none());
+    assert!(prepare_notification_at(&path, "0.1.2").unwrap().is_none());
+    let newer_display = prepare_notification_at(&path, "0.1.4").unwrap().unwrap();
+    assert!(newer_display.commit().unwrap());
     assert_eq!(
         load_state_from(&path).last_notified_version.as_deref(),
         Some("0.1.4")
     );
+}
+
+#[test]
+fn update_state_temp_file_is_synced_before_atomic_replace() {
+    let source =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/update.rs"))
+            .unwrap();
+    let write = source.find("file.write_all(&contents)").unwrap();
+    let sync = source.find("file.sync_all()").unwrap();
+    let replace = source.find("match replace(path, &temp)").unwrap();
+
+    assert!(write < sync);
+    assert!(sync < replace);
 }
 
 #[test]
