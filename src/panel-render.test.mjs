@@ -145,6 +145,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(clickPrevented, true);
   assert.ok(invokedCommands.includes("toggle_panel_maximized"));
+  assert.ok(invokedCommands.includes("get_activity"));
   let dragPrevented = false;
   listeners.pointerdown?.({
     button: 0,
@@ -475,7 +476,7 @@ test("panel bounds pending listeners, cleans late registrations, and preserves n
 
     await new Promise((resolve) => setTimeout(resolve, 1_950));
     assert.equal(attempts.get("panel-visibility-updated"), 3);
-    assert.equal(fallbackIntervals, 1);
+    assert.equal(fallbackIntervals, 2);
 
     pendingListenerResolvers[0](() => {
       lateUnlistenCalls += 1;
@@ -485,7 +486,7 @@ test("panel bounds pending listeners, cleans late registrations, and preserves n
 
     windowListeners.pagehide?.();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(normalUnlistenCalls, 2);
+    assert.equal(normalUnlistenCalls, 3);
 
     for (const resolve of pendingListenerResolvers.slice(1)) {
       resolve(() => {

@@ -3,10 +3,155 @@ use agent_juice::taskbar::{
     dock_rect_for_taskbar_target, drag_rect_for_logical_length_at_dpi,
     offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect, rect_covers_monitor,
     rect_covers_work_area_without_covering_monitor, taskbar_monitor_device_key,
-    taskbar_monitor_key, taskbar_monitor_path_key, taskbar_target_by_key_or_primary,
-    taskbar_target_for_point_or_key, taskbar_tooltip_anchor, visible_window_coverage_on_monitor,
-    window_coverage_is_ignored, DockRect, TaskbarTarget, WindowCoverageCandidate,
+    taskbar_monitor_key, taskbar_monitor_path_key, taskbar_rect_for_monitor_work_area,
+    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key, taskbar_tooltip_anchor,
+    visible_window_coverage_on_monitor, window_coverage_is_ignored, DockRect, TaskbarTarget,
+    WindowCoverageCandidate,
 };
+
+#[test]
+fn taskbar_rect_uses_reserved_bottom_edge_on_a_mixed_resolution_monitor() {
+    let monitor = DockRect {
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+    };
+    let work_area = DockRect {
+        x: 1920,
+        y: 0,
+        width: 2560,
+        height: 1392,
+    };
+    let transitional_window = DockRect {
+        x: 1920,
+        y: 1344,
+        width: 2560,
+        height: 48,
+    };
+
+    assert_eq!(
+        taskbar_rect_for_monitor_work_area(transitional_window, monitor, work_area),
+        DockRect {
+            x: 1920,
+            y: 1392,
+            width: 2560,
+            height: 48,
+        }
+    );
+}
+
+#[test]
+fn taskbar_rect_handles_negative_coordinates_and_side_taskbars() {
+    let monitor = DockRect {
+        x: -1600,
+        y: -200,
+        width: 1600,
+        height: 1200,
+    };
+    let work_area = DockRect {
+        x: -1540,
+        y: -200,
+        width: 1540,
+        height: 1200,
+    };
+
+    assert_eq!(
+        taskbar_rect_for_monitor_work_area(
+            DockRect {
+                x: -1592,
+                y: -200,
+                width: 52,
+                height: 1200,
+            },
+            monitor,
+            work_area,
+        ),
+        DockRect {
+            x: -1600,
+            y: -200,
+            width: 60,
+            height: 1200,
+        }
+    );
+}
+
+#[test]
+fn taskbar_rect_normalizes_reserved_top_and_right_edges() {
+    let monitor = DockRect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    assert_eq!(
+        taskbar_rect_for_monitor_work_area(
+            DockRect {
+                x: 0,
+                y: 6,
+                width: 1920,
+                height: 40,
+            },
+            monitor,
+            DockRect {
+                x: 0,
+                y: 48,
+                width: 1920,
+                height: 1032,
+            },
+        ),
+        DockRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 48,
+        }
+    );
+    assert_eq!(
+        taskbar_rect_for_monitor_work_area(
+            DockRect {
+                x: 1870,
+                y: 0,
+                width: 44,
+                height: 1080,
+            },
+            monitor,
+            DockRect {
+                x: 0,
+                y: 0,
+                width: 1860,
+                height: 1080,
+            },
+        ),
+        DockRect {
+            x: 1860,
+            y: 0,
+            width: 60,
+            height: 1080,
+        }
+    );
+}
+
+#[test]
+fn taskbar_rect_preserves_window_bounds_when_auto_hide_reserves_no_edge() {
+    let monitor = DockRect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+    let window = DockRect {
+        x: 0,
+        y: 1078,
+        width: 1920,
+        height: 2,
+    };
+
+    assert_eq!(
+        taskbar_rect_for_monitor_work_area(window, monitor, monitor),
+        window
+    );
+}
 
 #[test]
 fn dock_rect_sits_inside_horizontal_taskbar_without_reserving_screen_space() {

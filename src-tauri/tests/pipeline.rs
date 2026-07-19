@@ -147,6 +147,77 @@ fn collect_representatives_reads_only_latest_status_per_tool() {
 }
 
 #[test]
+fn disabled_tools_are_excluded_from_all_collection_paths() {
+    let root = unique_temp_dir();
+    let data_dir = root.join("data");
+    let sessions_dir = root.join("sessions").join("2026").join("07").join("07");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(
+        data_dir.join("claude_last.enabled.json"),
+        r#"{"session_id":"claude","rate_limits":{"five_hour":{"used_percentage":25}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        sessions_dir.join("rollout-enabled.jsonl"),
+        r#"{"timestamp":"2026-07-07T00:01:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":40,"window_minutes":300}}}}"#,
+    )
+    .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 7, 0, 1, 30).unwrap();
+
+    let codex_only = Settings {
+        show_claude: false,
+        show_codex: true,
+        ..Settings::default()
+    };
+    for statuses in [
+        collect_all_from(
+            &codex_only,
+            Some(&data_dir),
+            Some(root.join("sessions").as_path()),
+            now,
+        ),
+        collect_representatives_from(
+            &codex_only,
+            Some(&data_dir),
+            Some(root.join("sessions").as_path()),
+            now,
+        ),
+    ] {
+        assert!(!statuses.is_empty());
+        assert!(statuses.iter().all(|status| status.tool == Tool::Codex));
+    }
+
+    let claude_only = Settings {
+        show_claude: true,
+        show_codex: false,
+        ..Settings::default()
+    };
+    let statuses = collect_representatives_from(
+        &claude_only,
+        Some(&data_dir),
+        Some(root.join("sessions").as_path()),
+        now,
+    );
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].tool, Tool::Claude);
+
+    let none = Settings {
+        show_claude: false,
+        show_codex: false,
+        ..Settings::default()
+    };
+    assert!(collect_all_from(
+        &none,
+        Some(&data_dir),
+        Some(root.join("sessions").as_path()),
+        now,
+    )
+    .is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn collect_representatives_backtracks_to_recent_codex_rollout_with_token_count() {
     let root = unique_temp_dir();
     let sessions_dir = root.join("sessions").join("2026").join("07").join("08");

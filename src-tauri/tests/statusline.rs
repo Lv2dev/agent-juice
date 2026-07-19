@@ -198,6 +198,33 @@ fn statusline_binary_bounds_oversized_stdin_without_losing_juice_state() {
 }
 
 #[test]
+fn statusline_binary_does_not_collect_when_claude_is_disabled() {
+    let dir = unique_temp_dir();
+    fs::create_dir_all(&dir).unwrap();
+    Settings {
+        show_claude: false,
+        ..Settings::default()
+    }
+    .save_to(&dir.join("settings.json"))
+    .unwrap();
+    let input = br#"{"session_id":"disabled","context_window":{"used_percentage":63}}"#;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentjuice-statusline"))
+        .env("AGENT_JUICE_DATA_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!dir.join("claude_last.disabled.json").exists());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn restore_owned_statusline_cli_uses_exit_status_without_stdout() {
     let root = unique_temp_dir();
     let home = root.join("home");

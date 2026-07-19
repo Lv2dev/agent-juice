@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod adapters;
 pub mod collector;
 pub mod config;
@@ -45,6 +46,8 @@ const CODEX_ROLLOUT_CACHE_MAX_AGE_SECS: u64 = 60;
 const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 60;
 const CLAUDE_USAGE_TIMEOUT_SECS: u64 = 10;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
+const ACTIVITY_BACKFILL_MAX_PASSES: usize = 16;
+const ACTIVITY_BACKFILL_MAX_SECS: u64 = 30;
 const CLAUDE_FALLBACK_RESERVE_SECS: u64 = 2;
 const CLAUDE_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
 const TRAY_ID: &str = "juice";
@@ -286,6 +289,7 @@ static TASKBAR_LAYOUT_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TASKBAR_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct ForceRefreshGuard;
 
@@ -300,6 +304,21 @@ fn try_begin_force_refresh() -> Option<ForceRefreshGuard> {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .ok()
         .map(|_| ForceRefreshGuard)
+}
+
+struct ActivityRefreshGuard;
+
+impl Drop for ActivityRefreshGuard {
+    fn drop(&mut self) {
+        ACTIVITY_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+fn try_begin_activity_refresh() -> Option<ActivityRefreshGuard> {
+    ACTIVITY_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| ActivityRefreshGuard)
 }
 
 fn mark_taskbar_settings_changed() -> u64 {
@@ -434,26 +453,31 @@ pub fn collect_all_from(
     let pc_id = gethostname::gethostname().to_string_lossy().to_string();
     let mut statuses = Vec::new();
 
-    if let Some(dir) = data_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !(name.starts_with("claude_last.") && name.ends_with(".json")) {
-                    continue;
-                }
+    if settings.show_claude {
+        if let Some(dir) = data_dir {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !(name.starts_with("claude_last.") && name.ends_with(".json")) {
+                        continue;
+                    }
 
-                if let Some(status) = parse_claude_status_file(&entry.path(), settings, &pc_id, now)
-                {
-                    statuses.push(status);
+                    if let Some(status) =
+                        parse_claude_status_file(&entry.path(), settings, &pc_id, now)
+                    {
+                        statuses.push(status);
+                    }
                 }
             }
         }
     }
 
-    if let Some(sessions_dir) = codex_sessions_dir {
-        for path in collector::list_rollouts(sessions_dir) {
-            if let Some(status) = parse_codex_status_file(&path, settings, &pc_id, now) {
-                statuses.push(status);
+    if settings.show_codex {
+        if let Some(sessions_dir) = codex_sessions_dir {
+            for path in collector::list_rollouts(sessions_dir) {
+                if let Some(status) = parse_codex_status_file(&path, settings, &pc_id, now) {
+                    statuses.push(status);
+                }
             }
         }
     }
@@ -465,17 +489,59 @@ pub fn collect_representatives(settings: &Settings) -> Vec<AgentStatus> {
     collect_representatives_with_options(settings, false, false)
 }
 
-fn collect_representatives_force(settings: &Settings) -> Vec<AgentStatus> {
-    collect_representatives_with_options(settings, true, true)
+async fn collect_representatives_off_thread(settings: Settings, force: bool) -> Vec<AgentStatus> {
+    collect_representatives_off_thread_with_options(settings, force, force).await
 }
 
-async fn collect_representatives_off_thread(settings: Settings, force: bool) -> Vec<AgentStatus> {
-    match tauri::async_runtime::spawn_blocking(move || {
-        if force {
-            collect_representatives_force(&settings)
-        } else {
-            collect_representatives(&settings)
+async fn collect_activity_off_thread(
+    settings: Settings,
+) -> Result<activity::ActivitySnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        activity::refresh(settings.show_claude, settings.show_codex)
+    })
+    .await
+    .map_err(|err| format!("activity collection task failed: {err}"))?
+    .map_err(|err| err.to_string())
+}
+
+fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings) {
+    let Some(guard) = try_begin_activity_refresh() else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let _guard = guard;
+        let started = std::time::Instant::now();
+        for pass in 0..ACTIVITY_BACKFILL_MAX_PASSES {
+            match collect_activity_off_thread(settings.clone()).await {
+                Ok(snapshot) => {
+                    let backfill_pending = snapshot.backfill_pending;
+                    let _ = app.emit("activity-updated", snapshot);
+                    if !backfill_pending {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    eprintln!("[activity] refresh failed: {err}");
+                    break;
+                }
+            }
+            if pass + 1 >= ACTIVITY_BACKFILL_MAX_PASSES
+                || started.elapsed() >= std::time::Duration::from_secs(ACTIVITY_BACKFILL_MAX_SECS)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
         }
+    });
+}
+
+async fn collect_representatives_off_thread_with_options(
+    settings: Settings,
+    force_codex_account: bool,
+    force_claude_usage: bool,
+) -> Vec<AgentStatus> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        collect_representatives_with_options(&settings, force_codex_account, force_claude_usage)
     })
     .await
     {
@@ -502,11 +568,16 @@ fn collect_representatives_with_options(
     force_codex_account: bool,
     force_claude_usage: bool,
 ) -> Vec<AgentStatus> {
+    if !settings.show_claude && !settings.show_codex {
+        return Vec::new();
+    }
     let data_dir = paths::data_dir();
     let codex_sessions_dir = dirs::home_dir().map(|home| home.join(".codex").join("sessions"));
     let now = Utc::now();
 
-    COLLECTION_COORDINATOR.run(force_codex_account || force_claude_usage, || {
+    let force = (settings.show_codex && force_codex_account)
+        || (settings.show_claude && force_claude_usage);
+    let statuses = COLLECTION_COORDINATOR.run(force, || {
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(COLLECTION_REFRESH_DEADLINE_SECS);
         collect_representatives_runtime(
@@ -518,7 +589,43 @@ fn collect_representatives_with_options(
             force_claude_usage,
             deadline,
         )
-    })
+    });
+    filter_enabled_statuses(statuses, settings)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CollectionPlan {
+    claude_status: bool,
+    claude_account: bool,
+    codex: bool,
+    force_claude_account: bool,
+    force_codex_account: bool,
+}
+
+fn collection_plan(
+    settings: &Settings,
+    force_codex_account: bool,
+    force_claude_usage: bool,
+) -> CollectionPlan {
+    CollectionPlan {
+        claude_status: settings.show_claude,
+        claude_account: settings.show_claude
+            && (force_claude_usage || settings.claude_account_auto_collect_on),
+        codex: settings.show_codex,
+        force_claude_account: settings.show_claude && force_claude_usage,
+        force_codex_account: settings.show_codex && force_codex_account,
+    }
+}
+
+fn filter_enabled_statuses(
+    mut statuses: Vec<AgentStatus>,
+    settings: &Settings,
+) -> Vec<AgentStatus> {
+    statuses.retain(|status| match status.tool {
+        Tool::Claude => settings.show_claude,
+        Tool::Codex => settings.show_codex,
+    });
+    statuses
 }
 
 fn collect_representatives_runtime(
@@ -532,8 +639,8 @@ fn collect_representatives_runtime(
 ) -> Vec<AgentStatus> {
     let pc_id = gethostname::gethostname().to_string_lossy().to_string();
     let mut statuses = Vec::new();
-    let collect_claude = force_claude_usage || settings.claude_account_auto_collect_on;
-    let claude_reserve = if collect_claude {
+    let plan = collection_plan(settings, force_codex_account, force_claude_usage);
+    let claude_reserve = if plan.claude_account {
         std::time::Duration::from_secs(CLAUDE_COLLECTION_MIN_BUDGET_SECS)
     } else {
         std::time::Duration::ZERO
@@ -543,31 +650,45 @@ fn collect_representatives_runtime(
         std::time::Duration::from_secs(CODEX_ACCOUNT_API_TIMEOUT_SECS) + claude_reserve,
     );
 
-    let claude_status = recent_matching_files(data_dir, |name| {
-        name.starts_with("claude_last.") && name.ends_with(".json")
-    })
-    .into_iter()
-    .find_map(|path| parse_claude_status_file(&path, settings, &pc_id, now));
-    let codex_rollout = codex_sessions_dir.and_then(|sessions_dir| {
-        collect_codex_rollout_status(
-            sessions_dir,
+    let claude_status = plan
+        .claude_status
+        .then(|| {
+            recent_matching_files(data_dir, |name| {
+                name.starts_with("claude_last.") && name.ends_with(".json")
+            })
+            .into_iter()
+            .find_map(|path| parse_claude_status_file(&path, settings, &pc_id, now))
+        })
+        .flatten();
+    let codex_rollout = plan
+        .codex
+        .then(|| {
+            codex_sessions_dir.and_then(|sessions_dir| {
+                collect_codex_rollout_status(
+                    sessions_dir,
+                    settings,
+                    &pc_id,
+                    now,
+                    plan.force_codex_account,
+                    rollout_deadline,
+                )
+            })
+        })
+        .flatten();
+    let codex_account = if plan.codex {
+        collect_codex_account_status(
             settings,
             &pc_id,
             now,
-            force_codex_account,
-            rollout_deadline,
+            plan.force_codex_account,
+            deadline,
+            claude_reserve,
         )
-    });
-    let codex_account = collect_codex_account_status(
-        settings,
-        &pc_id,
-        now,
-        force_codex_account,
-        deadline,
-        claude_reserve,
-    );
-    let claude_usage = if collect_claude {
-        collect_claude_usage_status(settings, &pc_id, now, force_claude_usage, deadline)
+    } else {
+        None
+    };
+    let claude_usage = if plan.claude_account {
+        collect_claude_usage_status(settings, &pc_id, now, plan.force_claude_account, deadline)
     } else {
         None
     };
@@ -591,20 +712,24 @@ pub fn collect_representatives_from(
     let pc_id = gethostname::gethostname().to_string_lossy().to_string();
     let mut statuses = Vec::new();
 
-    if let Some(status) = recent_matching_files(data_dir, |name| {
-        name.starts_with("claude_last.") && name.ends_with(".json")
-    })
-    .into_iter()
-    .find_map(|path| parse_claude_status_file(&path, settings, &pc_id, now))
-    {
-        statuses.push(status);
+    if settings.show_claude {
+        if let Some(status) = recent_matching_files(data_dir, |name| {
+            name.starts_with("claude_last.") && name.ends_with(".json")
+        })
+        .into_iter()
+        .find_map(|path| parse_claude_status_file(&path, settings, &pc_id, now))
+        {
+            statuses.push(status);
+        }
     }
 
-    if let Some(sessions_dir) = codex_sessions_dir {
-        for path in collector::recent_rollouts(sessions_dir, CODEX_REPRESENTATIVE_CANDIDATES) {
-            if let Some(status) = parse_codex_status_file(&path, settings, &pc_id, now) {
-                statuses.push(status);
-                break;
+    if settings.show_codex {
+        if let Some(sessions_dir) = codex_sessions_dir {
+            for path in collector::recent_rollouts(sessions_dir, CODEX_REPRESENTATIVE_CANDIDATES) {
+                if let Some(status) = parse_codex_status_file(&path, settings, &pc_id, now) {
+                    statuses.push(status);
+                    break;
+                }
             }
         }
     }
@@ -1278,24 +1403,22 @@ fn taskbar_bar_window_is_visible(app: &tauri::AppHandle, tool: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn taskbar_bar_hit_is_shell_cover(
+fn taskbar_bar_hit_is_cover(
     bar: windows::Win32::Foundation::HWND,
-    taskbar: windows::Win32::Foundation::HWND,
     hit: windows::Win32::Foundation::HWND,
     root: windows::Win32::Foundation::HWND,
+    juice_bars: &[windows::Win32::Foundation::HWND],
 ) -> bool {
-    if hit.0.is_null() || taskbar.0.is_null() || bar == hit || (!root.0.is_null() && bar == root) {
+    if hit.0.is_null() || bar == hit || (!root.0.is_null() && bar == root) {
         return false;
     }
-    taskbar == hit || (!root.0.is_null() && taskbar == root)
+    !juice_bars
+        .iter()
+        .any(|candidate| *candidate == hit || (!root.0.is_null() && *candidate == root))
 }
 
 #[cfg(windows)]
-fn taskbar_bar_window_is_shell_covered(
-    app: &tauri::AppHandle,
-    tool: &str,
-    taskbar_hwnd: windows::Win32::Foundation::HWND,
-) -> bool {
+fn taskbar_bar_window_is_covered(app: &tauri::AppHandle, tool: &str) -> bool {
     use windows::Win32::{
         Foundation::POINT,
         UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT},
@@ -1316,7 +1439,34 @@ fn taskbar_bar_window_is_shell_covered(
     };
     let hit = unsafe { WindowFromPoint(point) };
     let root = unsafe { GetAncestor(hit, GA_ROOT) };
-    taskbar_bar_hit_is_shell_cover(hwnd, taskbar_hwnd, hit, root)
+    taskbar_bar_hit_is_cover(hwnd, hit, root, &taskbar_bar_hwnds(app))
+}
+
+#[cfg(windows)]
+fn taskbar_bar_window_overlay_contract_matches(app: &tauri::AppHandle, tool: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE,
+    };
+
+    let Some(hwnd) = taskbar_window_hwnd(app, tool) else {
+        return false;
+    };
+    unsafe {
+        bar_overlay_contract_matches(
+            GetWindowLongPtrW(hwnd, GWL_EXSTYLE),
+            GetWindowLongPtrW(hwnd, GWL_STYLE),
+            GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT),
+        )
+    }
+}
+
+fn taskbar_observation_requires_reapply(
+    expected_visible: bool,
+    visible: bool,
+    covered: bool,
+    overlay_contract: bool,
+) -> bool {
+    expected_visible != visible || (expected_visible && visible && (covered || !overlay_contract))
 }
 
 #[cfg(windows)]
@@ -2250,16 +2400,33 @@ async fn get_status() -> Result<Vec<AgentStatus>, String> {
 }
 
 #[tauri::command]
+async fn get_activity(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<activity::ActivitySnapshot, String> {
+    ensure_panel_command(window.label())?;
+    drop(window);
+    let settings = Settings::try_load().map_err(|err| err.to_string())?;
+    let snapshot = collect_activity_off_thread(settings.clone()).await?;
+    if snapshot.backfill_pending {
+        spawn_activity_refresh(app, settings);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
 async fn refresh_status(
     window: tauri::Window,
     app: tauri::AppHandle,
 ) -> Result<Vec<AgentStatus>, String> {
     ensure_status_refresh_command(window.label())?;
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
+    let activity_settings = settings.clone();
     let (statuses, collected) = collect_force_refresh_off_thread(settings).await;
     if collected {
         let _ = app.emit("status-updated", &statuses);
     }
+    spawn_activity_refresh(app, activity_settings);
     Ok(statuses)
 }
 
@@ -2621,6 +2788,16 @@ async fn save_settings(
         .await
         .map_err(|err| format!("settings load task failed: {err}"))?
         .map_err(|err| err.to_string())?;
+    let previous_show_claude = baseline.show_claude;
+    let claude_collection_transition =
+        (baseline.show_claude != requested.show_claude).then_some(requested.show_claude);
+    let claude_enabled_now = !baseline.show_claude && requested.show_claude;
+    let codex_enabled_now = !baseline.show_codex && requested.show_codex;
+    let tool_collection_changed = baseline.show_claude != requested.show_claude
+        || baseline.show_codex != requested.show_codex;
+    if let Some(enabled) = claude_collection_transition {
+        reconcile_claude_statusline_off_thread(enabled).await?;
+    }
     let drag_was_active = taskbar_drag_active(&app);
     preserve_taskbar_targets(&baseline, &mut requested);
     #[cfg(windows)]
@@ -2628,7 +2805,7 @@ async fn save_settings(
         preserve_taskbar_leading_edges(&app, &baseline, &mut requested);
     }
     let update_app = app.clone();
-    let (settings, autostart_changed) = tauri::async_runtime::spawn_blocking(move || {
+    let save_result = tauri::async_runtime::spawn_blocking(move || {
         let mut autostart_changed = false;
         let settings = Settings::update(|current| {
             autostart_changed = autostart_setting_changed(current, &requested);
@@ -2642,9 +2819,26 @@ async fn save_settings(
         })?;
         Ok::<_, anyhow::Error>((settings, autostart_changed))
     })
-    .await
-    .map_err(|err| format!("settings save task failed: {err}"))?
-    .map_err(|err| err.to_string())?;
+    .await;
+    let save_result = match save_result {
+        Ok(result) => result.map_err(|err| err.to_string()),
+        Err(err) => Err(format!("settings save task failed: {err}")),
+    };
+    let (settings, autostart_changed) = match save_result {
+        Ok(saved) => saved,
+        Err(save_error) => {
+            if claude_collection_transition.is_some() {
+                if let Err(rollback_error) =
+                    reconcile_claude_statusline_off_thread(previous_show_claude).await
+                {
+                    return Err(format!(
+                        "{save_error}; Claude collection rollback failed: {rollback_error}"
+                    ));
+                }
+            }
+            return Err(save_error);
+        }
+    };
     let generation = mark_taskbar_settings_changed();
     let taskbar_result = if taskbar_drag_active(&app) {
         Ok(())
@@ -2667,6 +2861,26 @@ async fn save_settings(
         Ok(())
     };
     let _ = app.emit("settings-updated", &settings);
+    if tool_collection_changed {
+        let visible = filter_enabled_statuses(COLLECTION_COORDINATOR.last_result(), &settings);
+        let _ = app.emit("status-updated", &visible);
+        if claude_enabled_now || codex_enabled_now {
+            let refresh_app = app.clone();
+            let refresh_settings = settings.clone();
+            tauri::async_runtime::spawn(async move {
+                let force_claude =
+                    claude_enabled_now && refresh_settings.claude_account_auto_collect_on;
+                let statuses = collect_representatives_off_thread_with_options(
+                    refresh_settings,
+                    codex_enabled_now,
+                    force_claude,
+                )
+                .await;
+                let _ = refresh_app.emit("status-updated", &statuses);
+            });
+            spawn_activity_refresh(app.clone(), settings.clone());
+        }
+    }
     let report = settings_apply_report(settings, taskbar_result, autostart_result);
     retry_settings_side_effects(app, !report.taskbar_applied, !report.autostart_applied);
     Ok(report)
@@ -3160,8 +3374,10 @@ fn taskbar_dock_signature(
     app: &tauri::AppHandle,
     settings: &Settings,
     snapshot: &TaskbarDockSnapshot,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, bool)> {
     let mut signature = serde_json::to_string(settings)?;
+    let mut requires_reapply = false;
+    let taskbar_paused = taskbar_bars_paused(app);
     signature.push_str(if taskbar_bars_paused(app) {
         "|paused"
     } else {
@@ -3175,27 +3391,44 @@ fn taskbar_dock_signature(
             .get(&taskbar.key)
             .copied()
             .unwrap_or_default();
-        let width = taskbar_dock_width_for_manager(app, settings, tool).unwrap_or_default();
+        let width = taskbar_dock_width_for_manager(app, settings, tool);
+        let expected_visible = width.is_some()
+            && taskbar_target_initialized(settings, tool)
+            && should_show_taskbar_bar_with_pause(
+                settings,
+                tool,
+                window_state.0,
+                window_state.1,
+                taskbar_paused,
+            );
         let visible = taskbar_bar_window_is_visible(app, tool);
-        let shell_covered = visible && taskbar_bar_window_is_shell_covered(app, tool, taskbar.hwnd);
+        let covered = visible && taskbar_bar_window_is_covered(app, tool);
+        let overlay_contract = taskbar_bar_window_overlay_contract_matches(app, tool);
+        requires_reapply |= taskbar_observation_requires_reapply(
+            expected_visible,
+            visible,
+            covered,
+            overlay_contract,
+        );
         signature.push_str(&format!(
-            "|{tool}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "|{tool}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             taskbar.hwnd.0 as isize,
             taskbar.left,
             taskbar.top,
             taskbar.right,
             taskbar.bottom,
-            width,
+            width.unwrap_or_default(),
             taskbar_layout_ratio(app, settings, tool),
             window_state.0,
             window_state.1,
             taskbar_menu_is_open(app, tool),
             taskbar_bar_window_is_alive(app, tool),
             visible,
-            shell_covered,
+            covered,
+            overlay_contract,
         ));
     }
-    Ok(signature)
+    Ok((signature, requires_reapply))
 }
 
 #[cfg(windows)]
@@ -3874,8 +4107,9 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                         }
                     }
                     let dock_result = (|| -> anyhow::Result<Option<String>> {
-                        let signature = taskbar_dock_signature(&app, &settings, &snapshot)?;
-                        if last_signature.as_ref() == Some(&signature) {
+                        let (signature, requires_reapply) =
+                            taskbar_dock_signature(&app, &settings, &snapshot)?;
+                        if !requires_reapply && last_signature.as_ref() == Some(&signature) {
                             return Ok(None);
                         }
                         apply_taskbar_dock_with_snapshot(
@@ -3906,18 +4140,6 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
     }
 }
 
-#[tauri::command]
-fn install_statusline(window: tauri::Window) -> Result<(), String> {
-    ensure_panel_command(window.label())?;
-    Settings::install_statusline_wrap(&statusline_bridge_path()?).map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-fn restore_statusline(window: tauri::Window) -> Result<(), String> {
-    ensure_panel_command(window.label())?;
-    Settings::restore_statusline().map_err(|err| err.to_string())
-}
-
 fn statusline_bridge_path() -> Result<String, String> {
     let name = if cfg!(windows) {
         "agentjuice-statusline.exe"
@@ -3934,17 +4156,32 @@ fn statusline_bridge_path() -> Result<String, String> {
         })
 }
 
-fn auto_connect_statusline_for_release() {
+fn reconcile_claude_statusline_for_release(enabled: bool) -> Result<(), String> {
     if cfg!(debug_assertions) {
-        return;
+        return Ok(());
     }
 
-    let result = statusline_bridge_path().and_then(|bridge| {
-        Settings::install_statusline_wrap(&bridge).map_err(|err| err.to_string())
-    });
-    if let Err(err) = result {
-        eprintln!("[statusline] auto-connect failed: {err}");
+    if enabled {
+        statusline_bridge_path().and_then(|bridge| {
+            Settings::install_statusline_wrap(&bridge).map_err(|err| err.to_string())
+        })
+    } else {
+        Settings::restore_statusline_if_installed().map_err(|err| err.to_string())
     }
+}
+
+async fn reconcile_claude_statusline_off_thread(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reconcile_claude_statusline_for_release(enabled))
+        .await
+        .map_err(|err| format!("Claude collection task failed: {err}"))?
+}
+
+fn spawn_claude_statusline_reconcile(enabled: bool) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = reconcile_claude_statusline_off_thread(enabled).await {
+            eprintln!("[statusline] startup reconcile failed: {err}");
+        }
+    });
 }
 
 #[cfg(windows)]
@@ -4014,6 +4251,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_activity,
             refresh_status,
             get_update_status,
             check_for_updates,
@@ -4030,9 +4268,7 @@ pub fn run() {
             toggle_panel_maximized,
             hide_panel_window,
             complete_app_quit,
-            start_panel_drag,
-            install_statusline,
-            restore_statusline
+            start_panel_drag
         ])
         .setup(move |app| {
             app.manage(TaskbarPauseState::default());
@@ -4085,7 +4321,7 @@ pub fn run() {
                     }
                 };
                 retry_settings_side_effects(app.handle().clone(), taskbar_retry, autostart_retry);
-                auto_connect_statusline_for_release();
+                spawn_claude_statusline_reconcile(settings.show_claude);
             }
             spawn_status_loop(app.handle().clone());
             spawn_taskbar_drag_loop(app.handle().clone());
@@ -4147,6 +4383,44 @@ mod tests {
         assert!(super::try_begin_force_refresh().is_none());
         drop(first);
         assert!(super::try_begin_force_refresh().is_some());
+    }
+
+    #[test]
+    fn disabled_tools_ignore_normal_and_forced_collection() {
+        let settings = Settings {
+            show_claude: false,
+            show_codex: false,
+            claude_account_auto_collect_on: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            super::collection_plan(&settings, true, true),
+            super::CollectionPlan {
+                claude_status: false,
+                claude_account: false,
+                codex: false,
+                force_claude_account: false,
+                force_codex_account: false,
+            }
+        );
+
+        let settings = Settings {
+            show_claude: true,
+            show_codex: false,
+            claude_account_auto_collect_on: false,
+            ..Settings::default()
+        };
+        assert_eq!(
+            super::collection_plan(&settings, false, false),
+            super::CollectionPlan {
+                claude_status: true,
+                claude_account: false,
+                codex: false,
+                force_claude_account: false,
+                force_codex_account: false,
+            }
+        );
+        assert!(super::collection_plan(&settings, false, true).claude_account);
     }
 
     #[test]
@@ -4513,6 +4787,11 @@ mod tests {
         assert!(super::ensure_matching_bar_command("bar-claude", "codex").is_err());
         assert!(super::ensure_matching_bar_command("panel", "claude").is_err());
         assert!(super::ensure_matching_bar_command("bar-claude", "unknown").is_err());
+
+        let activity_guard = super::try_begin_activity_refresh().expect("first refresh starts");
+        assert!(super::try_begin_activity_refresh().is_none());
+        drop(activity_guard);
+        assert!(super::try_begin_activity_refresh().is_some());
     }
 
     #[test]
@@ -5099,27 +5378,49 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn taskbar_z_order_recovery_only_accepts_the_shell_taskbar() {
+    fn taskbar_z_order_recovery_detects_shell_overlays_and_ignores_juice_bars() {
         use windows::Win32::Foundation::HWND;
 
         let hwnd = |value: usize| HWND(value as *mut core::ffi::c_void);
         let bar = hwnd(10);
         let taskbar = hwnd(20);
+        let other_bar = hwnd(30);
+        let juice_bars = [bar, other_bar];
 
-        assert!(!super::taskbar_bar_hit_is_shell_cover(
-            bar, taskbar, bar, bar
-        ));
-        assert!(super::taskbar_bar_hit_is_shell_cover(
+        assert!(!super::taskbar_bar_hit_is_cover(bar, bar, bar, &juice_bars,));
+        assert!(super::taskbar_bar_hit_is_cover(
             bar,
-            taskbar,
             hwnd(21),
-            taskbar
-        ));
-        assert!(!super::taskbar_bar_hit_is_shell_cover(
-            bar,
             taskbar,
-            hwnd(30),
-            hwnd(30)
+            &juice_bars,
+        ));
+        assert!(super::taskbar_bar_hit_is_cover(
+            bar,
+            hwnd(41),
+            hwnd(40),
+            &juice_bars,
+        ));
+        assert!(!super::taskbar_bar_hit_is_cover(
+            bar,
+            hwnd(31),
+            other_bar,
+            &juice_bars,
+        ));
+
+        assert!(!super::taskbar_observation_requires_reapply(
+            true, true, false, true
+        ));
+        assert!(super::taskbar_observation_requires_reapply(
+            true, true, true, true
+        ));
+        assert!(super::taskbar_observation_requires_reapply(
+            true, true, false, false
+        ));
+        assert!(super::taskbar_observation_requires_reapply(
+            true, false, false, true
+        ));
+        assert!(super::taskbar_observation_requires_reapply(
+            false, true, false, true
         ));
     }
 

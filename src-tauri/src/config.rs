@@ -100,6 +100,12 @@ pub struct Settings {
     pub poll_interval_secs: u64,
     #[serde(default = "default_stale")]
     pub stale_after_secs: i64,
+    #[serde(default = "default_activity_weeks")]
+    pub activity_weeks: u16,
+    #[serde(default = "default_activity_scale_mode")]
+    pub activity_scale_mode: String,
+    #[serde(default = "default_activity_tokens_per_level")]
+    pub activity_tokens_per_level: u64,
     #[serde(default = "default_bar_mode")]
     pub bar_mode: String,
     #[serde(default = "default_full_reset_time_on")]
@@ -195,6 +201,12 @@ pub struct SettingsInput {
     pub poll_interval_secs: u64,
     #[serde(default = "default_stale")]
     pub stale_after_secs: i64,
+    #[serde(default = "default_activity_weeks")]
+    pub activity_weeks: u16,
+    #[serde(default = "default_activity_scale_mode")]
+    pub activity_scale_mode: String,
+    #[serde(default = "default_activity_tokens_per_level")]
+    pub activity_tokens_per_level: u64,
     #[serde(default = "default_bar_mode")]
     pub bar_mode: String,
     #[serde(default = "default_full_reset_time_on")]
@@ -392,6 +404,18 @@ fn default_stale() -> i64 {
     90
 }
 
+fn default_activity_weeks() -> u16 {
+    52
+}
+
+fn default_activity_scale_mode() -> String {
+    "auto".into()
+}
+
+fn default_activity_tokens_per_level() -> u64 {
+    250_000
+}
+
 fn default_bar_mode() -> String {
     "full".into()
 }
@@ -539,6 +563,9 @@ impl Default for Settings {
             display_basis: default_display_basis(),
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
+            activity_weeks: default_activity_weeks(),
+            activity_scale_mode: default_activity_scale_mode(),
+            activity_tokens_per_level: default_activity_tokens_per_level(),
             bar_mode: default_bar_mode(),
             full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
@@ -590,6 +617,9 @@ impl Default for SettingsInput {
             display_basis: default_display_basis(),
             poll_interval_secs: default_interval(),
             stale_after_secs: default_stale(),
+            activity_weeks: default_activity_weeks(),
+            activity_scale_mode: default_activity_scale_mode(),
+            activity_tokens_per_level: default_activity_tokens_per_level(),
             bar_mode: default_bar_mode(),
             full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
@@ -825,6 +855,9 @@ impl Settings {
             display_basis: default_display_basis(),
             poll_interval_secs: interval,
             stale_after_secs: default_stale(),
+            activity_weeks: default_activity_weeks(),
+            activity_scale_mode: default_activity_scale_mode(),
+            activity_tokens_per_level: default_activity_tokens_per_level(),
             bar_mode: default_bar_mode(),
             full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
@@ -896,6 +929,9 @@ impl Settings {
             display_basis: normalize_display_basis(&input.display_basis).into(),
             poll_interval_secs: input.poll_interval_secs.max(1),
             stale_after_secs: input.stale_after_secs.max(1),
+            activity_weeks: input.activity_weeks.clamp(4, 52),
+            activity_scale_mode: normalize_activity_scale_mode(&input.activity_scale_mode).into(),
+            activity_tokens_per_level: input.activity_tokens_per_level.clamp(1, 1_000_000_000_000),
             bar_mode: normalize_bar_mode(&input.bar_mode).into(),
             full_reset_time_on: input.full_reset_time_on,
             limit_order: normalize_limit_order(&input.limit_order).into(),
@@ -1171,6 +1207,19 @@ impl Settings {
         Self::restore_statusline_at(&home, &agent_dir)
     }
 
+    pub fn restore_statusline_if_installed() -> anyhow::Result<()> {
+        let home = claude_home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+        let agent_dir = Self::agent_dir().ok_or_else(|| anyhow::anyhow!("no data dir"))?;
+        Self::restore_statusline_if_installed_at(&home, &agent_dir)
+    }
+
+    pub fn restore_statusline_if_installed_at(home: &Path, agent_dir: &Path) -> anyhow::Result<()> {
+        if !agent_dir.join("wrap-meta.json").try_exists()? {
+            return Ok(());
+        }
+        Self::restore_statusline_at(home, agent_dir)
+    }
+
     pub fn restore_statusline_at(home: &Path, agent_dir: &Path) -> anyhow::Result<()> {
         Self::restore_statusline_at_with(home, agent_dir, |_| {}, remove_file_if_exists)
     }
@@ -1380,6 +1429,13 @@ fn normalize_display_basis(value: &str) -> &'static str {
     }
 }
 
+fn normalize_activity_scale_mode(value: &str) -> &'static str {
+    match value {
+        "fixed" => "fixed",
+        _ => "auto",
+    }
+}
+
 fn normalize_indicator_style(value: &str) -> &'static str {
     match value {
         "bar" => "bar",
@@ -1533,7 +1589,7 @@ fn parse_hex_rgb(value: Option<&str>) -> Option<[u8; 3]> {
     Some([red, green, blue])
 }
 
-fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+pub(crate) fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1657,6 +1713,34 @@ mod parser_tests {
         assert_eq!(settings.tool_colors.danger, [0xab, 0xcd, 0xef]);
         assert!(!settings.tool_colors.warning_on);
         assert!(settings.tool_colors.danger_on);
+    }
+
+    #[test]
+    fn activity_settings_default_and_clamp_to_supported_ranges() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.activity_weeks, 52);
+        assert_eq!(defaults.activity_scale_mode, "auto");
+        assert_eq!(defaults.activity_tokens_per_level, 250_000);
+
+        let clamped = Settings::from_input(SettingsInput {
+            activity_weeks: 2,
+            activity_scale_mode: "unsupported".into(),
+            activity_tokens_per_level: 0,
+            ..SettingsInput::default()
+        });
+        assert_eq!(clamped.activity_weeks, 4);
+        assert_eq!(clamped.activity_scale_mode, "auto");
+        assert_eq!(clamped.activity_tokens_per_level, 1);
+
+        let fixed = Settings::from_input(SettingsInput {
+            activity_weeks: 99,
+            activity_scale_mode: "fixed".into(),
+            activity_tokens_per_level: u64::MAX,
+            ..SettingsInput::default()
+        });
+        assert_eq!(fixed.activity_weeks, 52);
+        assert_eq!(fixed.activity_scale_mode, "fixed");
+        assert_eq!(fixed.activity_tokens_per_level, 1_000_000_000_000);
     }
 
     #[test]

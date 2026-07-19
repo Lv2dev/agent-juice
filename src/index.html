@@ -117,6 +117,53 @@
         <p class="meta"></p>
       </section>
 
+      <section id="activity-card" class="activity-card" data-state="loading" data-filter="all">
+        <header class="activity-head">
+          <div class="activity-title">
+            <h2 data-i18n="activity.title">활동</h2>
+          </div>
+          <div class="activity-filter" role="group" aria-label="활동 도구 필터" data-i18n-aria-label="aria.activityFilter">
+            <button type="button" data-activity-filter="all" aria-pressed="true" data-i18n="activity.filterAll">전체</button>
+            <button type="button" data-activity-filter="claude" aria-pressed="false" data-i18n="activity.filterClaude">Claude</button>
+            <button type="button" data-activity-filter="codex" aria-pressed="false" data-i18n="activity.filterCodex">Codex</button>
+          </div>
+        </header>
+
+        <div class="activity-summary">
+          <div class="activity-total">
+            <strong data-activity-total>–</strong>
+            <span data-activity-period></span>
+          </div>
+          <span class="activity-days" data-activity-days></span>
+        </div>
+
+        <div class="activity-chart" data-activity-chart>
+          <div class="activity-months" data-activity-months aria-hidden="true"></div>
+          <div class="activity-grid-wrap">
+            <div class="activity-weekdays" aria-hidden="true">
+              <span data-i18n="weekday.mon">월</span>
+              <span data-i18n="weekday.wed">수</span>
+              <span data-i18n="weekday.fri">금</span>
+            </div>
+            <div class="activity-grid" role="grid" data-activity-grid></div>
+          </div>
+          <div class="activity-tooltip" role="tooltip" data-activity-tooltip hidden>
+            <strong data-activity-tooltip-title></strong>
+            <span data-activity-tooltip-detail></span>
+          </div>
+        </div>
+
+        <p class="activity-empty" data-activity-empty hidden></p>
+        <footer class="activity-foot">
+          <span data-activity-scope data-i18n="activity.localRecord">이 PC의 로컬 기록</span>
+          <span class="activity-legend" aria-hidden="true">
+            <span data-i18n="activity.less">적음</span>
+            <i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i>
+            <span data-i18n="activity.more">많음</span>
+          </span>
+        </footer>
+      </section>
+
       <form id="settings-form" class="settings-layout">
         <details class="settings-card" open>
           <summary>
@@ -444,13 +491,73 @@
                 </span>
               </label>
 
-              <div class="settings-action-row">
-                <span class="settings-action-copy">
-                  <strong data-i18n="field.restoreStatusline">Claude 상태줄 복원</strong>
-                  <small class="field-help" data-i18n="help.restoreStatusline">Juice 연결 전 Claude Code 상태줄 설정으로 되돌립니다.</small>
-                </span>
-                <button type="button" data-action="restore-statusline" data-i18n="action.restore">복원</button>
-              </div>
+              <section class="settings-subgroup activity-settings" data-activity-settings>
+                <div class="activity-settings-head">
+                  <h3 data-i18n="activity.settingsTitle">토큰 활동</h3>
+                  <span data-i18n="activity.localScope">이 PC의 로컬 세션 로그</span>
+                </div>
+                <div class="settings-subgroup-grid">
+                  <label class="field-row activity-number-row">
+                    <span data-i18n="field.activityWeeks">표시 기간</span>
+                    <span class="number-unit-control">
+                      <input
+                        type="number"
+                        name="activity_weeks"
+                        min="4"
+                        max="52"
+                        step="1"
+                        value="52"
+                      />
+                      <span data-i18n="unit.weeks">주</span>
+                    </span>
+                  </label>
+
+                  <div class="field-row activity-scale-row">
+                    <span id="activity-scale-mode-label" data-i18n="field.activityScaleMode">농도 기준</span>
+                    <input type="hidden" name="activity_scale_mode" value="auto" />
+                    <div
+                      class="activity-scale-picker"
+                      role="radiogroup"
+                      aria-labelledby="activity-scale-mode-label"
+                      data-activity-scale-picker
+                    >
+                      <button type="button" role="radio" aria-checked="true" data-activity-scale-value="auto" data-i18n="option.auto">자동</button>
+                      <button type="button" role="radio" aria-checked="false" data-activity-scale-value="fixed" data-i18n="option.custom">직접 지정</button>
+                    </div>
+                  </div>
+
+                  <label class="field-row activity-number-row" data-activity-token-level>
+                    <span data-i18n="field.activityTokensPerLevel">1단계당 토큰</span>
+                    <span class="number-unit-control activity-token-control">
+                      <input
+                        type="number"
+                        name="activity_tokens_per_level"
+                        min="1"
+                        max="1000000000000"
+                        step="1000"
+                        value="250000"
+                      />
+                      <span data-i18n="unit.tokens">토큰</span>
+                    </span>
+                  </label>
+
+                  <div class="field-row activity-static-row">
+                    <span data-i18n="field.activityDayUnit">집계 단위</span>
+                    <strong data-i18n="unit.day">하루</strong>
+                  </div>
+
+                  <div class="activity-scale-preview">
+                    <span>
+                      <strong data-i18n="activity.scalePreview">농도 미리보기</strong>
+                      <output data-activity-scale-preview>자동 조정</output>
+                    </span>
+                    <span class="activity-scale-swatches" aria-hidden="true">
+                      <i></i><i></i><i></i><i></i>
+                    </span>
+                  </div>
+                </div>
+              </section>
+
             </div>
           </fieldset>
 
@@ -508,12 +615,18 @@
 
               <label class="toggle-row">
                 <input type="checkbox" name="show_claude" checked />
-                <span data-i18n="field.showClaude">Claude 표시</span>
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.showClaude">Claude 활성화</span>
+                  <small class="field-help" data-i18n="help.showClaude">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
+                </span>
               </label>
 
               <label class="toggle-row">
                 <input type="checkbox" name="show_codex" checked />
-                <span data-i18n="field.showCodex">Codex 표시</span>
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.showCodex">Codex 활성화</span>
+                  <small class="field-help" data-i18n="help.showCodex">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
+                </span>
               </label>
             </div>
           </fieldset>
