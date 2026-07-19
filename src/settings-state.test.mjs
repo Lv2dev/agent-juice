@@ -15,6 +15,9 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       display_basis: "used",
       poll_interval_secs: 4,
       stale_after_secs: 100,
+      activity_weeks: 26,
+      activity_scale_mode: "fixed",
+      activity_tokens_per_level: 750000,
       bar_mode: "compact",
       full_reset_time_on: true,
       limit_order: "secondary_first",
@@ -77,6 +80,9 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       dangerThreshold: 92,
       pollIntervalSecs: 4,
       staleAfterSecs: 100,
+      activityWeeks: 26,
+      activityScaleMode: "fixed",
+      activityTokensPerLevel: 750000,
       barMode: "compact",
       fullResetTimeOn: true,
       limitOrder: "secondary_first",
@@ -155,6 +161,9 @@ test("payloadFromEntries creates save_settings input payload", () => {
     danger_threshold: "9",
     poll_interval_secs: "5",
     stale_after_secs: "80",
+    activity_weeks: "26",
+    activity_scale_mode: "fixed",
+    activity_tokens_per_level: "750000",
     bar_mode: "quad",
     full_reset_time_on: "on",
     limit_order: "secondary_first",
@@ -215,6 +224,9 @@ test("payloadFromEntries creates save_settings input payload", () => {
     danger_threshold: 91,
     poll_interval_secs: 5,
     stale_after_secs: 80,
+    activity_weeks: 26,
+    activity_scale_mode: "fixed",
+    activity_tokens_per_level: 750000,
     bar_mode: "quad",
     full_reset_time_on: true,
     limit_order: "secondary_first",
@@ -277,6 +289,9 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).warnThreshold, 30);
   assert.equal(formStateFromSettings({}).dangerThreshold, 10);
   assert.equal(formStateFromSettings({}).pollIntervalSecs, 60);
+  assert.equal(formStateFromSettings({}).activityWeeks, 52);
+  assert.equal(formStateFromSettings({}).activityScaleMode, "auto");
+  assert.equal(formStateFromSettings({}).activityTokensPerLevel, 250000);
   assert.equal(formStateFromSettings({}).language, "system");
   assert.equal(formStateFromSettings({ language: "ko" }).language, "ko");
   assert.equal(formStateFromSettings({ language: "en" }).language, "en");
@@ -380,6 +395,9 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     bar_content_gap_px: "99",
     claude_taskbar_offset_ratio: "-1",
     codex_taskbar_offset_ratio: "2",
+    activity_weeks: "99",
+    activity_scale_mode: "unexpected",
+    activity_tokens_per_level: "0",
   });
 
   assert.equal(payload.theme, "system");
@@ -411,6 +429,9 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.bar_content_gap_px, 24);
   assert.equal(payload.claude_taskbar_offset_ratio, 0);
   assert.equal(payload.codex_taskbar_offset_ratio, 1);
+  assert.equal(payload.activity_weeks, 52);
+  assert.equal(payload.activity_scale_mode, "auto");
+  assert.equal(payload.activity_tokens_per_level, 1);
   assert.equal(payload.show_claude, false);
   assert.equal(payload.show_codex, false);
   assert.equal(payload.claude_account_auto_collect_on, false);

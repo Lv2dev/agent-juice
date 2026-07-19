@@ -270,6 +270,92 @@ pub struct DockRect {
     pub height: i32,
 }
 
+pub fn taskbar_rect_for_monitor_work_area(
+    window_rect: DockRect,
+    monitor: DockRect,
+    work_area: DockRect,
+) -> DockRect {
+    let Some(monitor_right) = monitor.x.checked_add(monitor.width) else {
+        return window_rect;
+    };
+    let Some(monitor_bottom) = monitor.y.checked_add(monitor.height) else {
+        return window_rect;
+    };
+    let Some(work_right) = work_area.x.checked_add(work_area.width) else {
+        return window_rect;
+    };
+    let Some(work_bottom) = work_area.y.checked_add(work_area.height) else {
+        return window_rect;
+    };
+    if window_rect.width <= 0
+        || window_rect.height <= 0
+        || monitor.width <= 0
+        || monitor.height <= 0
+        || work_area.width <= 0
+        || work_area.height <= 0
+        || work_area.x < monitor.x
+        || work_area.y < monitor.y
+        || work_right > monitor_right
+        || work_bottom > monitor_bottom
+    {
+        return window_rect;
+    }
+
+    let window_right = window_rect.x.saturating_add(window_rect.width);
+    let window_bottom = window_rect.y.saturating_add(window_rect.height);
+    if is_horizontal_taskbar(window_rect.width, window_rect.height) {
+        let top_distance = (window_rect.y as i64 - monitor.y as i64).abs();
+        let bottom_distance = (monitor_bottom as i64 - window_bottom as i64).abs();
+        if top_distance <= bottom_distance {
+            let height = work_area.y - monitor.y;
+            if height > 0 {
+                return DockRect {
+                    x: monitor.x,
+                    y: monitor.y,
+                    width: monitor.width,
+                    height,
+                };
+            }
+        } else {
+            let height = monitor_bottom - work_bottom;
+            if height > 0 {
+                return DockRect {
+                    x: monitor.x,
+                    y: work_bottom,
+                    width: monitor.width,
+                    height,
+                };
+            }
+        }
+    } else {
+        let left_distance = (window_rect.x as i64 - monitor.x as i64).abs();
+        let right_distance = (monitor_right as i64 - window_right as i64).abs();
+        if left_distance <= right_distance {
+            let width = work_area.x - monitor.x;
+            if width > 0 {
+                return DockRect {
+                    x: monitor.x,
+                    y: monitor.y,
+                    width,
+                    height: monitor.height,
+                };
+            }
+        } else {
+            let width = monitor_right - work_right;
+            if width > 0 {
+                return DockRect {
+                    x: work_right,
+                    y: monitor.y,
+                    width,
+                    height: monitor.height,
+                };
+            }
+        }
+    }
+
+    window_rect
+}
+
 pub fn taskbar_tooltip_anchor(
     bar: DockRect,
     work_area: DockRect,
@@ -1289,8 +1375,8 @@ pub fn shell_taskbar_window() -> anyhow::Result<ShellTaskbarWindow> {
 #[cfg(windows)]
 fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<ShellTaskbarWindow> {
     unsafe {
-        let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect)?;
+        let mut window_rect = RECT::default();
+        GetWindowRect(hwnd, &mut window_rect)?;
 
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if monitor.0.is_null() {
@@ -1309,6 +1395,11 @@ fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<S
 
         let monitor = rect_to_dock(monitor_info.monitorInfo.rcMonitor)
             .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd monitor rectangle"))?;
+        let work_area = rect_to_dock(monitor_info.monitorInfo.rcWork)
+            .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd work rectangle"))?;
+        let window_rect = rect_to_dock(window_rect)
+            .ok_or_else(|| anyhow::anyhow!("invalid Shell_TrayWnd rectangle"))?;
+        let rect = taskbar_rect_for_monitor_work_area(window_rect, monitor, work_area);
         let device_len = monitor_info
             .szDevice
             .iter()
@@ -1326,10 +1417,10 @@ fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<S
             .unwrap_or_else(|| device_key.clone());
         Ok(ShellTaskbarWindow {
             hwnd,
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
+            left: rect.x,
+            top: rect.y,
+            right: rect.x.saturating_add(rect.width),
+            bottom: rect.y.saturating_add(rect.height),
             monitor,
             key,
             device_key,

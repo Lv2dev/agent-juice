@@ -17,6 +17,10 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    if !agent_juice::config::Settings::try_load().is_ok_and(|settings| settings.show_claude) {
+        return ExitCode::SUCCESS;
+    }
+
     let max_bytes = agent_juice::statusline::MAX_STATUSLINE_INPUT_BYTES;
     let mut input = Vec::with_capacity(max_bytes + 1);
     let _ = std::io::stdin()

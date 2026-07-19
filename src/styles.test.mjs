@@ -286,7 +286,7 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.ok(panelCapability?.permissions.includes("core:window:allow-start-dragging"));
   assert.match(rustLib, /fn start_panel_drag\(window: tauri::Window\)/);
   assert.match(rustLib, /window\.start_dragging\(\)/);
-  assert.match(rustLib, /start_panel_drag,/);
+  assert.match(rustLib, /start_panel_drag\s*,?\s*\]/);
   assert.match(windowBlock, /width: 100vw/);
   assert.match(windowBlock, /height: 100vh/);
   assert.match(frame, /height: 100vh/);
@@ -334,6 +334,31 @@ test("taskbar overlay has no logo, permanent dimming, card border, card backgrou
   assert.doesNotMatch(hover, /transform:/);
   assert.doesNotMatch(warn, /border-color:/);
   assert.doesNotMatch(danger, /border-color:/);
+});
+
+test("token activity uses a bounded responsive grid and one custom tooltip", () => {
+  const cardMarkup = panelMarkup.match(
+    /<section id="activity-card"[\s\S]*?<\/section>/,
+  )?.[0] ?? "";
+  const card = cssBlock(".activity-card");
+  const grid = cssBlock(".activity-grid");
+  const cell = cssBlock(".activity-cell");
+
+  assert.match(cardMarkup, /data-activity-filter="all"/);
+  assert.match(cardMarkup, /data-activity-filter="claude"/);
+  assert.match(cardMarkup, /data-activity-filter="codex"/);
+  assert.equal((cardMarkup.match(/role="tooltip"/g) ?? []).length, 1);
+  assert.doesNotMatch(cardMarkup, /\stitle=/);
+  assert.match(card, /background: var\(--surface\)/);
+  assert.match(grid, /repeat\(var\(--activity-weeks\), minmax\(0, 1fr\)\)/);
+  assert.match(grid, /max-width: var\(--activity-chart-width\)/);
+  assert.match(cell, /aspect-ratio: 1/);
+  assert.match(panelJs, /invoke\("get_activity"\)/);
+  assert.match(panelJs, /"activity-updated"/);
+  assert.match(panelJs, /formatActivityTokens\(cell\.tokens/);
+  assert.match(css, /\.activity-card,\s*\n\s*\.settings-layout/);
+  assert.match(settingsJs, /tokenField\.readOnly = !editable/);
+  assert.doesNotMatch(settingsJs, /tokenField\.disabled = !editable/);
 });
 
 test("stale taskbar state stays legible while looking distinct from live data", () => {
@@ -472,9 +497,11 @@ test("taskbar overlay cannot synchronously couple the Juice event loop to Explor
   assert.match(rustLib, /SWP_ASYNCWINDOWPOS/);
   assert.match(rustLib, /SWP_NOOWNERZORDER/);
   assert.match(rustLib, /owner == 0/);
-  assert.match(rustLib, /fn taskbar_bar_window_is_shell_covered/);
-  assert.match(rustLib, /fn taskbar_bar_hit_is_shell_cover/);
-  assert.match(rustLib, /let shell_covered = visible && taskbar_bar_window_is_shell_covered/);
+  assert.match(rustLib, /fn taskbar_bar_window_is_covered/);
+  assert.match(rustLib, /fn taskbar_bar_hit_is_cover/);
+  assert.match(rustLib, /let covered = visible && taskbar_bar_window_is_covered/);
+  assert.match(rustLib, /taskbar_bar_window_overlay_contract_matches/);
+  assert.match(rustLib, /taskbar_bar_hwnds\(app\)/);
   assert.doesNotMatch(rustTaskbar, /\bSendMessageW\s*\(/);
   assert.match(rustTaskbar, /SendMessageTimeoutW/);
   assert.match(rustTaskbar, /SMTO_ABORTIFHUNG \| SMTO_BLOCK/);
@@ -996,7 +1023,8 @@ test("settings form groups controls into logical sections without changing field
   assert.match(settingsJs, /event\.key === "ArrowRight"[\s\S]*event\.key === "ArrowLeft"[\s\S]*event\.key === "Home"[\s\S]*event\.key === "End"/);
 
   assert.match(markupSection("general"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="autostart_on"/);
-  assert.match(markupSection("collection"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"[\s\S]*data-action="restore-statusline"/);
+  assert.match(markupSection("collection"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"/);
+  assert.doesNotMatch(markupSection("collection"), /restore-statusline|restoreStatusline/);
   assert.match(markupSection("collection"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="full_reset_time_on"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
   assert.match(detailsSection, /data-settings-subgroup="appearance"[\s\S]*name="indicator_effect_style"[\s\S]*name="indicator_track_opacity_percent"/);
@@ -1131,8 +1159,8 @@ test("public README and release template are the only tracked markdown exception
   assert.match(pushAllowlist, /\^\\.ai\//);
   assert.doesNotMatch(readme, /Claude 연결/);
   assert.doesNotMatch(readme, /Connect Claude/);
-  assert.match(readme, /Juice 설치본은 시작할 때 Claude statusline 연결을 비파괴·멱등으로 시도합니다/);
-  assert.match(readme, /installed app attempts a non-destructive, idempotent Claude statusline connection/);
+  assert.match(readme, /Claude가 활성화되어 있으면 Juice 설치본은 시작할 때 statusline 수집 연결을 비파괴·멱등으로 조정합니다/);
+  assert.match(readme, /When Claude is enabled, the installed app non-destructively and idempotently reconciles its statusline collection/);
 });
 
 test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {
@@ -1165,7 +1193,8 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.doesNotMatch(panelMarkup, /data-action="connect-statusline"/);
   assert.doesNotMatch(panelMarkup, />Claude 연결</);
   assert.doesNotMatch(i18nJs, /action\.connectClaude/);
-  assert.match(panelMarkup, /data-action="restore-statusline"/);
+  assert.doesNotMatch(panelMarkup, /data-action="restore-statusline"/);
+  assert.doesNotMatch(settingsJs, /restore_statusline/);
   assert.doesNotMatch(settingsJs, /install_statusline/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
   assert.doesNotMatch(i18nJs, /"section\.lab": "실험실"/);
@@ -1204,13 +1233,14 @@ test("panel meta removes estimated cost copy and stays as a full-width card foot
   assert.doesNotMatch(meta, /max-width:/);
 });
 
-test("release startup attempts a non-fatal Claude statusline auto-connect", () => {
-  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)/);
-  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*cfg!\(debug_assertions\)/);
-  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*statusline_bridge_path\(\)/);
-  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*Settings::install_statusline_wrap/);
-  assert.match(rustLib, /fn auto_connect_statusline_for_release\(\)[\s\S]*eprintln!\("\[statusline\] auto-connect failed/);
-  assert.match(rustLib, /auto_connect_statusline_for_release\(\);[\s\S]*spawn_status_loop/);
+test("release startup reconciles Claude statusline with the enabled tool state", () => {
+  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)/);
+  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*cfg!\(debug_assertions\)/);
+  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*statusline_bridge_path\(\)/);
+  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*Settings::install_statusline_wrap[\s\S]*Settings::restore_statusline_if_installed/);
+  assert.match(rustLib, /spawn_claude_statusline_reconcile\(settings\.show_claude\)/);
+  assert.match(rustLib, /fn spawn_claude_statusline_reconcile\(enabled: bool\)[\s\S]*eprintln!\("\[statusline\] startup reconcile failed/);
+  assert.match(rustLib, /spawn_claude_statusline_reconcile\(settings\.show_claude\);[\s\S]*spawn_status_loop/);
 });
 
 test("styles avoid decorative one-off effects and viewport font scaling", () => {
@@ -1356,7 +1386,7 @@ test("Windows CI pins external actions to full commit SHAs", () => {
 
 test("taskbar idle and drag paths reuse snapshots instead of repeated disk and shell scans", () => {
   const dragLoop = rustLib.match(/fn spawn_taskbar_drag_loop[\s\S]*?\n}\n\nfn spawn_taskbar_visibility_loop/)?.[0] ?? "";
-  const visibilityLoop = rustLib.match(/fn spawn_taskbar_visibility_loop[\s\S]*?\n}\n\n#\[tauri::command\]/)?.[0] ?? "";
+  const visibilityLoop = rustLib.match(/fn spawn_taskbar_visibility_loop[\s\S]*?\n}\n\nfn statusline_bridge_path/)?.[0] ?? "";
   assert.equal((dragLoop.match(/Settings::try_load\(\)/g) ?? []).length, 1);
   assert.match(dragLoop, /drag_monitor_key/);
   assert.match(visibilityLoop, /taskbar_dock_snapshot/);
@@ -1397,7 +1427,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.7"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.8"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

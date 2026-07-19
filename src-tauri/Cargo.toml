@@ -1,6 +1,6 @@
 [package]
 name = "agent-juice"
-version = "0.1.7"
+version = "0.1.8"
 description = "Juice local usage monitor"
 authors = ["pointi"]
 edition = "2021"

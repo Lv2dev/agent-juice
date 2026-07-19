@@ -105,6 +105,10 @@ function displayBasisOr(value) {
   return String(value || "remaining").toLowerCase() === "used" ? "used" : "remaining";
 }
 
+function activityScaleModeOr(value) {
+  return String(value || "auto").toLowerCase() === "fixed" ? "fixed" : "auto";
+}
+
 function indicatorStyleOr(value) {
   const style = String(value || "ring").toLowerCase();
   return style === "bar" ? "bar" : "ring";
@@ -206,6 +210,14 @@ export function formStateFromSettings(settings = {}) {
       : usedToRemainingThreshold(settings.danger_threshold, 90),
     pollIntervalSecs: intOr(settings.poll_interval_secs, 60),
     staleAfterSecs: intOr(settings.stale_after_secs, 90),
+    activityWeeks: intRangeOr(settings.activity_weeks, 52, 4, 52),
+    activityScaleMode: activityScaleModeOr(settings.activity_scale_mode),
+    activityTokensPerLevel: intRangeOr(
+      settings.activity_tokens_per_level,
+      250_000,
+      1,
+      1_000_000_000_000,
+    ),
     barMode: settings.bar_mode || "full",
     fullResetTimeOn: boolOr(settings.full_reset_time_on, true),
     limitOrder: limitOrderOr(settings.limit_order),
@@ -310,6 +322,14 @@ export function payloadFromEntries(entries) {
     danger_threshold: dangerUsedThreshold,
     poll_interval_secs: intOr(source.get("poll_interval_secs"), 60),
     stale_after_secs: intOr(source.get("stale_after_secs"), 90),
+    activity_weeks: intRangeOr(source.get("activity_weeks"), 52, 4, 52),
+    activity_scale_mode: activityScaleModeOr(source.get("activity_scale_mode")),
+    activity_tokens_per_level: intRangeOr(
+      source.get("activity_tokens_per_level"),
+      250_000,
+      1,
+      1_000_000_000_000,
+    ),
     bar_mode: String(source.get("bar_mode") || "full"),
     full_reset_time_on: isChecked(source.get("full_reset_time_on")),
     limit_order: limitOrderOr(source.get("limit_order")),

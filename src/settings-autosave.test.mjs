@@ -31,6 +31,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   const savedInputs = [];
   const pendingSaveResponses = [];
   let deferSaveResponses = false;
+  let failNextSave = false;
+  let persistedSettings = { maximized_hide_on: true, language: "ko" };
   const eventHandlers = {};
   const listenerOrder = [];
   const listenerAttempts = new Map();
@@ -189,14 +191,19 @@ test("settings form auto-saves changed values without a submit button", async ()
       core: {
         async invoke(command, args) {
           invokedCommands.push(command);
-          if (command === "get_settings") return { maximized_hide_on: true, language: "ko" };
+          if (command === "get_settings") return persistedSettings;
           if (command === "save_settings") {
             savedInputs.push(args.input);
+            if (failNextSave) {
+              failNextSave = false;
+              throw new Error("Claude statusline conflict");
+            }
             if (deferSaveResponses) {
               return new Promise((resolve) => {
                 pendingSaveResponses.push({ input: args.input, resolve });
               });
             }
+            persistedSettings = args.input;
             return { settings: args.input, warnings: ["taskbar retry"] };
           }
           if (command === "check_for_updates") throw new Error("offline");
@@ -384,6 +391,15 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(fields.bar_mode.value, "quad");
 
   deferSaveResponses = false;
+  persistedSettings = { ...savedInputs.at(-1), show_claude: true, show_codex: true };
+  failNextSave = true;
+  fields.show_claude.checked = false;
+  listeners.change?.({ target: fields.show_claude });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fields.show_claude.checked, true, "a failed collection toggle must roll back");
+  assert.match(statusEl.textContent, /Claude statusline conflict/);
+
   fields.bar_mode.value = "compact";
   listeners.input?.({ target: fields.bar_mode });
   eventHandlers["app-quit-requested"]?.({ payload: null });

@@ -31,11 +31,12 @@ Juice는 현재 PC에 로그인된 Claude Code와 Codex CLI의 **5시간 한도�
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
 | 로컬 우선 수집 | 현재 PC의 Claude Code 로그인/statusline과 Codex app-server/rollout만 사용합니다. |
+| 토큰 활동 | Claude와 Codex의 로컬 세션 로그에서 실제 토큰을 일별로 집계해 최근 4~52주 활동을 히트맵으로 표시합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
 | 도구별 색상 | Claude와 Codex의 5h·주간 기본색과 경고·위험색을 지정하고, 단계별 색상 변경을 각각 켜거나 끕니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
-| 도구별 독립 바 | Claude와 Codex를 각각 표시하거나 숨기고, 원하는 위치와 모니터로 따로 이동할 수 있습니다. |
+| 도구별 독립 바 | Claude와 Codex를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
 | 업데이트 알림 | 하루 한 번 최신 정식 릴리즈를 확인하고 자동 설치 없이 알림과 릴리즈 링크만 제공합니다. |
 
@@ -46,7 +47,14 @@ Juice는 현재 PC에 로그인된 Claude Code와 Codex CLI의 **5시간 한도�
 | Claude | Claude Code 로컬 로그인의 OAuth usage 조회 | statusline `rate_limits`, 구버전 `/usage` fallback | OAuth 조회는 계정 한도이며, statusline과 fallback 일부 값은 근사치일 수 있습니다. |
 | Codex | 공식 Codex app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | app-server 값은 정확값으로, rollout fallback은 근사치로 표시합니다. |
 
-Juice는 두 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. Claude 계정 조회는 기본으로 켜져 있고 설정에서 끌 수 있습니다.
+Juice는 두 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있습니다.
+
+### 토큰 활동
+
+- 설정창의 사용량 카드 아래에서 `전체 / Claude / Codex` 필터와 날짜별 토큰 활동을 확인할 수 있습니다.
+- 한 칸은 하루로 고정되며 표시 기간은 4~52주입니다. 농도는 기간 내 활동에 맞춘 자동 로그 스케일 또는 사용자가 지정한 단계당 토큰 수를 사용합니다.
+- 최초 조회에서는 현재 PC의 최근 1년 로컬 세션 로그를 백그라운드로 읽고, 이후에는 변경된 부분만 증분 반영합니다. 큰 이력은 카드에 `과거 기록 수집 중`으로 표시됩니다.
+- 활동 인덱스는 현재 PC에만 원자적으로 저장됩니다. 삭제된 원본 로그, 다른 PC나 웹에서 발생한 사용량은 Juice가 복원할 수 없습니다.
 
 ### 작업표시줄 표시
 
@@ -129,8 +137,8 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 | 탭·카드 | 설정할 수 있는 항목 |
 | --- | --- |
 | 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
-| 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, Claude statusline 원본 복원 |
-| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 전체화면·최대화 숨김, 도구별 표시 |
+| 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
+| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
 | 색상 | 9개 팔레트, 도구·한도별 기본 4색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
 | 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 릴리즈 페이지, 최근 확인 결과 |
@@ -165,12 +173,13 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 - 인증 갱신이 필요하면 0토큰 `/usage` 호출로 Claude Code의 갱신을 유도한 뒤 한 번 재시도합니다. 구버전 CLI에서는 `/usage` 퍼센트 출력을 fallback으로 사용합니다.
 - 정확 OAuth 계정 한도는 statusline의 오래된 계정 값보다 우선합니다. 구버전 `/usage` fallback은 비어 있는 값만 보충하며, endpoint 또는 CLI 형식이 바뀌면 기존 statusline 결과를 유지합니다.
 - 기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다.
+- 표시줄 탭에서 Claude를 끄면 계정 조회와 statusline 수집이 모두 중단되고 기존 Claude statusline 설정이 복원됩니다. 다시 켜면 수집 연결을 자동 복구하고 즉시 새 값을 조회합니다.
 
 ### 설치와 첫 실행
 
 1. [Releases](https://github.com/Lv2dev/agent-juice/releases/latest)에서 최신 `Juice_*_x64-setup.exe`를 받습니다.
 2. 설치 후 Windows 트레이의 Juice 아이콘을 클릭해 설정창을 엽니다.
-3. Juice 설치본은 시작할 때 Claude statusline 연결을 비파괴·멱등으로 시도합니다.
+3. Claude가 활성화되어 있으면 Juice 설치본은 시작할 때 statusline 수집 연결을 비파괴·멱등으로 조정합니다.
 4. Claude 자동 수집을 끈 경우 이 PC에서 Claude Code를 한 번 사용해 statusline 데이터를 생성합니다.
 5. 이 PC의 Codex CLI 로그인을 확인합니다. 공식 app-server 조회가 실패할 때를 대비하려면 Codex도 한 번 사용해 rollout fallback 데이터를 만듭니다.
 
@@ -190,7 +199,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 
 Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 Claude Code/Codex CLI 로그인을 각각 확인해야 합니다.
 
-1. Juice를 실행해 Claude statusline 자동 연결을 시도하게 합니다.
+1. Juice에서 Claude가 활성화되어 있는지 확인해 statusline 자동 연결과 수집을 시작합니다.
 2. 기본 Claude 자동 수집을 유지하거나 Claude Code를 한 번 사용해 statusline forward 파일을 생성합니다.
 3. Codex CLI 로그인을 확인합니다.
 4. app-server fallback이 필요하다면 Codex를 한 번 사용해 rollout JSONL을 생성합니다.
@@ -199,7 +208,7 @@ Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않�
 
 ### 문제 해결
 
-- **Claude가 비어 있음:** Claude 계정 자동 수집이 켜져 있는지 확인하거나, Juice를 다시 실행한 뒤 Claude Code를 한 번 사용하세요.
+- **Claude가 비어 있음:** 표시줄 탭에서 Claude가 활성화되어 있고 Claude 계정 자동 수집이 켜져 있는지 확인하거나, Juice를 다시 실행한 뒤 Claude Code를 한 번 사용하세요.
 - **Codex가 비어 있음:** 현재 PC의 Codex CLI 로그인을 확인하세요. app-server 조회가 실패한다면 Codex를 한 번 사용해 rollout fallback 데이터를 만드세요.
 - **값이 대시로 보임:** 해당 도구가 아직 한도 정보를 내보내지 않았거나 기록이 오래됐을 수 있습니다.
 - **설정창을 최소화한 뒤 안 보임:** 트레이의 Juice 아이콘을 다시 클릭하세요.
@@ -226,11 +235,12 @@ Juice reads the **5-hour and weekly limits** from Claude Code and the Codex CLI 
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
 | Local-first collection | Uses the local Claude Code login/statusline and Codex app-server/rollout data. |
+| Token activity | Aggregates actual tokens from local Claude and Codex session logs by day and shows the latest 4 to 52 weeks as a heatmap. |
 | Live settings | Changes are saved and applied without a Save button. |
 | Per-tool colors | Assign separate base colors to Claude and Codex 5-hour/weekly values, customize warning and danger colors, and toggle each threshold recolor independently. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
-| Independent tool bars | Claude and Codex can be shown, hidden, moved, and assigned to monitors separately. |
+| Independent tool bars | Claude and Codex can be enabled independently. Disabling a tool stops both its bar and collection; each bar can still be moved and assigned to a monitor separately. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
 | Update notices | Checks the latest stable release once a day and offers notifications and a release link without automatic installation. |
 
@@ -241,7 +251,14 @@ Juice reads the **5-hour and weekly limits** from Claude Code and the Codex CLI 
 | Claude | OAuth usage lookup through the local Claude Code login | statusline `rate_limits`, then legacy `/usage` fallback | OAuth values are account limits; some statusline and fallback values may be approximate. |
 | Codex | Official Codex app-server `account/rateLimits/read` | Latest rollout JSONL under `~/.codex/sessions` | App-server values are marked exact; rollout fallback is approximate. |
 
-Juice reuses each tool's existing local login and never asks you to enter account tokens. Claude account collection is enabled by default and can be disabled in Settings.
+Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately.
+
+### Token activity
+
+- The card below the usage summaries provides `All / Claude / Codex` filters and daily token activity.
+- Each cell is one local day. Choose a 4 to 52 week range and either an automatic logarithmic intensity scale or a custom token count per level.
+- On first view, Juice backfills up to one year of local session logs in the background, then reads only appended changes. Large histories show `Collecting past records` while backfill continues.
+- The activity index is stored atomically on this PC only. Juice cannot recover deleted source logs or usage created on another PC or on the web.
 
 ### Taskbar display
 
@@ -324,8 +341,8 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | Tab or card | Controls |
 | --- | --- |
 | General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
-| Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, Claude statusline restore |
-| Taskbar | Four modes, limit order, ring/horizontal-bar display, fullscreen/maximized hiding, visible tools |
+| Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
+| Taskbar | Four modes, limit order, ring/horizontal-bar display, fullscreen/maximized hiding, per-tool display and collection |
 | Colors | Nine palettes, four tool/limit base colors, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
 | Updates card | Automatic and manual checks, Releases page, and the latest check result |
@@ -360,12 +377,13 @@ The `About` card contains only the current version, product purpose, and local-p
 - If authentication needs renewal, Juice runs the zero-token `/usage` command to let Claude Code refresh it, retries once, and retains legacy percentage parsing for older CLIs.
 - Exact OAuth account limits take priority over stale statusline account values. Legacy `/usage` only fills missing values; if the endpoint or CLI format changes, Juice keeps the statusline result.
 - The default collection interval and Claude account cache are both 60 seconds.
+- Disabling Claude in the Taskbar tab stops account and statusline collection and restores the previous Claude statusline configuration. Enabling it reconnects collection and requests fresh data immediately.
 
 ### Install and first run
 
 1. Download the latest `Juice_*_x64-setup.exe` from [Releases](https://github.com/Lv2dev/agent-juice/releases/latest).
 2. Install it, then click the Juice tray icon to open Settings.
-3. The installed app attempts a non-destructive, idempotent Claude statusline connection at startup.
+3. When Claude is enabled, the installed app non-destructively and idempotently reconciles its statusline collection at startup.
 4. If Claude auto-collection is off, use Claude Code once on this PC so statusline data is emitted.
 5. Confirm that the Codex CLI is logged in on this PC. Use Codex once if rollout fallback data may be needed when app-server collection is unavailable.
 
@@ -385,7 +403,7 @@ The `About` card contains only the current version, product purpose, and local-p
 
 Juice v1 is a local single-PC monitor and does not share data between PCs. Install Juice and verify Claude Code/Codex CLI login separately on every PC.
 
-1. Run Juice so it can attempt automatic Claude statusline connection.
+1. Confirm that Claude is enabled in Juice so automatic statusline connection and collection can start.
 2. Keep the default Claude auto-collection enabled or use Claude Code once to create statusline forward data.
 3. Confirm the Codex CLI login.
 4. Use Codex once if rollout JSONL fallback data is needed.
@@ -394,7 +412,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
 ### Troubleshooting
 
-- **Claude is empty:** Confirm that Claude account auto-collection is enabled, or restart Juice and use Claude Code once.
+- **Claude is empty:** Confirm that Claude is enabled in the Taskbar tab and account auto-collection is on, or restart Juice and use Claude Code once.
 - **Codex is empty:** Confirm the local Codex CLI login. If app-server collection fails, use Codex once to create rollout fallback data.
 - **Values are dashes:** The tool may not have emitted limit data yet, or the record may be stale.
 - **The minimized panel is missing:** Click the Juice tray icon again.

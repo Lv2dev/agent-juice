@@ -210,6 +210,9 @@ fn settings_roundtrip_and_legacy_defaults() {
         display_basis: "used".into(),
         poll_interval_secs: 3,
         stale_after_secs: 120,
+        activity_weeks: 26,
+        activity_scale_mode: "fixed".into(),
+        activity_tokens_per_level: 750_000,
         bar_mode: "quad".into(),
         full_reset_time_on: true,
         limit_order: "secondary_first".into(),
@@ -261,6 +264,9 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.display_basis, "used");
     assert_eq!(loaded.poll_interval_secs, 3);
     assert_eq!(loaded.stale_after_secs, 120);
+    assert_eq!(loaded.activity_weeks, 26);
+    assert_eq!(loaded.activity_scale_mode, "fixed");
+    assert_eq!(loaded.activity_tokens_per_level, 750_000);
     assert_eq!(loaded.bar_mode, "quad");
     assert!(loaded.full_reset_time_on);
     assert_eq!(loaded.limit_order, "secondary_first");
@@ -311,6 +317,9 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.display_basis, "remaining");
     assert_eq!(legacy.poll_interval_secs, 60);
     assert_eq!(legacy.stale_after_secs, 90);
+    assert_eq!(legacy.activity_weeks, 52);
+    assert_eq!(legacy.activity_scale_mode, "auto");
+    assert_eq!(legacy.activity_tokens_per_level, 250_000);
     assert_eq!(legacy.bar_mode, "full");
     assert!(legacy.full_reset_time_on);
     assert_eq!(legacy.limit_order, "primary_first");
@@ -512,6 +521,38 @@ fn restore_statusline_restores_entire_original_subtree_or_absence() {
     let restored_null = read_json(&settings_path);
     assert!(restored_null.get("statusLine").is_some());
     assert!(restored_null["statusLine"].is_null());
+}
+
+#[test]
+fn restore_statusline_if_installed_is_idempotent() {
+    let root = temp_root("restore-if-installed");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        r#"{"statusLine":{"type":"command","command":"original"}}"#,
+    )
+    .unwrap();
+
+    Settings::restore_statusline_if_installed_at(&home, &data_dir).unwrap();
+    assert_eq!(
+        read_json(&settings_path)["statusLine"]["command"],
+        "original"
+    );
+
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
+        .unwrap();
+    Settings::restore_statusline_if_installed_at(&home, &data_dir).unwrap();
+    Settings::restore_statusline_if_installed_at(&home, &data_dir).unwrap();
+
+    assert_eq!(
+        read_json(&settings_path)["statusLine"]["command"],
+        "original"
+    );
+    assert!(!data_dir.join("wrap-meta.json").exists());
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -729,6 +770,9 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         display_basis: "used".into(),
         poll_interval_secs: 5,
         stale_after_secs: 80,
+        activity_weeks: 26,
+        activity_scale_mode: "fixed".into(),
+        activity_tokens_per_level: 750_000,
         bar_mode: "quad".into(),
         full_reset_time_on: true,
         limit_order: "secondary_first".into(),
@@ -824,6 +868,9 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.display_basis, "used");
     assert_eq!(settings.poll_interval_secs, 5);
     assert_eq!(settings.stale_after_secs, 80);
+    assert_eq!(settings.activity_weeks, 26);
+    assert_eq!(settings.activity_scale_mode, "fixed");
+    assert_eq!(settings.activity_tokens_per_level, 750_000);
     assert_eq!(settings.bar_mode, "quad");
     assert!(settings.full_reset_time_on);
     assert_eq!(settings.limit_order, "secondary_first");

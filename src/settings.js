@@ -16,6 +16,9 @@ const taskbarTextColorRows = document.querySelectorAll?.("[data-taskbar-text-col
 const fullResetRow = document.querySelector("[data-full-reset-toggle]");
 const palettePicker = document.querySelector("[data-palette-picker]");
 const effectPicker = document.querySelector("[data-effect-picker]");
+const activityScalePicker = document.querySelector("[data-activity-scale-picker]");
+const activityTokenLevelRow = document.querySelector("[data-activity-token-level]");
+const activityScalePreview = document.querySelector("[data-activity-scale-preview]");
 const updateBand = document.querySelector("#update-band");
 const updateVersionEl = document.querySelector("[data-update-version]");
 const updateStatusEl = document.querySelector("#update-check-status");
@@ -80,6 +83,7 @@ function setSettingsFormEnabled(enabled) {
   if (enabled) {
     updateIndicatorTrackColorAvailability();
     updateTaskbarTextColorAvailability();
+    updateActivityScaleAvailability();
   }
 }
 
@@ -172,6 +176,38 @@ function transformThresholdInputs(nextBasis) {
     if (field && Number.isFinite(value)) field.value = String(100 - value);
   }
   currentDisplayBasis = nextBasis;
+}
+
+function updateActivityScaleAvailability() {
+  if (!form) return;
+  const mode = form.elements.namedItem("activity_scale_mode")?.value === "fixed"
+    ? "fixed"
+    : "auto";
+  const tokenField = form.elements.namedItem("activity_tokens_per_level");
+  const formReady = form.dataset?.loadState === "ready";
+  const editable = formReady && mode === "fixed";
+  if (tokenField) {
+    tokenField.disabled = !formReady;
+    tokenField.readOnly = !editable;
+    tokenField.setAttribute?.("aria-disabled", String(!editable));
+    tokenField.tabIndex = editable ? 0 : -1;
+  }
+  if (activityTokenLevelRow?.dataset) activityTokenLevelRow.dataset.enabled = String(editable);
+
+  for (const option of activityScalePicker?.querySelectorAll?.("[data-activity-scale-value]") ?? []) {
+    const selected = option.dataset.activityScaleValue === mode;
+    option.setAttribute("aria-checked", String(selected));
+    option.tabIndex = selected ? 0 : -1;
+  }
+
+  if (!activityScalePreview) return;
+  if (mode === "auto") {
+    activityScalePreview.textContent = t("activity.scaleAuto", currentLanguageSettings());
+    return;
+  }
+  const unit = Math.max(1, Math.round(Number(tokenField?.value) || 250_000));
+  const format = (value) => value.toLocaleString();
+  activityScalePreview.textContent = `${format(unit)} · ${format(unit * 2)} · ${format(unit * 3)} · ${format(unit * 4)}+`;
 }
 
 function syncRangeFromNumberEditor(editor, commit = false) {
@@ -282,6 +318,7 @@ function updateOutputs() {
   syncRangeNumberEditors();
   updateIndicatorTrackColorAvailability();
   updateTaskbarTextColorAvailability();
+  updateActivityScaleAvailability();
 
   const palette = form.elements.namedItem("palette")?.value ?? "traffic";
   if (customRow) customRow.hidden = palette !== "custom";
@@ -349,6 +386,9 @@ function fillForm(settings) {
   setField("danger_threshold", state.dangerThreshold);
   setField("poll_interval_secs", state.pollIntervalSecs);
   setField("stale_after_secs", state.staleAfterSecs);
+  setField("activity_weeks", state.activityWeeks);
+  setField("activity_scale_mode", state.activityScaleMode);
+  setField("activity_tokens_per_level", state.activityTokensPerLevel);
   setField("bar_mode", state.barMode);
   setField("full_reset_time_on", state.fullResetTimeOn);
   setField("limit_order", state.limitOrder);
@@ -487,6 +527,23 @@ async function saveSettings(input, revision) {
   showSettingsToast(t(warnings.length > 0 ? "status.savedRetrying" : "status.saved", next));
 }
 
+async function rollbackFailedSave(revision, error) {
+  if (revision !== localRevision) return;
+  let recovered = false;
+  try {
+    const persisted = await invoke("get_settings");
+    if (revision !== localRevision) return;
+    if (!persisted || typeof persisted !== "object") throw new Error("invalid settings payload");
+    fillForm(persisted);
+    savedRevision = revision;
+    recovered = true;
+  } catch {
+    // Keep the original save error when the recovery read also fails.
+  }
+  if (revision === localRevision) setStatus(String(error), "error");
+  if (!recovered) throw error;
+}
+
 function enqueueLatestSettingsSave() {
   clearTimeout(autosaveTimer);
   autosaveTimer = null;
@@ -494,10 +551,10 @@ function enqueueLatestSettingsSave() {
 
   const revision = localRevision;
   const input = payloadFromEntries(new FormData(form));
-  saveQueue = saveQueue.catch(() => {}).then(() => saveSettings(input, revision));
-  saveQueue.catch((error) => {
-    if (revision === localRevision) setStatus(String(error), "error");
-  });
+  saveQueue = saveQueue
+    .catch(() => {})
+    .then(() => saveSettings(input, revision))
+    .catch((error) => rollbackFailedSave(revision, error));
   return saveQueue;
 }
 
@@ -544,12 +601,6 @@ function handleSettingsMutation(event) {
 }
 
 async function runAction(action) {
-  if (action === "restore-statusline") {
-    await invoke("restore_statusline");
-    setStatus("", "ready");
-    showSettingsToast(t("status.restored", currentLanguageSettings()));
-    return;
-  }
   if (action === "check-updates") {
     if (updateStatusEl) {
       updateStatusEl.textContent = t("status.updateChecking", currentLanguageSettings());
@@ -706,6 +757,14 @@ if (form) {
       return;
     }
 
+    const activityScaleOption = event.target?.closest?.("[data-activity-scale-value]");
+    if (activityScaleOption) {
+      setField("activity_scale_mode", activityScaleOption.dataset.activityScaleValue);
+      updateOutputs();
+      scheduleAutosave();
+      return;
+    }
+
     const action = event.target?.dataset?.action;
     if (action) runAction(action).catch((error) => setStatus(String(error), "error"));
   });
@@ -727,11 +786,26 @@ if (form) {
       return;
     }
 
-    const option = event.target?.closest?.("[data-palette-value], [data-effect-value]");
+    const activityScaleOption = event.target?.closest?.("[data-activity-scale-value]");
+    if (activityScaleOption) {
+      setField("activity_scale_mode", activityScaleOption.dataset.activityScaleValue);
+      updateOutputs();
+      scheduleAutosave();
+      return;
+    }
+
+    const option = event.target?.closest?.(
+      "[data-palette-value], [data-effect-value], [data-activity-scale-value]",
+    );
     if (!option) return;
     const isPalette = option.dataset.paletteValue !== undefined;
-    const picker = isPalette ? palettePicker : effectPicker;
-    const selector = isPalette ? "[data-palette-value]" : "[data-effect-value]";
+    const isEffect = option.dataset.effectValue !== undefined;
+    const picker = isPalette ? palettePicker : isEffect ? effectPicker : activityScalePicker;
+    const selector = isPalette
+      ? "[data-palette-value]"
+      : isEffect
+        ? "[data-effect-value]"
+        : "[data-activity-scale-value]";
     const options = [...(picker?.querySelectorAll?.(selector) ?? [])];
     const current = options.indexOf(option);
     if (current < 0) return;
@@ -747,8 +821,12 @@ if (form) {
     event.preventDefault();
     const selected = options[next];
     setField(
-      isPalette ? "palette" : "indicator_effect_style",
-      isPalette ? selected.dataset.paletteValue : selected.dataset.effectValue,
+      isPalette ? "palette" : isEffect ? "indicator_effect_style" : "activity_scale_mode",
+      isPalette
+        ? selected.dataset.paletteValue
+        : isEffect
+          ? selected.dataset.effectValue
+          : selected.dataset.activityScaleValue,
     );
     updateOutputs();
     selected.focus?.();
