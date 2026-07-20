@@ -204,6 +204,7 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
     ["juice-v014-panel-overview.png", [1240, 944]],
+    ["juice-v014-panel-activity.png", [1240, 674]],
     ["juice-v014-panel-appearance.png", [1240, 1436]],
     ["juice-v014-panel-taskbar.png", [1240, 864]],
     ["juice-v014-panel-collection.png", [1240, 1132]],
@@ -220,6 +221,12 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
     assert.deepEqual(pngDimensions(path), dimensions, `${name} dimensions changed`);
     assert.ok(readFileSync(path).length > 10_000, `${name} is unexpectedly small`);
   }
+
+  assert.equal(
+    readme.match(/docs\/assets\/juice-v014-panel-activity\.png/g)?.length,
+    2,
+    "the activity image must appear in both Korean and English sections",
+  );
 
   const gifName = "juice-v014-multi-monitor.gif";
   const gifPath = resolve(projectRoot, `docs/assets/${gifName}`);
