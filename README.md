@@ -51,6 +51,12 @@ Juice는 두 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
 
 ### 토큰 활동
 
+<p align="center">
+  <img src="docs/assets/juice-v014-panel-activity.png" alt="Juice Claude와 Codex 토큰 활동 히트맵" width="620">
+</p>
+
+<p align="center"><sub>문서용 샘플 데이터입니다. 한 칸은 현재 PC의 하루 토큰 활동이며 전체·Claude·Codex를 따로 볼 수 있습니다.</sub></p>
+
 - 설정창의 사용량 카드 아래에서 `전체 / Claude / Codex` 필터와 날짜별 토큰 활동을 확인할 수 있습니다.
 - 한 칸은 하루로 고정되며 표시 기간은 4~52주입니다. 농도는 기간 내 활동에 맞춘 자동 로그 스케일 또는 사용자가 지정한 단계당 토큰 수를 사용합니다.
 - 최초 조회에서는 현재 PC의 최근 1년 로컬 세션 로그를 백그라운드로 읽고, 이후에는 변경된 부분만 증분 반영합니다. 큰 이력은 카드에 `과거 기록 수집 중`으로 표시됩니다.
@@ -254,6 +260,12 @@ Juice reads the **5-hour and weekly limits** from Claude Code and the Codex CLI 
 Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately.
 
 ### Token activity
+
+<p align="center">
+  <img src="docs/assets/juice-v014-panel-activity.png" alt="Juice token activity heatmap for Claude and Codex" width="620">
+</p>
+
+<p align="center"><sub>Documentation sample data. Each cell represents one local day, with separate All, Claude, and Codex views.</sub></p>
 
 - The card below the usage summaries provides `All / Claude / Codex` filters and daily token activity.
 - Each cell is one local day. Choose a 4 to 52 week range and either an automatic logarithmic intensity scale or a custom token count per level.
