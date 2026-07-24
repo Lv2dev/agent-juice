@@ -519,7 +519,11 @@ test("taskbar overlay cannot synchronously couple the Juice event loop to Explor
   assert.doesNotMatch(dockApply, /get_webview_window|\.hwnd\(\)/);
   assert.match(
     rustLib,
-    /let _layout_guard = try_taskbar_layout_gate[\s\S]*taskbar_window_handle\(manager, tool\) != Some\(handle\)[\s\S]*window_is_valid\(hwnd\)[\s\S]*Action::Position\(_, _, rect\) => apply_taskbar_overlay/,
+    /let positions = actions[\s\S]*resolve_taskbar_position_pair[\s\S]*let _layout_guard = try_taskbar_layout_gate/,
+  );
+  assert.match(
+    rustLib,
+    /let _layout_guard = try_taskbar_layout_gate[\s\S]*taskbar_window_handle\(manager, tool\) != Some\(handle\)[\s\S]*window_is_valid\(hwnd\)[\s\S]*Action::Position \{ rect, \.\. \} => apply_taskbar_overlay/,
   );
 });
 
@@ -633,7 +637,10 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.doesNotMatch(panelMarkup, /name="fullscreen_hide_on"[^>]*checked/);
   assert.match(panelMarkup, /name="maximized_hide_on"/);
   assert.match(panelMarkup, />전체창 숨김</);
+  assert.match(panelMarkup, /name="taskbar_avoid_overlap_on"[^>]*checked/);
+  assert.match(panelMarkup, />바 겹침 자동 방지</);
   assert.match(rustConfig, /maximized_hide_on/);
+  assert.match(rustConfig, /taskbar_avoid_overlap_on/);
   assert.match(rustLib, /visible_windows_coverage/);
   assert.match(panelMarkup, /name="indicator_style"/);
   assert.match(panelMarkup, /name="indicator_track_color_auto"[^>]*checked/);
@@ -1329,6 +1336,18 @@ test("taskbar bar initial paint hides tool sections and placeholder values", () 
   assert.doesNotMatch(barMarkup, /주간\s*[–-]/);
 });
 
+test("taskbar startup loading stays visible in text, ring, and horizontal bar modes", () => {
+  assert.match(barJs, /let startupStatusLoading = true/);
+  assert.match(barJs, /STARTUP_STATUS_TIMEOUT_MS = 20_000/);
+  assert.match(barJs, /vm\.state === "loading"[\s\S]*\.primary-text", vm\.loadingText/);
+  assert.match(barJs, /\.bar-worst", vm\.worst/);
+  assert.match(barJs, /\.quad-primary-number", "…"/);
+  assert.match(
+    css,
+    /\[data-indicator="bar"\] \.bar-tool\[data-state="loading"\] \.bar-bars::after[\s\S]*content: "…"/,
+  );
+});
+
 test("panel and bar IPC capabilities are split and sensitive commands are label guarded", () => {
   const panelCapability = capabilities.find((item) => item.windows?.includes("panel"));
   const barCapability = capabilities.find((item) => item.windows?.includes("bar-claude"));
@@ -1427,7 +1446,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.8"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.9"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

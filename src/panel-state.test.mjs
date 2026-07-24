@@ -203,7 +203,7 @@ test("viewModelForTool is null-safe and marks stale sessions", () => {
   assert.equal(vm.primary.value, "–");
   assert.equal(vm.primary.width, "0%");
   assert.equal(vm.primary.color, "#9ca3af");
-  assert.equal(vm.secondary.reset, "초기화 시간 경과");
+  assert.equal(vm.secondary.reset, "갱신 대기");
   assert.equal(vm.context, "컨텍스트 – · 오래됨");
   assert.equal(vm.meta, "근사치");
 });

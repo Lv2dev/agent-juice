@@ -1175,6 +1175,7 @@ html[data-panel-visible="false"] * {
 }
 
 .bar-bars {
+  position: relative;
   width: var(--ring-size);
   min-width: 0;
   display: none;
@@ -1182,6 +1183,23 @@ html[data-panel-visible="false"] * {
   flex-direction: column;
   justify-content: center;
   gap: var(--ring-gap);
+}
+
+.bar-shell[data-indicator="bar"] .bar-tool[data-state="loading"] .bar-bars::after {
+  content: "…";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  font-size: var(--ring-number-font-size);
+  line-height: 1;
+  font-weight: var(--ring-number-font-weight);
+}
+
+.bar-shell[data-indicator="bar"] .bar-tool[data-state="loading"] .limit-bar {
+  opacity: 0.34;
 }
 
 .limit-bar {

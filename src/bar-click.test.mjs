@@ -1249,6 +1249,46 @@ test("bar still renders when event listen rejects without keyboard panel opening
   delete global.document;
 });
 
+test("bar clears startup loading when the initial status request fails", async () => {
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tools = { claude: toolStub(), codex: toolStub() };
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") return { language: "ko" };
+          if (command === "get_status") throw new Error("startup collection failed");
+          return null;
+        },
+      },
+      event: {
+        async listen() {},
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-startup-status-failure`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(tools.codex.dataset.state, "empty");
+  assert.equal(tools.codex.dataset.severity, "empty");
+  assert.equal(tools.codex.textContentFor(".primary-text"), "5h –");
+  assert.notEqual(tools.codex.textContentFor(".primary-text"), "로딩 중");
+  delete global.window;
+  delete global.document;
+});
+
 test("bar retries status listener and ignores an older initial response", async () => {
   const eventHandlers = {};
   const attempts = new Map();
@@ -1264,7 +1304,7 @@ test("bar retries status listener and ignores an older initial response", async 
     __TAURI__: {
       core: {
         async invoke(command) {
-          if (command === "get_settings") return {};
+          if (command === "get_settings") return { language: "ko" };
           if (command === "get_status") return pendingStatus;
           return null;
         },
@@ -1291,6 +1331,12 @@ test("bar retries status listener and ignores an older initial response", async 
 
   await import(`./bar.js?test=${Date.now()}-listener-retry`);
   await new Promise((resolve) => setTimeout(resolve, 130));
+  assert.equal(tools.codex.dataset.state, "loading");
+  assert.equal(tools.codex.dataset.severity, "loading");
+  assert.equal(tools.codex.textContentFor(".primary-text"), "로딩 중");
+  assert.equal(tools.codex.textContentFor(".secondary-text"), "");
+  assert.equal(tools.codex.textContentFor(".bar-worst"), "…");
+  assert.equal(tools.codex.getAttribute("aria-label"), "Codex, 로딩 중");
   eventHandlers["status-updated"]?.({
     payload: [{
       tool: "codex",

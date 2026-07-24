@@ -394,6 +394,7 @@ function fillForm(settings) {
   setField("limit_order", state.limitOrder);
   setField("fullscreen_hide_on", state.fullscreenHideOn);
   setField("maximized_hide_on", state.maximizedHideOn);
+  setField("taskbar_avoid_overlap_on", state.taskbarAvoidOverlapOn);
   setField("indicator_style", state.indicatorStyle);
   setField("indicator_effect_style", state.indicatorEffectStyle);
   setField("indicator_track_color_auto", state.indicatorTrackColorAuto);

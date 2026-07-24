@@ -145,7 +145,7 @@ function shortReset(iso, now, language) {
   if (!Number.isFinite(resetAt)) return "";
 
   const minutes = Math.round((resetAt - now.getTime()) / 60000);
-  if (minutes <= 0) return t("reset.past", language);
+  if (minutes <= 0) return t("reset.awaitingRefresh", language);
   return formatDuration(minutes, language);
 }
 
@@ -183,7 +183,7 @@ function taskbarTextColorOn(settings, key) {
 function tooltipResetLine(labelKey, reset, language) {
   const label = t(labelKey, language);
   if (!reset) return `${label} –`;
-  if (reset === t("reset.past", language)) return `${label} ${reset}`;
+  if (reset === t("reset.awaitingRefresh", language)) return `${label} ${reset}`;
   return `${label} ${t("reset.prefix", language)} ${reset}`;
 }
 
@@ -215,6 +215,7 @@ export function barToolViewModel(
   tool,
   settings = DEFAULT_SETTINGS,
   now = new Date(),
+  options = {},
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
@@ -223,6 +224,38 @@ export function barToolViewModel(
     label: TOOL_LABELS[tool] ?? tool,
     brandColor: toolBrandColor(tool, settings),
   };
+
+  if (options.startupLoading === true) {
+    const primary = limitModel(
+      "limit.fiveHour",
+      status?.primary,
+      settings,
+      now,
+      language,
+      tool,
+    );
+    const secondary = limitModel(
+      "limit.weekly",
+      status?.secondary,
+      settings,
+      now,
+      language,
+      tool,
+      true,
+    );
+    const loadingText = t("state.loading", language);
+    return {
+      ...base,
+      state: "loading",
+      severity: "loading",
+      primary,
+      secondary,
+      worst: "…",
+      loadingText,
+      tooltip: `${base.label}\n${loadingText}`,
+      ariaLabel: `${base.label}, ${loadingText}`,
+    };
+  }
 
   if (!status) {
     const primary = limitModel("limit.fiveHour", null, settings, now, language, tool);
@@ -271,7 +304,12 @@ function normalizeLimitOrder(value) {
   return LIMIT_ORDERS.has(value) ? value : "primary_first";
 }
 
-export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Date()) {
+export function barViewModel(
+  statuses,
+  settings = DEFAULT_SETTINGS,
+  now = new Date(),
+  options = {},
+) {
   const merged = { ...DEFAULT_SETTINGS, ...settings };
   const ringSizePx = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
   const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10);
@@ -321,7 +359,7 @@ export function barViewModel(statuses, settings = DEFAULT_SETTINGS, now = new Da
     barTextFontWeight: intRangeSetting(merged.bar_text_font_weight, 500, 100, 900),
     barContentGapPx: numberRangeSetting(merged.bar_content_gap_px, 14, 0, 24),
     tools: TOOLS.filter((tool) => toolEnabled(merged, tool)).map((tool) =>
-      barToolViewModel(statuses, tool, merged, now),
+      barToolViewModel(statuses, tool, merged, now, options),
     ),
   };
 }

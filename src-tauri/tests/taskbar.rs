@@ -2,11 +2,11 @@ use agent_juice::taskbar::{
     dock_rect_for_taskbar, dock_rect_for_taskbar_at_offset, dock_rect_for_taskbar_drag_at_point,
     dock_rect_for_taskbar_target, drag_rect_for_logical_length_at_dpi,
     offset_ratio_for_taskbar_left, offset_ratio_for_taskbar_rect, rect_covers_monitor,
-    rect_covers_work_area_without_covering_monitor, taskbar_monitor_device_key,
-    taskbar_monitor_key, taskbar_monitor_path_key, taskbar_rect_for_monitor_work_area,
-    taskbar_target_by_key_or_primary, taskbar_target_for_point_or_key, taskbar_tooltip_anchor,
-    visible_window_coverage_on_monitor, window_coverage_is_ignored, DockRect, TaskbarTarget,
-    WindowCoverageCandidate,
+    rect_covers_work_area_without_covering_monitor, resolve_taskbar_pair_overlap,
+    taskbar_monitor_device_key, taskbar_monitor_key, taskbar_monitor_path_key,
+    taskbar_rect_for_monitor_work_area, taskbar_target_by_key_or_primary,
+    taskbar_target_for_point_or_key, taskbar_tooltip_anchor, visible_window_coverage_on_monitor,
+    window_coverage_is_ignored, DockRect, TaskbarTarget, WindowCoverageCandidate,
 };
 
 #[test]
@@ -475,6 +475,109 @@ fn offset_ratio_for_taskbar_rect_uses_matching_orientation_axis() {
             .abs()
             < 0.001
     );
+}
+
+#[test]
+fn taskbar_pair_overlap_moves_only_the_trailing_bar_and_restores_when_space_returns() {
+    let taskbar = DockRect {
+        x: 0,
+        y: 1040,
+        width: 1000,
+        height: 40,
+    };
+    let claude = DockRect {
+        x: 100,
+        y: 1040,
+        width: 250,
+        height: 40,
+    };
+    let codex = DockRect {
+        x: 300,
+        y: 1040,
+        width: 200,
+        height: 40,
+    };
+
+    let (resolved_claude, resolved_codex) = resolve_taskbar_pair_overlap(taskbar, claude, codex);
+    assert_eq!(resolved_claude.x, 100);
+    assert_eq!(resolved_codex.x, 350);
+
+    let shortened_claude = DockRect {
+        width: 150,
+        ..claude
+    };
+    assert_eq!(
+        resolve_taskbar_pair_overlap(taskbar, shortened_claude, codex),
+        (shortened_claude, codex)
+    );
+}
+
+#[test]
+fn taskbar_pair_overlap_preserves_reverse_order_and_shifts_at_the_trailing_edge() {
+    let taskbar = DockRect {
+        x: 0,
+        y: 1040,
+        width: 1000,
+        height: 40,
+    };
+    let claude = DockRect {
+        x: 400,
+        y: 1040,
+        width: 200,
+        height: 40,
+    };
+    let codex = DockRect {
+        x: 300,
+        y: 1040,
+        width: 200,
+        height: 40,
+    };
+    let (resolved_claude, resolved_codex) = resolve_taskbar_pair_overlap(taskbar, claude, codex);
+    assert_eq!(resolved_codex.x, 300);
+    assert_eq!(resolved_claude.x, 500);
+
+    let near_edge_first = DockRect {
+        x: 850,
+        width: 100,
+        ..claude
+    };
+    let near_edge_second = DockRect {
+        x: 900,
+        width: 100,
+        ..codex
+    };
+    let (resolved_first, resolved_second) =
+        resolve_taskbar_pair_overlap(taskbar, near_edge_first, near_edge_second);
+    assert_eq!(resolved_first.x, 800);
+    assert_eq!(resolved_second.x, 900);
+}
+
+#[test]
+fn taskbar_pair_overlap_uses_the_vertical_axis() {
+    let taskbar = DockRect {
+        x: -48,
+        y: 0,
+        width: 48,
+        height: 1080,
+    };
+    let claude = DockRect {
+        x: -48,
+        y: 100,
+        width: 48,
+        height: 250,
+    };
+    let codex = DockRect {
+        x: -48,
+        y: 300,
+        width: 48,
+        height: 200,
+    };
+
+    let (resolved_claude, resolved_codex) = resolve_taskbar_pair_overlap(taskbar, claude, codex);
+    assert_eq!(resolved_claude.y, 100);
+    assert_eq!(resolved_codex.y, 350);
+    assert_eq!(resolved_claude.x, -48);
+    assert_eq!(resolved_codex.x, -48);
 }
 
 #[test]

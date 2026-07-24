@@ -114,6 +114,7 @@ fn settings_update_uses_defaults_only_when_the_file_is_missing() {
     assert!(!updated.claude_taskbar_target_initialized);
     assert!(!updated.codex_taskbar_target_initialized);
     assert!(!updated.fullscreen_hide_on);
+    assert!(updated.taskbar_avoid_overlap_on);
     assert_eq!(read_json(&path)["poll_interval_secs"], 5);
 }
 
@@ -131,6 +132,7 @@ fn existing_settings_without_taskbar_offsets_keep_the_legacy_center_default() {
     assert!(loaded.claude_taskbar_target_initialized);
     assert!(loaded.codex_taskbar_target_initialized);
     assert!(loaded.fullscreen_hide_on);
+    assert!(loaded.taskbar_avoid_overlap_on);
 }
 
 #[test]
@@ -218,6 +220,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         limit_order: "secondary_first".into(),
         fullscreen_hide_on: false,
         maximized_hide_on: true,
+        taskbar_avoid_overlap_on: false,
         indicator_style: "bar".into(),
         indicator_effect_style: "glow".into(),
         indicator_track_color_auto: false,
@@ -272,6 +275,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(loaded.limit_order, "secondary_first");
     assert!(!loaded.fullscreen_hide_on);
     assert!(loaded.maximized_hide_on);
+    assert!(!loaded.taskbar_avoid_overlap_on);
     assert_eq!(loaded.indicator_style, "bar");
     assert_eq!(loaded.indicator_effect_style, "glow");
     assert!(!loaded.indicator_track_color_auto);
@@ -325,6 +329,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert_eq!(legacy.limit_order, "primary_first");
     assert!(legacy.fullscreen_hide_on);
     assert!(!legacy.maximized_hide_on);
+    assert!(legacy.taskbar_avoid_overlap_on);
     assert_eq!(legacy.indicator_style, "ring");
     assert_eq!(legacy.indicator_effect_style, "flat");
     assert!(legacy.ring_on);
@@ -778,6 +783,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         limit_order: "secondary_first".into(),
         fullscreen_hide_on: false,
         maximized_hide_on: true,
+        taskbar_avoid_overlap_on: false,
         indicator_style: "bar".into(),
         indicator_effect_style: "depth".into(),
         indicator_track_color_auto: false,
@@ -876,6 +882,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.limit_order, "secondary_first");
     assert!(!settings.fullscreen_hide_on);
     assert!(settings.maximized_hide_on);
+    assert!(!settings.taskbar_avoid_overlap_on);
     assert_eq!(settings.indicator_style, "bar");
     assert_eq!(settings.indicator_effect_style, "depth");
     assert!(!settings.indicator_track_color_auto);
@@ -983,6 +990,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.font_mode, "system");
     assert!(!settings.fullscreen_hide_on);
     assert!(!settings.maximized_hide_on);
+    assert!(settings.taskbar_avoid_overlap_on);
     assert_eq!(settings.indicator_style, "ring");
     assert_eq!(settings.indicator_effect_style, "flat");
     assert!(settings.indicator_track_color_auto);
