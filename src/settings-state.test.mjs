@@ -23,6 +23,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       limit_order: "secondary_first",
       fullscreen_hide_on: false,
       maximized_hide_on: true,
+      taskbar_avoid_overlap_on: false,
       indicator_style: "bar",
       indicator_effect_style: "glow",
       indicator_track_color_auto: false,
@@ -88,6 +89,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       limitOrder: "secondary_first",
       fullscreenHideOn: false,
       maximizedHideOn: true,
+      taskbarAvoidOverlapOn: false,
       indicatorStyle: "bar",
       indicatorEffectStyle: "glow",
       indicatorTrackColorAuto: false,
@@ -169,6 +171,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     limit_order: "secondary_first",
     fullscreen_hide_on: "on",
     maximized_hide_on: "on",
+    taskbar_avoid_overlap_on: "on",
     indicator_style: "bar",
     indicator_effect_style: "depth",
     indicator_track_color_auto: "on",
@@ -232,6 +235,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     limit_order: "secondary_first",
     fullscreen_hide_on: true,
     maximized_hide_on: true,
+    taskbar_avoid_overlap_on: true,
     indicator_style: "bar",
     indicator_effect_style: "depth",
     indicator_track_color_auto: true,
@@ -304,6 +308,11 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     false,
   );
   assert.equal(formStateFromSettings({}).maximizedHideOn, false);
+  assert.equal(formStateFromSettings({}).taskbarAvoidOverlapOn, true);
+  assert.equal(
+    formStateFromSettings({ taskbar_avoid_overlap_on: false }).taskbarAvoidOverlapOn,
+    false,
+  );
   assert.equal(formStateFromSettings({}).indicatorStyle, "ring");
   assert.equal(formStateFromSettings({}).indicatorEffectStyle, "flat");
   assert.equal(formStateFromSettings({}).indicatorTrackColorAuto, true);
@@ -409,6 +418,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.fullscreen_hide_on, false);
   assert.equal(payload.full_reset_time_on, false);
   assert.equal(payload.maximized_hide_on, false);
+  assert.equal(payload.taskbar_avoid_overlap_on, false);
   assert.equal(payload.indicator_style, "ring");
   assert.equal(payload.indicator_effect_style, "flat");
   assert.equal(payload.indicator_track_color_auto, false);

@@ -1205,6 +1205,81 @@ pub fn offset_ratio_for_taskbar_rect(taskbar: DockRect, window: DockRect) -> Opt
     }
 }
 
+pub fn resolve_taskbar_pair_overlap(
+    taskbar: DockRect,
+    first: DockRect,
+    second: DockRect,
+) -> (DockRect, DockRect) {
+    if taskbar.width <= 0
+        || taskbar.height <= 0
+        || first.width <= 0
+        || first.height <= 0
+        || second.width <= 0
+        || second.height <= 0
+    {
+        return (first, second);
+    }
+
+    let horizontal = is_horizontal_taskbar(taskbar.width, taskbar.height);
+    let task_start = if horizontal { taskbar.x } else { taskbar.y };
+    let task_length = if horizontal {
+        taskbar.width
+    } else {
+        taskbar.height
+    };
+    let Some(task_end) = task_start.checked_add(task_length) else {
+        return (first, second);
+    };
+    let mut rects = [first, second];
+    let starts = if horizontal {
+        [first.x, second.x]
+    } else {
+        [first.y, second.y]
+    };
+    let lengths = if horizontal {
+        [first.width, second.width]
+    } else {
+        [first.height, second.height]
+    };
+    let (leading, trailing) = if starts[0] <= starts[1] {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    let leading_length = lengths[leading].min(task_length);
+    let trailing_length = lengths[trailing].min(task_length);
+    let leading_start = starts[leading].clamp(task_start, task_end.saturating_sub(leading_length));
+    let trailing_start =
+        starts[trailing].clamp(task_start, task_end.saturating_sub(trailing_length));
+    let leading_end = leading_start.saturating_add(leading_length);
+    if leading_end <= trailing_start {
+        return (first, second);
+    }
+
+    let mut packed_leading_start = leading_start;
+    let mut packed_trailing_start = leading_end;
+    let overflow = packed_trailing_start
+        .saturating_add(trailing_length)
+        .saturating_sub(task_end);
+    if overflow > 0 {
+        let shift = overflow.min(packed_leading_start.saturating_sub(task_start));
+        packed_leading_start = packed_leading_start.saturating_sub(shift);
+        packed_trailing_start = packed_trailing_start.saturating_sub(shift);
+    }
+    if packed_trailing_start.saturating_add(trailing_length) > task_end {
+        packed_trailing_start = task_end.saturating_sub(trailing_length);
+    }
+
+    if horizontal {
+        rects[leading].x = packed_leading_start;
+        rects[trailing].x = packed_trailing_start;
+    } else {
+        rects[leading].y = packed_leading_start;
+        rects[trailing].y = packed_trailing_start;
+    }
+    (rects[0], rects[1])
+}
+
 fn offset_ratio_for_axis(
     taskbar_start: i32,
     taskbar_end: i32,

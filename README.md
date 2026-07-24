@@ -88,6 +88,8 @@ Juice에는 **4가지 바 모드**가 있습니다.
 - Claude와 Codex 바는 서로 다른 투명 창입니다. 각각 직접 드래그하며 모니터별 위치가 저장됩니다.
 - 최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다.
 - 숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다.
+- 기본으로 켜진 `바 겹침 자동 방지`는 값이나 리셋 문구가 길어질 때 같은 작업표시줄의 뒤쪽 바만 임시로 밀어냅니다. 사용자가 저장한 위치와 간격은 바뀌지 않으며 내용이 짧아지면 원래 배치로 돌아갑니다.
+- 재부팅이나 첫 실행의 최초 수집 중에는 `로딩 중`을 표시합니다. 지난 리셋 시간이 남아 있고 새 한도를 아직 받지 못한 경우에는 `갱신 대기`로 구분합니다.
 - 바에 마우스를 올리면 도구명과 사용 가능한 5h·주간 한도의 초기화까지 남은 시간을 보여줍니다.
 - 바 우클릭 메뉴의 `새로고침`은 일반 캐시를 우회해 로컬 수집을 다시 실행합니다.
 - 트레이 메뉴에서 전체 바 표출을 일시중지하거나 재개할 수 있습니다.
@@ -144,7 +146,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 | --- | --- |
 | 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
 | 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
-| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
+| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
 | 색상 | 9개 팔레트, 도구·한도별 기본 4색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
 | 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 릴리즈 페이지, 최근 확인 결과 |
@@ -298,6 +300,8 @@ Juice provides **four bar modes**.
 - Claude and Codex use separate transparent windows, so each can be dragged independently and remembered per monitor.
 - On first launch, visible bars are placed from the left edge of the taskbar without overlapping.
 - Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars.
+- `Prevent bar overlap` is enabled by default. When values or reset text grow, Juice temporarily moves only the trailing bar on the same taskbar. Saved positions and spacing remain unchanged, and the original layout returns when content shrinks.
+- During the first collection after startup or reboot, the bar shows `Loading`. If a stored reset time has passed but a new limit has not arrived yet, it shows `Waiting for refresh`.
 - Hovering a bar shows the tool name and time remaining until each available 5-hour or weekly limit resets.
 - The taskbar context menu `Refresh` action bypasses the normal cache and recollects local status.
 - Pause or resume all taskbar bars from the Juice tray menu.
@@ -354,7 +358,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | --- | --- |
 | General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
 | Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
-| Taskbar | Four modes, limit order, ring/horizontal-bar display, fullscreen/maximized hiding, per-tool display and collection |
+| Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, fullscreen/maximized hiding, per-tool display and collection |
 | Colors | Nine palettes, four tool/limit base colors, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
 | Updates card | Automatic and manual checks, Releases page, and the latest check result |

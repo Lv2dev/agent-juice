@@ -6,6 +6,7 @@ import { applyTheme } from "./theme.js";
 
 let settings = { ...DEFAULT_SETTINGS };
 let statuses = [];
+let startupStatusLoading = true;
 let statusEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
@@ -14,6 +15,7 @@ let listenersDisposed = false;
 const activeUnlisteners = new Set();
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
+const STARTUP_STATUS_TIMEOUT_MS = 20_000;
 const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
 let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
@@ -81,6 +83,23 @@ async function invoke(command, args) {
   const fn = tauriApi().core?.invoke;
   if (!fn) return null;
   return fn(command, args);
+}
+
+function withTimeout(promise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("status request timed out")), timeoutMs);
+    timer?.unref?.();
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function refreshTaskbarStatus() {
@@ -280,12 +299,21 @@ function renderTool(vm, limitOrder) {
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
   setText(item, ".bar-worst", vm.worst);
-  setText(item, ".quad-primary-number", first.number);
-  setText(item, ".quad-secondary-number", second.number);
-  setText(item, ".primary-text", first.text);
-  setText(item, ".primary-reset", first.reset ? `(${first.reset})` : "");
-  setText(item, ".secondary-text", second.text);
-  setText(item, ".secondary-reset", second.reset ? `(${second.reset})` : "");
+  if (vm.state === "loading") {
+    setText(item, ".quad-primary-number", "…");
+    setText(item, ".quad-secondary-number", "…");
+    setText(item, ".primary-text", vm.loadingText);
+    setText(item, ".primary-reset", "");
+    setText(item, ".secondary-text", "");
+    setText(item, ".secondary-reset", "");
+  } else {
+    setText(item, ".quad-primary-number", first.number);
+    setText(item, ".quad-secondary-number", second.number);
+    setText(item, ".primary-text", first.text);
+    setText(item, ".primary-reset", first.reset ? `(${first.reset})` : "");
+    setText(item, ".secondary-text", second.text);
+    setText(item, ".secondary-reset", second.reset ? `(${second.reset})` : "");
+  }
   if (CURRENT_TOOL === vm.tool) {
     pendingNativeTooltip = { tool: vm.tool, text: vm.tooltip };
     syncNativeTooltip();
@@ -347,7 +375,9 @@ function renderBar() {
   const root = document.querySelector("#bar");
   if (!root) return;
 
-  const vm = barViewModel(statuses, settings);
+  const vm = barViewModel(statuses, settings, new Date(), {
+    startupLoading: startupStatusLoading,
+  });
   root.dataset.mode = vm.mode;
   root.dataset.menuState = refreshMenuState;
   root.dataset.fullResetTime = vm.fullResetTimeOn ? "on" : "off";
@@ -557,6 +587,7 @@ function bindEvents() {
     });
     void listenWithRetry(listen, "status-updated", (event) => {
       statusEventGeneration += 1;
+      startupStatusLoading = false;
       statuses = Array.isArray(event.payload) ? event.payload : [];
       renderBar();
     });
@@ -586,13 +617,15 @@ function bindEvents() {
 async function loadStatus() {
   const requestGeneration = statusEventGeneration;
   try {
-    const loaded = (await invoke("get_status")) || [];
+    const loaded =
+      (await withTimeout(invoke("get_status"), STARTUP_STATUS_TIMEOUT_MS)) || [];
     if (statusEventGeneration !== requestGeneration) return;
     statuses = loaded;
   } catch {
     if (statusEventGeneration !== requestGeneration) return;
     statuses = [];
   }
+  startupStatusLoading = false;
   renderBar();
 }
 
@@ -603,7 +636,7 @@ async function bootstrap() {
   bindRefreshMenu();
   renderBar();
   bindEvents();
-  await Promise.all([loadSettings(), loadStatus(), loadTaskbarOrientation()]);
+  await Promise.all([loadSettings().then(renderBar), loadStatus(), loadTaskbarOrientation()]);
   renderBar();
 }
 

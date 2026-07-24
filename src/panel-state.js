@@ -247,7 +247,7 @@ function formatReset(iso, now, language) {
   if (resetAt == null) return "";
 
   const minutes = Math.round((resetAt - now.getTime()) / 60000);
-  if (minutes <= 0) return t("reset.past", language);
+  if (minutes <= 0) return t("reset.awaitingRefresh", language);
 
   return `${t("reset.prefix", language)} ${formatDuration(minutes, language)} (${formatLocalDateTime(resetAt, language)})`;
 }

@@ -1951,6 +1951,23 @@ fn taskbar_ratio_preserving_leading_edge(
     taskbar::offset_ratio_for_taskbar_rect(taskbar_rect, resized_window)
 }
 
+fn taskbar_ratio_preserving_layout_leading_edge(
+    taskbar_rect: taskbar::DockRect,
+    current_length: i32,
+    current_ratio: f32,
+    new_length: i32,
+) -> Option<f32> {
+    let current_window = taskbar::dock_rect_for_taskbar_at_offset(
+        taskbar_rect.x,
+        taskbar_rect.y,
+        taskbar_rect.x.checked_add(taskbar_rect.width)?,
+        taskbar_rect.y.checked_add(taskbar_rect.height)?,
+        current_length,
+        current_ratio,
+    )?;
+    taskbar_ratio_preserving_leading_edge(taskbar_rect, current_window, new_length)
+}
+
 #[cfg(windows)]
 fn taskbar_physical_length_for_window(
     logical_length: i32,
@@ -2907,25 +2924,23 @@ fn preserve_taskbar_leading_edges(
         else {
             continue;
         };
-        let Ok(window_rect) = current_bar_rect(app, tool) else {
-            continue;
-        };
         let taskbar_rect = taskbar::DockRect {
             x: taskbar.left,
             y: taskbar.top,
             width: taskbar.right - taskbar.left,
             height: taskbar.bottom - taskbar.top,
         };
-        let current_window = taskbar::DockRect {
-            x: window_rect.left,
-            y: window_rect.top,
-            width: window_rect.right - window_rect.left,
-            height: window_rect.bottom - window_rect.top,
-        };
+        let current_ratio = taskbar_content_layout(app, current, tool)
+            .and_then(|layout| layout.ratio)
+            .unwrap_or_else(|| taskbar_offset_ratio(current, tool));
+        let current_length = taskbar_physical_length_for_window(current_length, taskbar.hwnd);
         let requested_length = taskbar_physical_length_for_window(requested_length, taskbar.hwnd);
-        if let Some(ratio) =
-            taskbar_ratio_preserving_leading_edge(taskbar_rect, current_window, requested_length)
-        {
+        if let Some(ratio) = taskbar_ratio_preserving_layout_leading_edge(
+            taskbar_rect,
+            current_length,
+            current_ratio,
+            requested_length,
+        ) {
             set_taskbar_offset_ratio(requested, tool, ratio);
         }
     }
@@ -3128,7 +3143,6 @@ async fn set_taskbar_content_width(
 
     #[cfg(windows)]
     let ratio = (|| {
-        let current_rect = current_bar_rect(&app, tool).ok()?;
         let taskbar =
             taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool)).ok()?;
         let taskbar_rect = taskbar::DockRect {
@@ -3137,14 +3151,22 @@ async fn set_taskbar_content_width(
             width: taskbar.right - taskbar.left,
             height: taskbar.bottom - taskbar.top,
         };
-        let current_window = taskbar::DockRect {
-            x: current_rect.left,
-            y: current_rect.top,
-            width: current_rect.right - current_rect.left,
-            height: current_rect.bottom - current_rect.top,
-        };
+        let current_ratio = previous
+            .as_ref()
+            .and_then(|layout| layout.ratio)
+            .unwrap_or_else(|| taskbar_offset_ratio(&settings, tool));
+        let current_length = previous
+            .as_ref()
+            .map(|layout| layout.width)
+            .or_else(|| taskbar_dock_width(&settings, tool))?;
+        let current_length = taskbar_physical_length_for_window(current_length, taskbar.hwnd);
         let new_length = taskbar_physical_length_for_window(width, taskbar.hwnd);
-        taskbar_ratio_preserving_leading_edge(taskbar_rect, current_window, new_length)
+        taskbar_ratio_preserving_layout_leading_edge(
+            taskbar_rect,
+            current_length,
+            current_ratio,
+            new_length,
+        )
     })()
     .or_else(|| Some(taskbar_offset_ratio(&settings, tool)));
     #[cfg(not(windows))]
@@ -3270,6 +3292,21 @@ fn apply_taskbar_dock_for_generation<R: tauri::Runtime>(
 }
 
 #[cfg(windows)]
+fn resolve_taskbar_position_pair(
+    enabled: bool,
+    first_taskbar: isize,
+    first_taskbar_rect: taskbar::DockRect,
+    first_rect: taskbar::DockRect,
+    second_taskbar: isize,
+    second_rect: taskbar::DockRect,
+) -> (taskbar::DockRect, taskbar::DockRect) {
+    if !enabled || first_taskbar != second_taskbar {
+        return (first_rect, second_rect);
+    }
+    taskbar::resolve_taskbar_pair_overlap(first_taskbar_rect, first_rect, second_rect)
+}
+
+#[cfg(windows)]
 fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     settings: &Settings,
@@ -3279,7 +3316,13 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
     #[derive(Clone, Copy)]
     enum Action {
         Hide(&'static str, TaskbarWindowHandle),
-        Position(&'static str, TaskbarWindowHandle, taskbar::DockRect),
+        Position {
+            tool: &'static str,
+            handle: TaskbarWindowHandle,
+            taskbar_hwnd: isize,
+            taskbar_rect: taskbar::DockRect,
+            rect: taskbar::DockRect,
+        },
     }
 
     let taskbar_paused = taskbar_bars_paused(manager);
@@ -3343,7 +3386,43 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         .ok_or_else(|| anyhow::anyhow!("invalid shell taskbar rectangle"))?;
         let handle =
             window_handle.ok_or_else(|| anyhow::anyhow!("no taskbar bar window for {tool}"))?;
-        actions.push(Action::Position(tool, handle, rect));
+        actions.push(Action::Position {
+            tool,
+            handle,
+            taskbar_hwnd: taskbar.hwnd.0 as isize,
+            taskbar_rect: target.rect,
+            rect,
+        });
+    }
+
+    let positions = actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| match action {
+            Action::Position {
+                taskbar_hwnd,
+                taskbar_rect,
+                rect,
+                ..
+            } => Some((index, *taskbar_hwnd, *taskbar_rect, *rect)),
+            Action::Hide(_, _) => None,
+        })
+        .collect::<Vec<_>>();
+    if let [first, second] = positions.as_slice() {
+        let (first_rect, second_rect) = resolve_taskbar_position_pair(
+            settings.taskbar_avoid_overlap_on,
+            first.1,
+            first.2,
+            first.3,
+            second.1,
+            second.3,
+        );
+        if let Action::Position { rect, .. } = &mut actions[first.0] {
+            *rect = first_rect;
+        }
+        if let Action::Position { rect, .. } = &mut actions[second.0] {
+            *rect = second_rect;
+        }
     }
 
     let _layout_guard = try_taskbar_layout_gate(&TASKBAR_LAYOUT_GATE)?;
@@ -3352,7 +3431,8 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
     }
     for action in actions {
         let (tool, handle) = match action {
-            Action::Hide(tool, handle) | Action::Position(tool, handle, _) => (tool, handle),
+            Action::Hide(tool, handle) => (tool, handle),
+            Action::Position { tool, handle, .. } => (tool, handle),
         };
         if taskbar_window_handle(manager, tool) != Some(handle) {
             anyhow::bail!("taskbar window changed while layout was being planned");
@@ -3363,7 +3443,7 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         }
         match action {
             Action::Hide(_, _) => taskbar::hide_window(hwnd)?,
-            Action::Position(_, _, rect) => apply_taskbar_overlay(hwnd, rect)?,
+            Action::Position { rect, .. } => apply_taskbar_overlay(hwnd, rect)?,
         }
     }
     Ok(())
@@ -4628,6 +4708,41 @@ mod tests {
         assert_eq!(scaled_codex.x, scaled_claude.x + scaled_claude.width);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn runtime_overlap_resolution_is_optional_and_scoped_to_one_taskbar() {
+        let taskbar_rect = taskbar::DockRect {
+            x: 0,
+            y: 1040,
+            width: 1000,
+            height: 40,
+        };
+        let claude = taskbar::DockRect {
+            x: 100,
+            y: 1040,
+            width: 250,
+            height: 40,
+        };
+        let codex = taskbar::DockRect {
+            x: 300,
+            y: 1040,
+            width: 200,
+            height: 40,
+        };
+
+        assert_eq!(
+            super::resolve_taskbar_position_pair(false, 1, taskbar_rect, claude, 1, codex),
+            (claude, codex)
+        );
+        assert_eq!(
+            super::resolve_taskbar_position_pair(true, 1, taskbar_rect, claude, 2, codex),
+            (claude, codex)
+        );
+        let (_, resolved_codex) =
+            super::resolve_taskbar_position_pair(true, 1, taskbar_rect, claude, 1, codex);
+        assert_eq!(resolved_codex.x, 350);
+    }
+
     #[test]
     fn initial_taskbar_stack_handles_vertical_and_single_tool_layouts() {
         let settings = Settings::default();
@@ -4768,6 +4883,30 @@ mod tests {
         let restored =
             taskbar::dock_rect_for_taskbar_at_offset(100, 1040, 1920, 1080, 260, ratio).unwrap();
         assert_eq!(restored.x, 1660);
+    }
+
+    #[test]
+    fn taskbar_layout_resize_uses_the_canonical_ratio_instead_of_the_shifted_hwnd() {
+        let taskbar_rect = taskbar::DockRect {
+            x: 0,
+            y: 1040,
+            width: 1000,
+            height: 40,
+        };
+        let canonical_ratio = 300.0 / 800.0;
+        let resized_ratio = super::taskbar_ratio_preserving_layout_leading_edge(
+            taskbar_rect,
+            200,
+            canonical_ratio,
+            300,
+        )
+        .unwrap();
+        let resized =
+            taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1000, 1080, 300, resized_ratio)
+                .unwrap();
+
+        assert_eq!(resized.x, 300);
+        assert_ne!(resized.x, 350);
     }
 
     #[test]

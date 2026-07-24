@@ -116,6 +116,8 @@ pub struct Settings {
     pub fullscreen_hide_on: bool,
     #[serde(default = "default_maximized_hide_on")]
     pub maximized_hide_on: bool,
+    #[serde(default = "default_taskbar_avoid_overlap_on")]
+    pub taskbar_avoid_overlap_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
@@ -217,6 +219,8 @@ pub struct SettingsInput {
     pub fullscreen_hide_on: bool,
     #[serde(default = "default_maximized_hide_on")]
     pub maximized_hide_on: bool,
+    #[serde(default = "default_taskbar_avoid_overlap_on")]
+    pub taskbar_avoid_overlap_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
@@ -440,6 +444,10 @@ fn default_maximized_hide_on() -> bool {
     false
 }
 
+fn default_taskbar_avoid_overlap_on() -> bool {
+    true
+}
+
 fn default_indicator_style() -> String {
     "ring".into()
 }
@@ -571,6 +579,7 @@ impl Default for Settings {
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
+            taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -625,6 +634,7 @@ impl Default for SettingsInput {
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
+            taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -863,6 +873,7 @@ impl Settings {
             limit_order: default_limit_order(),
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
+            taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -937,6 +948,7 @@ impl Settings {
             limit_order: normalize_limit_order(&input.limit_order).into(),
             fullscreen_hide_on: input.fullscreen_hide_on,
             maximized_hide_on: input.maximized_hide_on,
+            taskbar_avoid_overlap_on: input.taskbar_avoid_overlap_on,
             indicator_style: normalize_indicator_style(&input.indicator_style).into(),
             indicator_effect_style: normalize_indicator_effect_style(&input.indicator_effect_style)
                 .into(),

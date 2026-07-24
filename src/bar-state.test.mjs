@@ -72,6 +72,39 @@ test("barToolViewModel is null-safe and marks stale or empty tools", () => {
   assert.equal(empty.ariaLabel, "Claude, 5h –, 주간 –");
 });
 
+test("barToolViewModel exposes startup loading while preserving a last-known gauge", () => {
+  const previous = {
+    tool: "codex",
+    captured_at: "2026-07-06T23:00:00Z",
+    primary: { used_percent: 75, resets_at: "2026-07-06T23:30:00Z" },
+    secondary: { used_percent: 40, resets_at: "2026-07-10T00:00:00Z" },
+    session: { active: false },
+  };
+
+  const withPrevious = barToolViewModel(
+    [previous],
+    "codex",
+    settings,
+    new Date("2026-07-07T00:00:00Z"),
+    { startupLoading: true },
+  );
+  assert.equal(withPrevious.state, "loading");
+  assert.equal(withPrevious.severity, "loading");
+  assert.equal(withPrevious.loadingText, "로딩 중");
+  assert.equal(withPrevious.primary.percent, 25);
+  assert.equal(withPrevious.secondary.percent, 60);
+  assert.equal(withPrevious.worst, "…");
+  assert.equal(withPrevious.tooltip, "Codex\n로딩 중");
+  assert.equal(withPrevious.ariaLabel, "Codex, 로딩 중");
+
+  const empty = barToolViewModel([], "claude", settings, new Date(), {
+    startupLoading: true,
+  });
+  assert.equal(empty.state, "loading");
+  assert.equal(empty.primary.percent, null);
+  assert.equal(empty.tooltip, "Claude\n로딩 중");
+});
+
 test("barToolViewModel keeps a weekly-only Codex limit in the weekly slot", () => {
   const weeklyOnly = {
     tool: "codex",
@@ -205,7 +238,7 @@ test("barToolViewModel localizes the weekly limit label", () => {
     { ...settings, language: "en" },
     new Date("2026-07-07T00:00:00Z"),
   );
-  assert.equal(past.tooltip, "Codex\n5h Reset passed\nWeekly –");
+  assert.equal(past.tooltip, "Codex\n5h Waiting for refresh\nWeekly –");
 });
 
 test("barViewModel normalizes mode and ring settings", () => {
