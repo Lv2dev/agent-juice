@@ -221,6 +221,9 @@ fn settings_roundtrip_and_legacy_defaults() {
         fullscreen_hide_on: false,
         maximized_hide_on: true,
         taskbar_avoid_overlap_on: false,
+        taskbar_layout_memory_on: false,
+        taskbar_layout_profiles: Vec::new(),
+        taskbar_layout_memory_initialized: true,
         indicator_style: "bar".into(),
         indicator_effect_style: "glow".into(),
         indicator_track_color_auto: false,
@@ -276,6 +279,8 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(!loaded.fullscreen_hide_on);
     assert!(loaded.maximized_hide_on);
     assert!(!loaded.taskbar_avoid_overlap_on);
+    assert!(!loaded.taskbar_layout_memory_on);
+    assert!(loaded.taskbar_layout_memory_initialized);
     assert_eq!(loaded.indicator_style, "bar");
     assert_eq!(loaded.indicator_effect_style, "glow");
     assert!(!loaded.indicator_track_color_auto);
@@ -784,6 +789,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         fullscreen_hide_on: false,
         maximized_hide_on: true,
         taskbar_avoid_overlap_on: false,
+        taskbar_layout_memory_on: false,
         indicator_style: "bar".into(),
         indicator_effect_style: "depth".into(),
         indicator_track_color_auto: false,

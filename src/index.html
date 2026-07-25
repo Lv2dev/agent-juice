@@ -611,6 +611,22 @@
                 </span>
               </label>
 
+              <label class="toggle-row toggle-row-wide">
+                <input type="checkbox" name="taskbar_layout_memory_on" checked />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.taskbarLayoutMemory">모니터 조합별 위치 기억</span>
+                  <small class="field-help" data-i18n="help.taskbarLayoutMemory">연결된 모니터 조합마다 Claude·Codex의 작업표시줄 위치를 따로 복원합니다.</small>
+                </span>
+              </label>
+
+              <div class="settings-action-row">
+                <span class="settings-action-copy">
+                  <strong data-i18n="field.savedTaskbarLayouts">저장된 모니터 배치</strong>
+                  <small class="field-help" data-i18n="help.clearTaskbarLayouts">현재 표시 위치는 유지됩니다.</small>
+                </span>
+                <button type="button" data-action="clear-taskbar-layouts" data-i18n="action.clearTaskbarLayouts">배치 초기화</button>
+              </div>
+
               <label class="toggle-row">
                 <input type="checkbox" name="fullscreen_hide_on" />
                 <span data-i18n="field.fullscreenHide">전체화면 앱에서 숨김</span>
