@@ -6,6 +6,8 @@ use std::{
     sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
+#[cfg(all(test, windows))]
+use windows::Win32::UI::Controls::InitCommonControls;
 #[cfg(windows)]
 use windows::{
     core::{w, BOOL, PCWSTR, PWSTR},
@@ -33,10 +35,11 @@ use windows::{
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW,
                 GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-                IsWindow, IsWindowVisible, IsZoomed, PeekMessageW, SendMessageTimeoutW, ShowWindow,
-                ShowWindowAsync, TranslateMessage, MSG, PM_REMOVE, SMTO_ABORTIFHUNG, SMTO_BLOCK,
-                SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-                WS_POPUP,
+                IsWindow, IsWindowVisible, IsZoomed, PeekMessageW, SendMessageTimeoutW,
+                SetWindowPos, ShowWindow, ShowWindowAsync, TranslateMessage, MSG, PM_REMOVE,
+                SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+                SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WINDOW_STYLE, WS_EX_NOACTIVATE,
+                WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -171,7 +174,7 @@ impl TooltipService {
 static NATIVE_TOOLTIP_SERVICE: Lazy<TooltipService> = Lazy::new(TooltipService::start);
 
 #[cfg(windows)]
-const TOOLTIP_SERVICE_TIMEOUT: Duration = Duration::from_millis(150);
+const TOOLTIP_SERVICE_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[cfg(windows)]
 fn raw_hwnd(value: isize) -> HWND {
@@ -508,6 +511,7 @@ fn set_window_tooltip_direct(parent: HWND, value: &str) -> anyhow::Result<()> {
             ));
         }
         if unsafe { IsWindow(Some(tooltip)).as_bool() } {
+            let was_visible = unsafe { IsWindowVisible(tooltip).as_bool() };
             let next = Arc::new(wide(value));
             let info = tracking_tool_info(tooltip, &next);
             {
@@ -524,6 +528,9 @@ fn set_window_tooltip_direct(parent: HWND, value: &str) -> anyhow::Result<()> {
                 None,
                 Some(LPARAM((&info as *const TTTOOLINFOW) as isize)),
             )?;
+            if was_visible {
+                show_window_tooltip_direct(parent, true)?;
+            }
             return Ok(());
         }
     }
@@ -699,6 +706,30 @@ fn tooltip_bubble_size(tooltip: HWND, info: &TTTOOLINFOW) -> anyhow::Result<(i32
 }
 
 #[cfg(windows)]
+fn packed_tooltip_track_position(x: i32, y: i32) -> Option<LPARAM> {
+    let x = i16::try_from(x).ok()?;
+    let y = i16::try_from(y).ok()?;
+    let packed = ((y as u16 as u32) << 16) | x as u16 as u32;
+    Some(LPARAM(packed as isize))
+}
+
+#[cfg(windows)]
+fn set_tooltip_window_position(tooltip: HWND, x: i32, y: i32) -> anyhow::Result<()> {
+    unsafe {
+        SetWindowPos(
+            tooltip,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSIZE | SWP_NOZORDER,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn show_window_tooltip(parent: HWND, visible: bool) -> anyhow::Result<()> {
     request_tooltip(|reply| TooltipCommand::Show {
         parent: parent.0 as isize,
@@ -733,7 +764,7 @@ fn show_window_tooltip_direct(parent: HWND, visible: bool) -> anyhow::Result<()>
     }
 
     let info = tracking_tool_info(tooltip, &current.text);
-    if visible {
+    let placement = if visible {
         let mut rect = RECT::default();
         unsafe { GetWindowRect(parent, &mut rect)? };
         let bar = rect_to_dock(rect)
@@ -752,14 +783,13 @@ fn show_window_tooltip_direct(parent: HWND, visible: bool) -> anyhow::Result<()>
         };
         let bubble_size = tooltip_bubble_size(tooltip, &info)?;
         let (x, y) = taskbar_tooltip_anchor(bar, work_area, bubble_size);
-        let packed_position = ((y as i16 as u16 as u32) << 16) | x as i16 as u16 as u32;
-        send_tooltip_message(
-            tooltip,
-            TTM_TRACKPOSITION,
-            None,
-            Some(LPARAM(packed_position as isize)),
-        )?;
-    }
+        if let Some(packed_position) = packed_tooltip_track_position(x, y) {
+            send_tooltip_message(tooltip, TTM_TRACKPOSITION, None, Some(packed_position))?;
+        }
+        Some((bar, work_area))
+    } else {
+        None
+    };
     send_tooltip_message(
         tooltip,
         TTM_TRACKACTIVATE,
@@ -768,6 +798,21 @@ fn show_window_tooltip_direct(parent: HWND, visible: bool) -> anyhow::Result<()>
     )?;
     unsafe {
         let _ = ShowWindow(tooltip, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
+    if let Some((bar, work_area)) = placement {
+        pump_current_thread_messages();
+        let mut tooltip_rect = RECT::default();
+        unsafe { GetWindowRect(tooltip, &mut tooltip_rect)? };
+        let actual_size = (
+            tooltip_rect.right.saturating_sub(tooltip_rect.left),
+            tooltip_rect.bottom.saturating_sub(tooltip_rect.top),
+        );
+        let (x, y) = taskbar_tooltip_anchor(bar, work_area, actual_size);
+        if let Some(packed_position) = packed_tooltip_track_position(x, y) {
+            send_tooltip_message(tooltip, TTM_TRACKPOSITION, None, Some(packed_position))?;
+            pump_current_thread_messages();
+        }
+        set_tooltip_window_position(tooltip, x, y)?;
     }
     Ok(())
 }
@@ -1714,8 +1759,17 @@ pub fn drag_rect_for_logical_length_at_dpi(
 mod tooltip_tests {
     use super::*;
 
+    static TOOLTIP_TEST_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn tooltip_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        TOOLTIP_TEST_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
     #[test]
     fn tracking_tool_is_owned_by_the_tooltip_thread_not_the_bar_window() {
+        let _guard = tooltip_test_guard();
         let tooltip = HWND(0x2222usize as *mut core::ffi::c_void);
         let text = "Juice tooltip\0".encode_utf16().collect::<Vec<_>>();
         let info = tracking_tool_info(tooltip, &text);
@@ -1727,6 +1781,7 @@ mod tooltip_tests {
 
     #[test]
     fn owned_native_window_destroys_an_unreleased_hwnd() {
+        let _guard = tooltip_test_guard();
         let hwnd = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -1755,6 +1810,7 @@ mod tooltip_tests {
 
     #[test]
     fn tooltip_service_preserves_owner_contract_without_blocking_the_caller() {
+        let _guard = tooltip_test_guard();
         let parent = 0x1234_5678isize;
         let tooltip = 0x1234_5679isize;
         let baseline = native_tooltip_registry_count_for_test();
@@ -1783,6 +1839,7 @@ mod tooltip_tests {
 
     #[test]
     fn tooltip_service_pumps_window_messages_while_idle() {
+        let _guard = tooltip_test_guard();
         let raw = request_tooltip(|reply| TooltipCommand::CreateProbe { reply }).unwrap();
         let probe = raw_hwnd(raw);
 
@@ -1802,5 +1859,48 @@ mod tooltip_tests {
         assert_ne!(sent.0, 0);
         request_tooltip(|reply| TooltipCommand::DestroyProbe { hwnd: raw, reply }).unwrap();
         assert!(!unsafe { IsWindow(Some(probe)).as_bool() });
+    }
+
+    #[test]
+    fn tooltip_position_supports_full_win32_coordinates() {
+        let _guard = tooltip_test_guard();
+        assert!(packed_tooltip_track_position(i16::MIN as i32, i16::MAX as i32).is_some());
+        assert!(packed_tooltip_track_position(i16::MIN as i32 - 1, 0).is_none());
+        assert!(packed_tooltip_track_position(0, i16::MAX as i32 + 1).is_none());
+        assert!(
+            TOOLTIP_SERVICE_TIMEOUT
+                >= Duration::from_millis(NATIVE_TOOLTIP_MESSAGE_TIMEOUT_MS as u64 * 6)
+        );
+    }
+
+    #[test]
+    fn tooltip_hwnd_position_clamps_at_win32_limits_instead_of_wrapping() {
+        let _guard = tooltip_test_guard();
+        unsafe { InitCommonControls() };
+        let tooltip = OwnedNativeWindow::new(unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                TOOLTIPS_CLASSW,
+                PCWSTR::null(),
+                WINDOW_STYLE(WS_POPUP.0 | TTS_ALWAYSTIP | TTS_NOPREFIX),
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        set_tooltip_window_position(tooltip.hwnd(), 40_000, -40_000).unwrap();
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(tooltip.hwnd(), &mut rect).unwrap() };
+        assert_eq!((rect.left, rect.top), (i16::MAX as i32, i16::MIN as i32));
+
+        set_tooltip_window_position(tooltip.hwnd(), -40_000, 40_000).unwrap();
+        unsafe { GetWindowRect(tooltip.hwnd(), &mut rect).unwrap() };
+        assert_eq!((rect.left, rect.top), (i16::MIN as i32, i16::MAX as i32));
     }
 }

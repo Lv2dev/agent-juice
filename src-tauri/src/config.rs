@@ -82,6 +82,27 @@ impl Default for TaskbarTextColors {
     }
 }
 
+const MAX_TASKBAR_LAYOUT_PROFILES: usize = 16;
+const MAX_TASKBAR_PROFILE_MONITORS: usize = 16;
+const MAX_TASKBAR_MONITOR_KEY_LEN: usize = 2048;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskbarPlacement {
+    pub monitor_key: String,
+    #[serde(default = "default_taskbar_offset_ratio")]
+    pub offset_ratio: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskbarLayoutProfile {
+    #[serde(default)]
+    pub monitor_keys: Vec<String>,
+    #[serde(default)]
+    pub claude: Option<TaskbarPlacement>,
+    #[serde(default)]
+    pub codex: Option<TaskbarPlacement>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_palette")]
@@ -118,6 +139,12 @@ pub struct Settings {
     pub maximized_hide_on: bool,
     #[serde(default = "default_taskbar_avoid_overlap_on")]
     pub taskbar_avoid_overlap_on: bool,
+    #[serde(default = "default_taskbar_layout_memory_on")]
+    pub taskbar_layout_memory_on: bool,
+    #[serde(default)]
+    pub taskbar_layout_profiles: Vec<TaskbarLayoutProfile>,
+    #[serde(default)]
+    pub taskbar_layout_memory_initialized: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
@@ -221,6 +248,8 @@ pub struct SettingsInput {
     pub maximized_hide_on: bool,
     #[serde(default = "default_taskbar_avoid_overlap_on")]
     pub taskbar_avoid_overlap_on: bool,
+    #[serde(default = "default_taskbar_layout_memory_on")]
+    pub taskbar_layout_memory_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
@@ -448,6 +477,10 @@ fn default_taskbar_avoid_overlap_on() -> bool {
     true
 }
 
+fn default_taskbar_layout_memory_on() -> bool {
+    true
+}
+
 fn default_indicator_style() -> String {
     "ring".into()
 }
@@ -560,6 +593,36 @@ fn default_tool_threshold_color_on() -> bool {
     true
 }
 
+fn normalize_taskbar_layout_profile(
+    mut profile: TaskbarLayoutProfile,
+) -> Option<TaskbarLayoutProfile> {
+    profile.monitor_keys = canonical_taskbar_monitor_keys(profile.monitor_keys);
+    if profile.monitor_keys.is_empty() {
+        return None;
+    }
+
+    let normalize_placement = |placement: Option<TaskbarPlacement>| {
+        placement.and_then(|mut placement| {
+            if !profile.monitor_keys.contains(&placement.monitor_key) {
+                return None;
+            }
+            placement.offset_ratio = clamp_ratio(placement.offset_ratio);
+            Some(placement)
+        })
+    };
+    profile.claude = normalize_placement(profile.claude);
+    profile.codex = normalize_placement(profile.codex);
+    (profile.claude.is_some() || profile.codex.is_some()).then_some(profile)
+}
+
+pub fn canonical_taskbar_monitor_keys(mut monitor_keys: Vec<String>) -> Vec<String> {
+    monitor_keys.retain(|key| !key.is_empty() && key.len() <= MAX_TASKBAR_MONITOR_KEY_LEN);
+    monitor_keys.sort();
+    monitor_keys.dedup();
+    monitor_keys.truncate(MAX_TASKBAR_PROFILE_MONITORS);
+    monitor_keys
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -580,6 +643,9 @@ impl Default for Settings {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
+            taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
+            taskbar_layout_profiles: Vec::new(),
+            taskbar_layout_memory_initialized: false,
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -635,6 +701,7 @@ impl Default for SettingsInput {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
+            taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -817,6 +884,7 @@ impl Settings {
         settings.apply_legacy_ring_center_size(value);
         settings.apply_legacy_tool_colors(value);
         settings.clamp_offsets();
+        settings.normalize_taskbar_layout_profiles();
         settings.clamp_ring_geometry();
         settings.display_basis = normalize_display_basis(&settings.display_basis).into();
         settings.limit_order = normalize_limit_order(&settings.limit_order).into();
@@ -874,6 +942,7 @@ impl Settings {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
+            taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -949,6 +1018,9 @@ impl Settings {
             fullscreen_hide_on: input.fullscreen_hide_on,
             maximized_hide_on: input.maximized_hide_on,
             taskbar_avoid_overlap_on: input.taskbar_avoid_overlap_on,
+            taskbar_layout_memory_on: input.taskbar_layout_memory_on,
+            taskbar_layout_profiles: Vec::new(),
+            taskbar_layout_memory_initialized: false,
             indicator_style: normalize_indicator_style(&input.indicator_style).into(),
             indicator_effect_style: normalize_indicator_effect_style(&input.indicator_effect_style)
                 .into(),
@@ -1082,6 +1154,132 @@ impl Settings {
         self.taskbar_offset_ratio = clamp_ratio(self.taskbar_offset_ratio);
         self.claude_taskbar_offset_ratio = clamp_ratio(self.claude_taskbar_offset_ratio);
         self.codex_taskbar_offset_ratio = clamp_ratio(self.codex_taskbar_offset_ratio);
+    }
+
+    fn normalize_taskbar_layout_profiles(&mut self) {
+        let mut normalized = Vec::new();
+        for profile in std::mem::take(&mut self.taskbar_layout_profiles) {
+            let Some(mut profile) = normalize_taskbar_layout_profile(profile) else {
+                continue;
+            };
+            if let Some(index) = normalized
+                .iter()
+                .position(|saved: &TaskbarLayoutProfile| saved.monitor_keys == profile.monitor_keys)
+            {
+                let previous = normalized.remove(index);
+                if profile.claude.is_none() {
+                    profile.claude = previous.claude;
+                }
+                if profile.codex.is_none() {
+                    profile.codex = previous.codex;
+                }
+            }
+            normalized.push(profile);
+        }
+        if normalized.len() > MAX_TASKBAR_LAYOUT_PROFILES {
+            normalized.drain(..normalized.len() - MAX_TASKBAR_LAYOUT_PROFILES);
+        }
+        self.taskbar_layout_profiles = normalized;
+    }
+
+    pub fn taskbar_layout_profile(&self, monitor_keys: &[String]) -> Option<&TaskbarLayoutProfile> {
+        self.taskbar_layout_profiles
+            .iter()
+            .find(|profile| profile.monitor_keys == monitor_keys)
+    }
+
+    pub fn taskbar_layout_profile_is_most_recent(&self, monitor_keys: &[String]) -> bool {
+        self.taskbar_layout_profiles
+            .last()
+            .is_some_and(|profile| profile.monitor_keys == monitor_keys)
+    }
+
+    pub fn touch_taskbar_layout_profile(&mut self, monitor_keys: &[String]) -> bool {
+        let Some(index) = self
+            .taskbar_layout_profiles
+            .iter()
+            .position(|profile| profile.monitor_keys == monitor_keys)
+        else {
+            return false;
+        };
+        if index + 1 == self.taskbar_layout_profiles.len() {
+            return false;
+        }
+        let profile = self.taskbar_layout_profiles.remove(index);
+        self.taskbar_layout_profiles.push(profile);
+        true
+    }
+
+    pub fn upsert_taskbar_layout_profile(&mut self, profile: TaskbarLayoutProfile) -> bool {
+        let Some(profile) = normalize_taskbar_layout_profile(profile) else {
+            return false;
+        };
+        if let Some(index) = self
+            .taskbar_layout_profiles
+            .iter()
+            .position(|saved| saved.monitor_keys == profile.monitor_keys)
+        {
+            self.taskbar_layout_profiles.remove(index);
+        }
+        self.taskbar_layout_profiles.push(profile);
+        if self.taskbar_layout_profiles.len() > MAX_TASKBAR_LAYOUT_PROFILES {
+            self.taskbar_layout_profiles
+                .drain(..self.taskbar_layout_profiles.len() - MAX_TASKBAR_LAYOUT_PROFILES);
+        }
+        true
+    }
+
+    pub fn migrate_taskbar_monitor_key_aliases(
+        &mut self,
+        replacements: &[(String, String)],
+    ) -> bool {
+        fn replace_key(key: &mut String, replacements: &[(String, String)]) {
+            let Some((_, stable)) = replacements
+                .iter()
+                .find(|(alias, stable)| key == alias && alias != stable)
+            else {
+                return;
+            };
+            *key = stable.clone();
+        }
+
+        let before = (
+            self.claude_taskbar_monitor_key.clone(),
+            self.codex_taskbar_monitor_key.clone(),
+            self.taskbar_layout_profiles.clone(),
+        );
+
+        if self.claude_taskbar_target_initialized || !self.claude_taskbar_monitor_key.is_empty() {
+            replace_key(&mut self.claude_taskbar_monitor_key, replacements);
+        }
+        if self.codex_taskbar_target_initialized || !self.codex_taskbar_monitor_key.is_empty() {
+            replace_key(&mut self.codex_taskbar_monitor_key, replacements);
+        }
+        for profile in &mut self.taskbar_layout_profiles {
+            for key in &mut profile.monitor_keys {
+                if !key.is_empty() {
+                    replace_key(key, replacements);
+                }
+            }
+            if let Some(placement) = &mut profile.claude {
+                if !placement.monitor_key.is_empty() {
+                    replace_key(&mut placement.monitor_key, replacements);
+                }
+            }
+            if let Some(placement) = &mut profile.codex {
+                if !placement.monitor_key.is_empty() {
+                    replace_key(&mut placement.monitor_key, replacements);
+                }
+            }
+        }
+        self.normalize_taskbar_layout_profiles();
+
+        before
+            != (
+                self.claude_taskbar_monitor_key.clone(),
+                self.codex_taskbar_monitor_key.clone(),
+                self.taskbar_layout_profiles.clone(),
+            )
     }
 
     fn clamp_ring_geometry(&mut self) {
@@ -1664,7 +1862,10 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod parser_tests {
-    use super::{parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, ToolColors};
+    use super::{
+        parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, TaskbarLayoutProfile,
+        TaskbarPlacement, ToolColors,
+    };
     use std::{
         fs,
         path::Path,
@@ -1687,6 +1888,137 @@ mod parser_tests {
         for invalid in ["aéaaa", "💚12", "12 456", "gg0000"] {
             assert_eq!(parse_hex_rgb(Some(invalid)), None);
         }
+    }
+
+    #[test]
+    fn taskbar_layout_memory_defaults_on_and_accepts_an_explicit_opt_out() {
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.taskbar_layout_memory_on);
+        assert!(legacy.taskbar_layout_profiles.is_empty());
+        assert!(!legacy.taskbar_layout_memory_initialized);
+
+        let disabled = Settings::from_input(SettingsInput {
+            taskbar_layout_memory_on: false,
+            ..SettingsInput::default()
+        });
+        assert!(!disabled.taskbar_layout_memory_on);
+    }
+
+    #[test]
+    fn taskbar_layout_profiles_are_canonical_bounded_and_latest_wins() {
+        let root = temp_root("taskbar-layout-normalization");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "taskbar_layout_profiles": [
+                    {
+                        "monitor_keys": ["monitor-b", "", "monitor-a", "monitor-a"],
+                        "claude": {"monitor_key": "monitor-a", "offset_ratio": 2}
+                    },
+                    {
+                        "monitor_keys": ["monitor-a", "monitor-b"],
+                        "claude": {"monitor_key": "missing", "offset_ratio": 0.4},
+                        "codex": {"monitor_key": "monitor-b", "offset_ratio": -1}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut settings = Settings::try_load_from(&path).unwrap();
+        assert_eq!(settings.taskbar_layout_profiles.len(), 1);
+        let loaded = &settings.taskbar_layout_profiles[0];
+        assert_eq!(loaded.monitor_keys, ["monitor-a", "monitor-b"]);
+        assert_eq!(loaded.claude.as_ref().unwrap().offset_ratio, 1.0);
+        assert_eq!(loaded.codex.as_ref().unwrap().offset_ratio, 0.0);
+
+        for index in 0..18 {
+            let monitor_key = format!("monitor-{index:02}");
+            assert!(
+                settings.upsert_taskbar_layout_profile(TaskbarLayoutProfile {
+                    monitor_keys: vec![monitor_key.clone()],
+                    claude: Some(TaskbarPlacement {
+                        monitor_key,
+                        offset_ratio: 0.5,
+                    }),
+                    codex: None,
+                })
+            );
+        }
+        assert_eq!(settings.taskbar_layout_profiles.len(), 16);
+        assert_eq!(
+            settings.taskbar_layout_profiles[0].monitor_keys,
+            ["monitor-02"]
+        );
+        assert_eq!(
+            settings.taskbar_layout_profiles[15].monitor_keys,
+            ["monitor-17"]
+        );
+        assert!(settings.touch_taskbar_layout_profile(&["monitor-02".into()]));
+        assert!(settings.taskbar_layout_profile_is_most_recent(&["monitor-02".into()]));
+        assert!(!settings.touch_taskbar_layout_profile(&["monitor-02".into()]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn taskbar_monitor_key_alias_migration_updates_active_targets_and_profiles() {
+        let mut settings = Settings {
+            claude_taskbar_monitor_key: String::new(),
+            claude_taskbar_target_initialized: true,
+            codex_taskbar_monitor_key: String::new(),
+            codex_taskbar_target_initialized: false,
+            taskbar_layout_profiles: vec![
+                TaskbarLayoutProfile {
+                    monitor_keys: vec!["device:display1".into()],
+                    claude: Some(TaskbarPlacement {
+                        monitor_key: "device:display1".into(),
+                        offset_ratio: 0.2,
+                    }),
+                    codex: None,
+                },
+                TaskbarLayoutProfile {
+                    monitor_keys: vec!["monitor-path:primary".into()],
+                    claude: None,
+                    codex: Some(TaskbarPlacement {
+                        monitor_key: "monitor-path:primary".into(),
+                        offset_ratio: 0.8,
+                    }),
+                },
+            ],
+            ..Settings::default()
+        };
+        let replacements = vec![
+            (String::new(), "monitor-path:primary".into()),
+            ("device:display1".into(), "monitor-path:primary".into()),
+        ];
+
+        assert!(settings.migrate_taskbar_monitor_key_aliases(&replacements));
+        assert_eq!(settings.claude_taskbar_monitor_key, "monitor-path:primary");
+        assert_eq!(settings.codex_taskbar_monitor_key, "");
+        assert_eq!(settings.taskbar_layout_profiles.len(), 1);
+        assert_eq!(
+            settings.taskbar_layout_profiles[0].monitor_keys,
+            vec!["monitor-path:primary".to_string()]
+        );
+        assert_eq!(
+            settings.taskbar_layout_profiles[0]
+                .claude
+                .as_ref()
+                .unwrap()
+                .monitor_key,
+            "monitor-path:primary"
+        );
+        assert_eq!(
+            settings.taskbar_layout_profiles[0]
+                .codex
+                .as_ref()
+                .unwrap()
+                .offset_ratio,
+            0.8
+        );
+        assert!(!settings.migrate_taskbar_monitor_key_aliases(&replacements));
     }
 
     #[test]

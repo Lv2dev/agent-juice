@@ -395,6 +395,7 @@ function fillForm(settings) {
   setField("fullscreen_hide_on", state.fullscreenHideOn);
   setField("maximized_hide_on", state.maximizedHideOn);
   setField("taskbar_avoid_overlap_on", state.taskbarAvoidOverlapOn);
+  setField("taskbar_layout_memory_on", state.taskbarLayoutMemoryOn);
   setField("indicator_style", state.indicatorStyle);
   setField("indicator_effect_style", state.indicatorEffectStyle);
   setField("indicator_track_color_auto", state.indicatorTrackColorAuto);
@@ -602,6 +603,23 @@ function handleSettingsMutation(event) {
 }
 
 async function runAction(action) {
+  if (action === "clear-taskbar-layouts") {
+    const actionRevision = localRevision;
+    const actionEventGeneration = settingsEventGeneration;
+    await enqueueLatestSettingsSave();
+    const settings = await invoke("clear_taskbar_layout_profiles");
+    if (
+      settings &&
+      typeof settings === "object" &&
+      localRevision === actionRevision &&
+      settingsEventGeneration === actionEventGeneration
+    ) {
+      settingsEventGeneration += 1;
+      hydrateSettings(settings);
+    }
+    showSettingsToast(t("status.taskbarLayoutsCleared", currentLanguageSettings()));
+    return;
+  }
   if (action === "check-updates") {
     if (updateStatusEl) {
       updateStatusEl.textContent = t("status.updateChecking", currentLanguageSettings());

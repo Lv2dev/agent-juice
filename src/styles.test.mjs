@@ -540,6 +540,73 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
     rustLib,
     /if !taskbar_target_initialized\(settings, tool\)[\s\S]*actions\.push\(Action::Hide\(tool, handle\)\)/,
   );
+  assert.equal(
+    rustLib.match(/Settings::update\(/g)?.length,
+    1,
+    "all taskbar settings writes must use the generation-guarded update helper",
+  );
+  assert.match(
+    rustLib,
+    /let settings = Settings::update\(mutator\)\?;\s*let revision = Settings::storage_revision\(\);\s*let generation = mark_taskbar_settings_changed\(\)/,
+  );
+  assert.match(
+    rustLib,
+    /struct TaskbarSettingsSnapshot \{[\s\S]*settings: Settings,[\s\S]*revision: Option<\(u64, std::time::SystemTime\)>[\s\S]*generation: u64/,
+  );
+  assert.match(
+    rustLib,
+    /fn with_taskbar_settings_read[\s\S]*TASKBAR_SETTINGS_WRITE_GATE[\s\S]*reader\(TASKBAR_SETTINGS_GENERATION\.load/,
+  );
+  assert.match(
+    rustLib,
+    /let reload_result = with_taskbar_settings_read[\s\S]*Settings::try_load_with_revision\(\)[\s\S]*sync_taskbar_content_layout_ratios/,
+  );
+  assert.match(
+    rustLib,
+    /let \(latest, generation\) = match load_settings_with_generation\(\)/,
+  );
+  assert.match(
+    rustLib,
+    /Ok\(initialized\) => \{[\s\S]*settings = initialized\.settings;[\s\S]*settings_revision = initialized\.revision;[\s\S]*settings_generation = initialized\.generation;/,
+  );
+
+  const migration =
+    rustLib.match(
+      /fn migrate_legacy_taskbar_monitor_keys[\s\S]*?\n}\n\n#\[cfg\(windows\)\]\nfn save_taskbar_drag_target/,
+    )?.[0] ?? "";
+  assert.match(migration, /find\(\|taskbar\| taskbar\.primary\)/);
+  assert.doesNotMatch(migration, /snapshot\.taskbars\.first\(\)/);
+
+  const profileReconcile =
+    rustLib.match(
+      /if let Some\(stable_topology\) = topology_stability\.observe[\s\S]*?let dock_result/,
+    )?.[0] ?? "";
+  assert.ok(
+    profileReconcile.indexOf("reconcile_taskbar_layout_profile") <
+      profileReconcile.indexOf("set_stable_taskbar_topology"),
+    "stable topology must only be published after profile reconciliation",
+  );
+  assert.match(
+    profileReconcile,
+    /Err\(err\)[\s\S]*set_stable_taskbar_topology\(&app, &\[\]\)[\s\S]*topology_stability\.rearm\(\)[\s\S]*continue/,
+  );
+  assert.match(
+    rustLib,
+    /remember_pending_taskbar_profile_placement[\s\S]*try_publish_stable_taskbar_topology/,
+  );
+  assert.match(
+    profileReconcile,
+    /pending_taskbar_profile_placements[\s\S]*clear_pending_taskbar_profile_placements[\s\S]*set_stable_taskbar_topology/,
+  );
+  assert.match(rustLib, /static TASKBAR_PROFILE_GATE: Lazy<Mutex<\(\)>>/);
+  assert.match(
+    profileReconcile,
+    /TASKBAR_PROFILE_GATE[\s\S]*pending_taskbar_profile_placements[\s\S]*reconcile_taskbar_layout_profile/,
+  );
+  assert.match(
+    rustLib,
+    /retain\(\|saved\| saved\.monitor_keys != item\.monitor_keys \|\| saved\.tool != item\.tool\)/,
+  );
 });
 
 test("dual ring center number stays inside the ring hole", () => {
@@ -639,8 +706,28 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, />전체창 숨김</);
   assert.match(panelMarkup, /name="taskbar_avoid_overlap_on"[^>]*checked/);
   assert.match(panelMarkup, />바 겹침 자동 방지</);
+  assert.match(panelMarkup, /name="taskbar_layout_memory_on"[^>]*checked/);
+  assert.match(panelMarkup, /data-action="clear-taskbar-layouts"/);
+  assert.match(readme, /모니터 조합별 위치 기억/);
+  assert.match(readme, /최근 사용한 모니터 조합을 최대 16개/);
+  assert.match(readme, /Remember positions by monitor setup/);
+  assert.match(readme, /up to 16 recently used monitor setups/);
   assert.match(rustConfig, /maximized_hide_on/);
   assert.match(rustConfig, /taskbar_avoid_overlap_on/);
+  assert.match(rustConfig, /taskbar_layout_profiles/);
+  assert.match(
+    rustLib,
+    /async fn clear_taskbar_layout_profiles[\s\S]*?ensure_panel_command\(window\.label\(\)\)\?/,
+  );
+  const clearLayouts =
+    rustLib.match(
+      /async fn clear_taskbar_layout_profiles[\s\S]*?\n}\n\n#\[derive\(serde::Serialize\)\]/,
+    )?.[0] ?? "";
+  assert.match(
+    clearLayouts,
+    /TASKBAR_PROFILE_GATE[\s\S]*update_taskbar_settings[\s\S]*clear_all_pending_taskbar_profile_placements/,
+  );
+  assert.match(rustLib, /clear_taskbar_layout_profiles,\s*get_taskbar_orientation/);
   assert.match(rustLib, /visible_windows_coverage/);
   assert.match(panelMarkup, /name="indicator_style"/);
   assert.match(panelMarkup, /name="indicator_track_color_auto"[^>]*checked/);
@@ -1190,6 +1277,11 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.staleAfter"[\s\S]*data-i18n="help\.staleAfter"/);
   assert.match(cssBlock(".field-grid label.field-with-help"), /grid-template-columns: minmax\(72px, 1fr\) 58px auto/);
   assert.match(cssBlock(".field-grid label.field-with-help > span:first-child"), /white-space: nowrap/);
+  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-size: 10\.5px/);
+  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-weight: 560/);
+  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-size: 12px/);
+  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-weight: 740/);
+  assert.doesNotMatch(css, /\.field-grid span,/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
   assert.match(i18nJs, /마지막 기록 후 오래됨 표시까지/);
   assert.match(i18nJs, /로컬 상태를 다시 읽는 간격/);
@@ -1446,7 +1538,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.9"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.10"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

@@ -30,7 +30,9 @@ test("settings form auto-saves changed values without a submit button", async ()
   const dispatched = [];
   const savedInputs = [];
   const pendingSaveResponses = [];
+  let pendingClearResponse = null;
   let deferSaveResponses = false;
+  let deferClearResponse = false;
   let failNextSave = false;
   let persistedSettings = { maximized_hide_on: true, language: "ko" };
   const eventHandlers = {};
@@ -101,6 +103,8 @@ test("settings form auto-saves changed values without a submit button", async ()
     limit_order: makeField("primary_first"),
     fullscreen_hide_on: makeField(false, "checkbox"),
     maximized_hide_on: makeField(true, "checkbox"),
+    taskbar_avoid_overlap_on: makeField(true, "checkbox"),
+    taskbar_layout_memory_on: makeField(true, "checkbox"),
     indicator_style: makeField("ring"),
     indicator_effect_style: makeField("flat"),
     indicator_track_color_auto: makeField(true, "checkbox"),
@@ -192,6 +196,15 @@ test("settings form auto-saves changed values without a submit button", async ()
         async invoke(command, args) {
           invokedCommands.push(command);
           if (command === "get_settings") return persistedSettings;
+          if (command === "clear_taskbar_layout_profiles") {
+            const cleared = { ...persistedSettings, taskbar_layout_profiles: [] };
+            if (deferClearResponse) {
+              return new Promise((resolve) => {
+                pendingClearResponse = () => resolve(cleared);
+              });
+            }
+            return cleared;
+          }
           if (command === "save_settings") {
             savedInputs.push(args.input);
             if (failNextSave) {
@@ -331,6 +344,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].limit_order, "primary_first");
   assert.equal(savedInputs[0].fullscreen_hide_on, false);
   assert.equal(savedInputs[0].maximized_hide_on, true);
+  assert.equal(savedInputs[0].taskbar_avoid_overlap_on, true);
+  assert.equal(savedInputs[0].taskbar_layout_memory_on, true);
   assert.equal(savedInputs[0].indicator_style, "ring");
   assert.equal(savedInputs[0].indicator_effect_style, "depth");
   assert.equal(savedInputs[0].indicator_track_color_auto, false);
@@ -364,11 +379,78 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(toastLayer.dataset.visible, "true");
   assert.equal(toastText.textContent, "저장 완료 · 시스템 적용 재시도 중");
 
+  listeners.click?.({ target: { dataset: { action: "clear-taskbar-layouts" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(invokedCommands.includes("clear_taskbar_layout_profiles"));
+  assert.equal(toastText.textContent, "저장된 모니터 배치를 초기화했습니다.");
+
+  const clearsBeforeDelayedSave = invokedCommands.filter(
+    (command) => command === "clear_taskbar_layout_profiles",
+  ).length;
+  deferSaveResponses = true;
+  fields.bar_mode.value = "compact";
+  listeners.input?.({ target: fields.bar_mode });
+  listeners.click?.({ target: { dataset: { action: "clear-taskbar-layouts" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pendingSaveResponses.length, 1);
+  fields.bar_mode.value = "dual";
+  listeners.input?.({ target: fields.bar_mode });
+  pendingSaveResponses.shift().resolve(savedInputs.at(-1));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    invokedCommands.filter((command) => command === "clear_taskbar_layout_profiles").length,
+    clearsBeforeDelayedSave + 1,
+  );
+  assert.equal(
+    fields.bar_mode.value,
+    "dual",
+    "a clear response must not overwrite edits made while its leading save was in flight",
+  );
+  deferSaveResponses = false;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  deferClearResponse = true;
+  listeners.click?.({ target: { dataset: { action: "clear-taskbar-layouts" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof pendingClearResponse, "function");
+  fields.bar_mode.value = "full";
+  listeners.input?.({ target: fields.bar_mode });
+  pendingClearResponse();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    fields.bar_mode.value,
+    "full",
+    "a delayed clear response must not overwrite edits made while it was in flight",
+  );
+  deferClearResponse = false;
+  pendingClearResponse = null;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  deferClearResponse = true;
+  listeners.click?.({ target: { dataset: { action: "clear-taskbar-layouts" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof pendingClearResponse, "function");
+  eventHandlers["settings-updated"]?.({
+    payload: { ...persistedSettings, bar_mode: "dual" },
+  });
+  assert.equal(fields.bar_mode.value, "dual");
+  pendingClearResponse();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    fields.bar_mode.value,
+    "dual",
+    "a delayed clear response must not overwrite a newer settings event",
+  );
+  deferClearResponse = false;
+  pendingClearResponse = null;
+
   listeners.click?.({ target: { dataset: { action: "check-updates" } } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(updateStatusEl.dataset.state, "error");
   assert.equal(statusHost.hidden, true, "update errors must not become settings save errors");
 
+  const savesBeforeDeferredQueue = savedInputs.length;
   deferSaveResponses = true;
   fields.bar_mode.value = "compact";
   listeners.input?.({ target: fields.bar_mode });
@@ -381,12 +463,16 @@ test("settings form auto-saves changed values without a submit button", async ()
 
   eventHandlers["settings-updated"]?.({ payload: { bar_mode: "full" } });
   assert.equal(fields.bar_mode.value, "quad", "an old event must not overwrite a newer edit");
-  assert.equal(savedInputs.length, 2, "a second save must wait for the in-flight save");
-  pendingSaveResponses.shift().resolve(savedInputs[1]);
+  assert.equal(
+    savedInputs.length,
+    savesBeforeDeferredQueue + 1,
+    "a second save must wait for the in-flight save",
+  );
+  pendingSaveResponses.shift().resolve(savedInputs[savesBeforeDeferredQueue]);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.bar_mode.value, "quad", "an old response must not overwrite a newer edit");
-  assert.equal(savedInputs.length, 3);
-  pendingSaveResponses.shift().resolve(savedInputs[2]);
+  assert.equal(savedInputs.length, savesBeforeDeferredQueue + 2);
+  pendingSaveResponses.shift().resolve(savedInputs[savesBeforeDeferredQueue + 1]);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.bar_mode.value, "quad");
 
@@ -467,6 +553,8 @@ test("settings form ignores early input events until stored settings hydrate", a
     limit_order: makeField("primary_first"),
     fullscreen_hide_on: makeField(false, "checkbox"),
     maximized_hide_on: makeField(false, "checkbox"),
+    taskbar_avoid_overlap_on: makeField(true, "checkbox"),
+    taskbar_layout_memory_on: makeField(true, "checkbox"),
     indicator_style: makeField("bar"),
     indicator_effect_style: makeField("flat"),
     indicator_track_color_auto: makeField(true, "checkbox"),

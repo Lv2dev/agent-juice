@@ -13,7 +13,7 @@ pub mod taskbar;
 pub mod update;
 
 use chrono::{DateTime, Utc};
-use config::Settings;
+use config::{canonical_taskbar_monitor_keys, Settings, TaskbarLayoutProfile, TaskbarPlacement};
 use model::{AgentStatus, Tool};
 use once_cell::sync::Lazy;
 use std::sync::{
@@ -38,6 +38,8 @@ const TASKBAR_INDICATOR_HORIZONTAL_PADDING: f32 = 1.0;
 const TASKBAR_MENU_WIDTH: i32 = 96;
 const TASKBAR_DRAG_THRESHOLD_PX: i32 = 3;
 const TASKBAR_TOOLTIP_DELAY_MS: u64 = 450;
+const TASKBAR_TOPOLOGY_STABLE_OBSERVATIONS: u8 = 3;
+const MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS: usize = 32;
 const TASKBAR_TOOLS: [&str; 2] = ["claude", "codex"];
 const CODEX_REPRESENTATIVE_CANDIDATES: usize = 32;
 const CODEX_ACCOUNT_CACHE_MIN_SECS: i64 = 30;
@@ -80,6 +82,22 @@ struct TaskbarRecoveryState(AtomicBool);
 
 #[derive(Default)]
 struct TaskbarDragState(AtomicBool);
+
+#[derive(Default)]
+struct TaskbarStableTopologyState(Mutex<TaskbarStableTopologyData>);
+
+#[derive(Default)]
+struct TaskbarStableTopologyData {
+    monitor_keys: Vec<String>,
+    pending_placements: Vec<PendingTaskbarProfilePlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PendingTaskbarProfilePlacement {
+    monitor_keys: Vec<String>,
+    tool: &'static str,
+    placement: TaskbarPlacement,
+}
 
 #[derive(Default)]
 struct TaskbarTooltipTextState(Mutex<std::collections::HashMap<&'static str, String>>);
@@ -286,6 +304,8 @@ static CODEX_ROLLOUT_CACHE: Lazy<Mutex<collector::RolloutCache>> =
 static CODEX_ROLLOUT_STATUS_CACHE: Lazy<Mutex<Option<AgentStatus>>> =
     Lazy::new(|| Mutex::new(None));
 static TASKBAR_LAYOUT_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static TASKBAR_PROFILE_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static TASKBAR_SETTINGS_WRITE_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TASKBAR_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -325,15 +345,45 @@ fn mark_taskbar_settings_changed() -> u64 {
     TASKBAR_SETTINGS_GENERATION.fetch_add(1, Ordering::AcqRel) + 1
 }
 
+struct TaskbarSettingsSnapshot {
+    settings: Settings,
+    revision: Option<(u64, std::time::SystemTime)>,
+    generation: u64,
+}
+
+fn update_taskbar_settings(
+    mutator: impl FnOnce(&mut Settings),
+) -> anyhow::Result<TaskbarSettingsSnapshot> {
+    let _guard = TASKBAR_SETTINGS_WRITE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let settings = Settings::update(mutator)?;
+    let revision = Settings::storage_revision();
+    let generation = mark_taskbar_settings_changed();
+    Ok(TaskbarSettingsSnapshot {
+        settings,
+        revision,
+        generation,
+    })
+}
+
+fn with_taskbar_settings_read<T>(
+    reader: impl FnOnce(u64) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = TASKBAR_SETTINGS_WRITE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    reader(TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire))
+}
+
 fn load_settings_with_generation() -> anyhow::Result<(Settings, u64)> {
-    for _ in 0..4 {
-        let generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
+    with_taskbar_settings_read(|generation| {
         let settings = Settings::try_load()?;
-        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation {
-            return Ok((settings, generation));
+        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != generation {
+            anyhow::bail!("settings changed while loading");
         }
-    }
-    anyhow::bail!("settings changed repeatedly while loading")
+        Ok((settings, generation))
+    })
 }
 
 fn try_taskbar_layout_gate<T>(gate: &Mutex<T>) -> anyhow::Result<MutexGuard<'_, T>> {
@@ -1323,6 +1373,15 @@ fn normalize_taskbar_tool(tool: &str) -> Option<&'static str> {
     }
 }
 
+fn isolated_forced_taskbar_hover(
+    isolated_data_dir: bool,
+    candidate: Option<&str>,
+) -> Option<&'static str> {
+    isolated_data_dir
+        .then(|| candidate.and_then(normalize_taskbar_tool))
+        .flatten()
+}
+
 fn taskbar_bar_label(tool: &str) -> Option<&'static str> {
     match normalize_taskbar_tool(tool)? {
         "claude" => Some("bar-claude"),
@@ -1618,6 +1677,169 @@ fn set_taskbar_target(settings: &mut Settings, tool: &str, monitor_key: &str, ra
     set_taskbar_target_initialized(settings, tool, true);
 }
 
+fn taskbar_profile_placement(
+    settings: &Settings,
+    tool: &str,
+    monitor_keys: &[String],
+) -> Option<TaskbarPlacement> {
+    let monitor_key = taskbar_monitor_key(settings, tool);
+    (taskbar_target_initialized(settings, tool)
+        && monitor_keys.iter().any(|key| key == monitor_key))
+    .then(|| TaskbarPlacement {
+        monitor_key: monitor_key.to_string(),
+        offset_ratio: taskbar_offset_ratio(settings, tool),
+    })
+}
+
+fn taskbar_layout_profile_from_current(
+    settings: &Settings,
+    monitor_keys: &[String],
+) -> Option<TaskbarLayoutProfile> {
+    if monitor_keys.is_empty() {
+        return None;
+    }
+    let profile = TaskbarLayoutProfile {
+        monitor_keys: monitor_keys.to_vec(),
+        claude: taskbar_profile_placement(settings, "claude", monitor_keys),
+        codex: taskbar_profile_placement(settings, "codex", monitor_keys),
+    };
+    (profile.claude.is_some() || profile.codex.is_some()).then_some(profile)
+}
+
+fn apply_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[String]) -> bool {
+    let Some(profile) = settings.taskbar_layout_profile(monitor_keys).cloned() else {
+        return false;
+    };
+    let before = settings.clone();
+    if let Some(placement) = profile.claude {
+        set_taskbar_target(
+            settings,
+            "claude",
+            &placement.monitor_key,
+            placement.offset_ratio,
+        );
+    }
+    if let Some(placement) = profile.codex {
+        set_taskbar_target(
+            settings,
+            "codex",
+            &placement.monitor_key,
+            placement.offset_ratio,
+        );
+    }
+    !taskbar_targets_match(&before, settings)
+}
+
+fn record_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[String]) -> bool {
+    if !settings.taskbar_layout_memory_on {
+        return false;
+    }
+    let Some(profile) = taskbar_layout_profile_from_current(settings, monitor_keys) else {
+        return false;
+    };
+    settings.taskbar_layout_memory_initialized = true;
+    settings.upsert_taskbar_layout_profile(profile)
+}
+
+fn complete_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[String]) -> bool {
+    let Some(mut profile) = settings.taskbar_layout_profile(monitor_keys).cloned() else {
+        return false;
+    };
+    let Some(current) = taskbar_layout_profile_from_current(settings, monitor_keys) else {
+        return false;
+    };
+    let mut changed = false;
+    if profile.claude.is_none() && current.claude.is_some() {
+        profile.claude = current.claude;
+        changed = true;
+    }
+    if profile.codex.is_none() && current.codex.is_some() {
+        profile.codex = current.codex;
+        changed = true;
+    }
+    changed && settings.upsert_taskbar_layout_profile(profile)
+}
+
+fn apply_pending_taskbar_profile_placements(
+    settings: &mut Settings,
+    monitor_keys: &[String],
+    pending: &[PendingTaskbarProfilePlacement],
+) -> bool {
+    if !settings.taskbar_layout_memory_on || pending.is_empty() {
+        return false;
+    }
+    let mut profile = settings
+        .taskbar_layout_profile(monitor_keys)
+        .cloned()
+        .or_else(|| taskbar_layout_profile_from_current(settings, monitor_keys))
+        .unwrap_or_else(|| TaskbarLayoutProfile {
+            monitor_keys: monitor_keys.to_vec(),
+            claude: None,
+            codex: None,
+        });
+    let mut has_matching_placement = false;
+    for item in pending {
+        if item.monitor_keys != monitor_keys || !monitor_keys.contains(&item.placement.monitor_key)
+        {
+            continue;
+        }
+        has_matching_placement = true;
+        match item.tool {
+            "claude" => profile.claude = Some(item.placement.clone()),
+            "codex" => profile.codex = Some(item.placement.clone()),
+            _ => {}
+        }
+    }
+    if !has_matching_placement {
+        return false;
+    }
+
+    let initialized = settings.taskbar_layout_memory_initialized;
+    settings.taskbar_layout_memory_initialized = true;
+    let mut changed = !initialized;
+    changed |= settings.upsert_taskbar_layout_profile(profile);
+    changed |= apply_taskbar_layout_profile(settings, monitor_keys);
+    changed
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct TaskbarTopologyStability {
+    candidate: Vec<String>,
+    observations: u8,
+    active: Option<Vec<String>>,
+}
+
+#[cfg(windows)]
+impl TaskbarTopologyStability {
+    fn rearm(&mut self) {
+        self.candidate.clear();
+        self.observations = 0;
+        self.active = None;
+    }
+
+    fn observe(&mut self, monitor_keys: Vec<String>) -> Option<Vec<String>> {
+        if monitor_keys.is_empty() {
+            self.candidate.clear();
+            self.observations = 0;
+            return None;
+        }
+        if self.candidate == monitor_keys {
+            self.observations = self.observations.saturating_add(1);
+        } else {
+            self.candidate = monitor_keys;
+            self.observations = 1;
+        }
+        if self.observations < TASKBAR_TOPOLOGY_STABLE_OBSERVATIONS
+            || self.active.as_ref() == Some(&self.candidate)
+        {
+            return None;
+        }
+        self.active = Some(self.candidate.clone());
+        Some(self.candidate.clone())
+    }
+}
+
 fn pending_taskbar_target_ratios(
     settings: &Settings,
     taskbar_rect: taskbar::DockRect,
@@ -1714,9 +1936,13 @@ fn pending_taskbar_target_ratios(
 fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     settings: &Settings,
-) -> anyhow::Result<Settings> {
+) -> anyhow::Result<TaskbarSettingsSnapshot> {
     if !taskbar_targets_need_initialization(settings) {
-        return Ok(settings.clone());
+        return Ok(TaskbarSettingsSnapshot {
+            settings: settings.clone(),
+            revision: Settings::storage_revision(),
+            generation: TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire),
+        });
     }
     let taskbar = taskbar::shell_taskbar_window_for_key("")?;
     let taskbar_rect = taskbar::DockRect {
@@ -1735,7 +1961,7 @@ fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
     }
 
     let monitor_key = taskbar.key.clone();
-    let updated = Settings::update(|current| {
+    update_taskbar_settings(|current| {
         let Some(ratios) = pending_taskbar_target_ratios(current, taskbar_rect, tool_lengths)
         else {
             return;
@@ -1745,9 +1971,7 @@ fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
                 set_taskbar_target(current, tool, &monitor_key, ratio);
             }
         }
-    })?;
-    mark_taskbar_settings_changed();
-    Ok(updated)
+    })
 }
 
 #[cfg(windows)]
@@ -1893,6 +2117,12 @@ fn set_taskbar_content_layout<R: tauri::Runtime>(
     std::mem::replace(&mut *current, layout)
 }
 
+fn update_taskbar_content_layout_ratio(layout: &mut Option<TaskbarContentLayout>, ratio: f32) {
+    if let Some(layout) = layout.as_mut() {
+        layout.ratio = Some(ratio.clamp(0.0, 1.0));
+    }
+}
+
 fn set_taskbar_content_layout_ratio<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     tool: &str,
@@ -1904,9 +2134,19 @@ fn set_taskbar_content_layout_ratio<R: tauri::Runtime>(
     let Some(slot) = taskbar_content_layout_slot(&state, tool) else {
         return;
     };
-    if let Some(layout) = slot.lock().unwrap_or_else(|err| err.into_inner()).as_mut() {
-        layout.ratio = Some(ratio.clamp(0.0, 1.0));
-    };
+    update_taskbar_content_layout_ratio(
+        &mut slot.lock().unwrap_or_else(|err| err.into_inner()),
+        ratio,
+    );
+}
+
+fn sync_taskbar_content_layout_ratios<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    settings: &Settings,
+) {
+    for tool in TASKBAR_TOOLS {
+        set_taskbar_content_layout_ratio(manager, tool, taskbar_offset_ratio(settings, tool));
+    }
 }
 
 fn taskbar_dock_width_for_manager<R: tauri::Runtime>(
@@ -2021,6 +2261,132 @@ fn set_taskbar_drag_active<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, 
     }
 }
 
+fn set_stable_taskbar_topology<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    monitor_keys: &[String],
+) -> bool {
+    let Some(state) = manager.try_state::<TaskbarStableTopologyState>() else {
+        return false;
+    };
+    let mut state = state.0.lock().unwrap_or_else(|err| err.into_inner());
+    try_publish_stable_taskbar_topology(&mut state, monitor_keys)
+}
+
+fn try_publish_stable_taskbar_topology(
+    state: &mut TaskbarStableTopologyData,
+    monitor_keys: &[String],
+) -> bool {
+    if !monitor_keys.is_empty()
+        && state
+            .pending_placements
+            .iter()
+            .any(|item| item.monitor_keys == monitor_keys)
+    {
+        return false;
+    }
+    state.monitor_keys = monitor_keys.to_vec();
+    true
+}
+
+fn stable_taskbar_topology_matches<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    monitor_keys: &[String],
+) -> bool {
+    manager
+        .try_state::<TaskbarStableTopologyState>()
+        .map(|state| {
+            state
+                .0
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .monitor_keys
+                .as_slice()
+                == monitor_keys
+        })
+        .unwrap_or(false)
+}
+
+fn remember_pending_taskbar_profile_placement<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    item: PendingTaskbarProfilePlacement,
+) -> bool {
+    let Some(state) = manager.try_state::<TaskbarStableTopologyState>() else {
+        return false;
+    };
+    let mut state = state.0.lock().unwrap_or_else(|err| err.into_inner());
+    store_pending_taskbar_profile_placement(&mut state, item)
+}
+
+fn store_pending_taskbar_profile_placement(
+    state: &mut TaskbarStableTopologyData,
+    item: PendingTaskbarProfilePlacement,
+) -> bool {
+    if state.monitor_keys == item.monitor_keys {
+        return false;
+    }
+    state
+        .pending_placements
+        .retain(|saved| saved.monitor_keys != item.monitor_keys || saved.tool != item.tool);
+    state.pending_placements.push(item);
+    if state.pending_placements.len() > MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS {
+        let overflow = state.pending_placements.len() - MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS;
+        state.pending_placements.drain(..overflow);
+    }
+    true
+}
+
+fn pending_taskbar_profile_placements<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    monitor_keys: &[String],
+) -> Vec<PendingTaskbarProfilePlacement> {
+    manager
+        .try_state::<TaskbarStableTopologyState>()
+        .map(|state| {
+            state
+                .0
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .pending_placements
+                .iter()
+                .filter(|item| item.monitor_keys == monitor_keys)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn clear_pending_taskbar_profile_placements<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    processed: &[PendingTaskbarProfilePlacement],
+) {
+    if processed.is_empty() {
+        return;
+    }
+    let Some(state) = manager.try_state::<TaskbarStableTopologyState>() else {
+        return;
+    };
+    state
+        .0
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .pending_placements
+        .retain(|item| !processed.contains(item));
+}
+
+fn clear_all_pending_taskbar_profile_placements<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+) {
+    if let Some(state) = manager.try_state::<TaskbarStableTopologyState>() {
+        clear_pending_taskbar_profile_state(
+            &mut state.0.lock().unwrap_or_else(|err| err.into_inner()),
+        );
+    }
+}
+
+fn clear_pending_taskbar_profile_state(state: &mut TaskbarStableTopologyData) {
+    state.pending_placements.clear();
+}
+
 fn set_taskbar_bars_paused<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, paused: bool) {
     if let Some(state) = manager.try_state::<TaskbarPauseState>() {
         state.0.store(paused, Ordering::Relaxed);
@@ -2132,6 +2498,63 @@ fn taskbar_topology_signature(snapshot: &TaskbarDockSnapshot) -> String {
         })
         .collect::<Vec<_>>()
         .join("|")
+}
+
+#[cfg(windows)]
+fn taskbar_profile_topology_keys(snapshot: &TaskbarDockSnapshot) -> Vec<String> {
+    canonical_taskbar_monitor_keys(
+        snapshot
+            .taskbars
+            .iter()
+            .map(|taskbar| taskbar.key.clone())
+            .collect(),
+    )
+}
+
+#[cfg(windows)]
+fn reconcile_taskbar_layout_profile(
+    settings: &Settings,
+    monitor_keys: &[String],
+    pending: &[PendingTaskbarProfilePlacement],
+) -> anyhow::Result<bool> {
+    if !settings.taskbar_layout_memory_on || monitor_keys.is_empty() {
+        return Ok(false);
+    }
+
+    let should_update = if !pending.is_empty() {
+        true
+    } else if settings.taskbar_layout_profile(monitor_keys).is_some() {
+        let mut projected = settings.clone();
+        complete_taskbar_layout_profile(&mut projected, monitor_keys)
+            || apply_taskbar_layout_profile(&mut projected, monitor_keys)
+            || !settings.taskbar_layout_profile_is_most_recent(monitor_keys)
+    } else {
+        !settings.taskbar_layout_memory_initialized
+            && taskbar_layout_profile_from_current(settings, monitor_keys).is_some()
+    };
+    if !should_update {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    update_taskbar_settings(|current| {
+        if !current.taskbar_layout_memory_on {
+            return;
+        }
+        if !pending.is_empty() {
+            changed = apply_pending_taskbar_profile_placements(current, monitor_keys, pending);
+        } else if current.taskbar_layout_profile(monitor_keys).is_some() {
+            changed = complete_taskbar_layout_profile(current, monitor_keys);
+            changed |= apply_taskbar_layout_profile(current, monitor_keys);
+            changed |= current.touch_taskbar_layout_profile(monitor_keys);
+        } else if !current.taskbar_layout_memory_initialized {
+            changed = record_taskbar_layout_profile(current, monitor_keys);
+        }
+    })?;
+    if !changed {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -2609,6 +3032,32 @@ async fn get_settings() -> Result<Settings, String> {
         .map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+async fn clear_taskbar_layout_profiles(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+) -> Result<Settings, String> {
+    ensure_panel_command(window.label())?;
+    drop(window);
+    let pending_app = app.clone();
+    let settings = tauri::async_runtime::spawn_blocking(move || {
+        let _profile_guard = TASKBAR_PROFILE_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let snapshot = update_taskbar_settings(|current| {
+            current.taskbar_layout_profiles.clear();
+            current.taskbar_layout_memory_initialized = true;
+        })?;
+        clear_all_pending_taskbar_profile_placements(&pending_app);
+        Ok::<_, anyhow::Error>(snapshot.settings)
+    })
+    .await
+    .map_err(|err| format!("taskbar layout reset task failed: {err}"))?
+    .map_err(|err| err.to_string())?;
+    let _ = app.emit("settings-updated", &settings);
+    Ok(settings)
+}
+
 #[derive(serde::Serialize)]
 struct SaveSettingsResult {
     settings: Settings,
@@ -2653,12 +3102,34 @@ fn taskbar_targets_match(left: &Settings, right: &Settings) -> bool {
 }
 
 fn preserve_taskbar_targets(current: &Settings, requested: &mut Settings) {
+    preserve_taskbar_positions(current, requested);
+    preserve_taskbar_layout_memory(current, requested);
+}
+
+fn preserve_taskbar_positions(current: &Settings, requested: &mut Settings) {
     requested.claude_taskbar_offset_ratio = current.claude_taskbar_offset_ratio;
     requested.codex_taskbar_offset_ratio = current.codex_taskbar_offset_ratio;
     requested.claude_taskbar_monitor_key = current.claude_taskbar_monitor_key.clone();
     requested.codex_taskbar_monitor_key = current.codex_taskbar_monitor_key.clone();
     requested.claude_taskbar_target_initialized = current.claude_taskbar_target_initialized;
     requested.codex_taskbar_target_initialized = current.codex_taskbar_target_initialized;
+}
+
+fn preserve_taskbar_layout_memory(current: &Settings, requested: &mut Settings) {
+    requested.taskbar_layout_profiles = current.taskbar_layout_profiles.clone();
+    requested.taskbar_layout_memory_initialized = current.taskbar_layout_memory_initialized;
+}
+
+fn preserve_concurrent_taskbar_state(
+    current: &Settings,
+    baseline: &Settings,
+    requested: &mut Settings,
+    drag_active: bool,
+) {
+    preserve_taskbar_layout_memory(current, requested);
+    if drag_active || !taskbar_targets_match(current, baseline) {
+        preserve_taskbar_positions(current, requested);
+    }
 }
 
 fn retry_settings_side_effects(app: tauri::AppHandle, retry_taskbar: bool, retry_autostart: bool) {
@@ -2699,9 +3170,8 @@ fn retry_settings_side_effects(app: tauri::AppHandle, retry_taskbar: bool, retry
             if !retry_taskbar && !retry_autostart {
                 break;
             }
-            let generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
-            let latest = match Settings::try_load() {
-                Ok(settings) => settings,
+            let (latest, generation) = match load_settings_with_generation() {
+                Ok(snapshot) => snapshot,
                 Err(err) => {
                     eprintln!("[settings] side-effect retry skipped; settings unavailable: {err}");
                     state
@@ -2713,15 +3183,6 @@ fn retry_settings_side_effects(app: tauri::AppHandle, retry_taskbar: bool, retry
                     continue;
                 }
             };
-            if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != generation {
-                state
-                    .taskbar_pending
-                    .fetch_or(retry_taskbar, Ordering::AcqRel);
-                state
-                    .autostart_pending
-                    .fetch_or(retry_autostart, Ordering::AcqRel);
-                continue;
-            }
             if retry_taskbar
                 && (taskbar_drag_active(&app)
                     || apply_taskbar_dock_for_generation(&app, &latest, generation).is_err())
@@ -2824,24 +3285,24 @@ async fn save_settings(
     let update_app = app.clone();
     let save_result = tauri::async_runtime::spawn_blocking(move || {
         let mut autostart_changed = false;
-        let settings = Settings::update(|current| {
+        let snapshot = update_taskbar_settings(|current| {
             autostart_changed = autostart_setting_changed(current, &requested);
-            if drag_was_active
-                || taskbar_drag_active(&update_app)
-                || !taskbar_targets_match(current, &baseline)
-            {
-                preserve_taskbar_targets(current, &mut requested);
-            }
+            preserve_concurrent_taskbar_state(
+                current,
+                &baseline,
+                &mut requested,
+                drag_was_active || taskbar_drag_active(&update_app),
+            );
             *current = requested;
         })?;
-        Ok::<_, anyhow::Error>((settings, autostart_changed))
+        Ok::<_, anyhow::Error>((snapshot.settings, autostart_changed, snapshot.generation))
     })
     .await;
     let save_result = match save_result {
         Ok(result) => result.map_err(|err| err.to_string()),
         Err(err) => Err(format!("settings save task failed: {err}")),
     };
-    let (settings, autostart_changed) = match save_result {
+    let (settings, autostart_changed, generation) = match save_result {
         Ok(saved) => saved,
         Err(save_error) => {
             if claude_collection_transition.is_some() {
@@ -2856,7 +3317,9 @@ async fn save_settings(
             return Err(save_error);
         }
     };
-    let generation = mark_taskbar_settings_changed();
+    if !taskbar_drag_active(&app) {
+        sync_taskbar_content_layout_ratios(&app, &settings);
+    }
     let taskbar_result = if taskbar_drag_active(&app) {
         Ok(())
     } else {
@@ -2979,11 +3442,11 @@ fn move_taskbar_bar(
         .ok_or_else(|| "invalid shell taskbar rectangle".to_string())?;
         position_taskbar_bar_on_taskbar(&app, tool, rect).map_err(|err| err.to_string())?;
         if persist {
-            settings = Settings::update(|current| {
+            settings = update_taskbar_settings(|current| {
                 set_taskbar_target(current, tool, &taskbar.key, ratio);
             })
+            .map(|snapshot| snapshot.settings)
             .map_err(|err| err.to_string())?;
-            mark_taskbar_settings_changed();
             let _ = app.emit("settings-updated", &settings);
         } else {
             set_taskbar_target(&mut settings, tool, &taskbar.key, ratio);
@@ -3515,36 +3978,36 @@ fn taskbar_dock_signature(
 fn migrate_legacy_taskbar_monitor_keys(
     settings: &Settings,
     snapshot: &TaskbarDockSnapshot,
-) -> anyhow::Result<Option<Settings>> {
+) -> anyhow::Result<bool> {
     let mut replacements = Vec::new();
-    for tool in TASKBAR_TOOLS {
-        let preferred = taskbar_monitor_key(settings, tool);
-        let Some(taskbar) = snapshot.taskbars.iter().find(|taskbar| {
-            (taskbar.device_key == preferred || taskbar.legacy_key == preferred)
-                && taskbar.key != preferred
-        }) else {
-            continue;
-        };
-        replacements.push((tool, preferred.to_string(), taskbar.key.clone()));
-    }
-    if replacements.is_empty() {
-        return Ok(None);
-    }
-
-    let migrated = Settings::update(|current| {
-        for (tool, legacy, stable) in &replacements {
-            if taskbar_monitor_key(current, tool) != legacy {
-                continue;
-            }
-            match *tool {
-                "claude" => current.claude_taskbar_monitor_key = stable.clone(),
-                "codex" => current.codex_taskbar_monitor_key = stable.clone(),
-                _ => {}
+    for taskbar in &snapshot.taskbars {
+        for alias in [&taskbar.device_key, &taskbar.legacy_key] {
+            if alias != &taskbar.key
+                && !replacements
+                    .iter()
+                    .any(|(saved, _): &(String, String)| saved == alias)
+            {
+                replacements.push((alias.clone(), taskbar.key.clone()));
             }
         }
+    }
+    if let Some(primary) = snapshot.taskbars.iter().find(|taskbar| taskbar.primary) {
+        replacements.push((String::new(), primary.key.clone()));
+    }
+
+    let mut projected = settings.clone();
+    if !projected.migrate_taskbar_monitor_key_aliases(&replacements) {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    update_taskbar_settings(|current| {
+        changed = current.migrate_taskbar_monitor_key_aliases(&replacements);
     })?;
-    mark_taskbar_settings_changed();
-    Ok(Some(migrated))
+    if !changed {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -3554,8 +4017,25 @@ fn save_taskbar_drag_target(
     monitor_key: &str,
     dropped_rect: taskbar::DockRect,
 ) -> anyhow::Result<()> {
+    let tool =
+        normalize_taskbar_tool(tool).ok_or_else(|| anyhow::anyhow!("unknown taskbar tool"))?;
     let current = Settings::try_load()?;
-    let taskbar = taskbar::shell_taskbar_window_for_key(monitor_key)?;
+    let taskbars = taskbar::shell_taskbar_windows()?;
+    let taskbar = taskbars
+        .iter()
+        .find(|taskbar| {
+            !monitor_key.is_empty()
+                && (taskbar.key == monitor_key
+                    || taskbar.device_key == monitor_key
+                    || taskbar.legacy_key == monitor_key)
+        })
+        .or_else(|| taskbars.iter().find(|taskbar| taskbar.primary))
+        .or_else(|| taskbars.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no shell taskbar windows found"))?;
+    let monitor_keys = canonical_taskbar_monitor_keys(
+        taskbars.iter().map(|taskbar| taskbar.key.clone()).collect(),
+    );
     let logical_length = taskbar_dock_width_for_manager(app, &current, tool)
         .ok_or_else(|| anyhow::anyhow!("taskbar bar is hidden"))?;
     let physical_length = taskbar_physical_length_for_window(logical_length, taskbar.hwnd);
@@ -3576,10 +4056,40 @@ fn save_taskbar_drag_target(
     let ratio = taskbar::offset_ratio_for_taskbar_rect(taskbar_rect, final_rect)
         .ok_or_else(|| anyhow::anyhow!("invalid dropped taskbar rectangle"))?;
     let stable_key = taskbar.key.clone();
-    let settings = Settings::update(|current| {
+    let _profile_guard = TASKBAR_PROFILE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile_topology_is_stable = stable_taskbar_topology_matches(app, &monitor_keys);
+    let snapshot = update_taskbar_settings(|current| {
         set_taskbar_target(current, tool, &stable_key, ratio);
+        if profile_topology_is_stable {
+            record_taskbar_layout_profile(current, &monitor_keys);
+        }
     })?;
-    let settings_generation = mark_taskbar_settings_changed();
+    let mut settings = snapshot.settings;
+    let mut settings_generation = snapshot.generation;
+    if settings.taskbar_layout_memory_on && !profile_topology_is_stable {
+        let pending = PendingTaskbarProfilePlacement {
+            monitor_keys: monitor_keys.clone(),
+            tool,
+            placement: TaskbarPlacement {
+                monitor_key: stable_key,
+                offset_ratio: ratio,
+            },
+        };
+        if !remember_pending_taskbar_profile_placement(app, pending.clone()) {
+            let committed = update_taskbar_settings(|current| {
+                apply_pending_taskbar_profile_placements(
+                    current,
+                    &monitor_keys,
+                    std::slice::from_ref(&pending),
+                );
+            })?;
+            settings = committed.settings;
+            settings_generation = committed.generation;
+        }
+    }
+    drop(_profile_guard);
     set_taskbar_content_layout_ratio(app, tool, taskbar_offset_ratio(&settings, tool));
     let _ = app.emit("settings-updated", &settings);
     apply_taskbar_dock_for_generation(app, &settings, settings_generation)?;
@@ -3880,10 +4390,11 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                 let mut hover_started_at = std::time::Instant::now();
                 let mut visible_tooltip: Option<&'static str> = None;
                 let mut registered_tooltips = std::collections::HashMap::new();
-                #[cfg(debug_assertions)]
-                let forced_hover = std::env::var("AGENT_JUICE_TEST_HOVER_TOOL")
-                    .ok()
-                    .and_then(|tool| normalize_taskbar_tool(&tool));
+                let forced_hover_candidate = std::env::var("AGENT_JUICE_TEST_HOVER_TOOL").ok();
+                let forced_hover = isolated_forced_taskbar_hover(
+                    std::env::var_os("AGENT_JUICE_DATA_DIR").is_some(),
+                    forced_hover_candidate.as_deref(),
+                );
 
                 loop {
                     if app
@@ -3910,7 +4421,6 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                     let down = left_mouse_button_down();
                     let point = cursor_position().ok();
                     let next_hover = {
-                        #[cfg(debug_assertions)]
                         if forced_hover.is_some() {
                             forced_hover
                         } else if down {
@@ -3919,16 +4429,6 @@ fn spawn_taskbar_drag_loop(app: tauri::AppHandle) {
                             point
                                 .and_then(|point| current_bar_at_point(&app, point))
                                 .filter(|tool| !taskbar_menu_is_open(&app, tool))
-                        }
-                        #[cfg(not(debug_assertions))]
-                        {
-                            if down {
-                                None
-                            } else {
-                                point
-                                    .and_then(|point| current_bar_at_point(&app, point))
-                                    .filter(|tool| !taskbar_menu_is_open(&app, tool))
-                            }
                         }
                     };
                     if next_hover != hover_candidate {
@@ -4089,10 +4589,13 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
         std::thread::spawn(move || {
             let mut last_signature: Option<String> = None;
             let mut last_topology_signature: Option<String> = None;
+            let mut topology_stability = TaskbarTopologyStability::default();
             let mut settings = Settings::default();
             let mut settings_revision = None;
             let mut settings_generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
             let mut settings_valid = false;
+            let mut settings_event_pending = false;
+            let mut profile_ratio_sync_pending = false;
             loop {
                 if app
                     .try_state::<TaskbarShutdownState>()
@@ -4112,19 +4615,30 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                     }
                     let next_revision = Settings::storage_revision();
                     if !settings_valid || next_revision != settings_revision {
-                        let load_generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
-                        match Settings::try_load_with_revision() {
-                            Ok((loaded, revision)) => {
-                                if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire)
-                                    != load_generation
-                                {
-                                    settings_valid = false;
-                                    continue;
-                                }
+                        let reload_result = with_taskbar_settings_read(|load_generation| {
+                            let (loaded, revision) = Settings::try_load_with_revision()?;
+                            if profile_ratio_sync_pending {
+                                sync_taskbar_content_layout_ratios(&app, &loaded);
+                            }
+                            if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire)
+                                != load_generation
+                            {
+                                anyhow::bail!("settings changed while synchronizing taskbar state");
+                            }
+                            Ok((loaded, revision, load_generation))
+                        });
+                        match reload_result {
+                            Ok((loaded, revision, load_generation)) => {
                                 settings = loaded;
                                 settings_revision = revision;
                                 settings_generation = load_generation;
                                 settings_valid = true;
+                                profile_ratio_sync_pending = false;
+                                if settings_event_pending {
+                                    let _ = app.emit("settings-updated", &settings);
+                                    settings_event_pending = false;
+                                }
+                                topology_stability.rearm();
                             }
                             Err(err) => {
                                 settings_valid = false;
@@ -4139,11 +4653,11 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                     if taskbar_targets_need_initialization(&settings) {
                         match initialize_pending_taskbar_targets(&app, &settings) {
                             Ok(initialized) => {
-                                settings = initialized;
-                                settings_revision = Settings::storage_revision();
-                                settings_generation =
-                                    TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
+                                settings = initialized.settings;
+                                settings_revision = initialized.revision;
+                                settings_generation = initialized.generation;
                                 last_signature = None;
+                                topology_stability.rearm();
                             }
                             Err(err) => {
                                 last_signature = None;
@@ -4162,6 +4676,7 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                         Ok(snapshot) => snapshot,
                         Err(err) => {
                             last_signature = None;
+                            topology_stability.observe(Vec::new());
                             eprintln!("[taskbar] inspect dock state failed: {err}");
                             std::thread::sleep(std::time::Duration::from_millis(500));
                             continue;
@@ -4173,17 +4688,57 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                         last_topology_signature = Some(topology_signature);
                     }
                     match migrate_legacy_taskbar_monitor_keys(&settings, &snapshot) {
-                        Ok(Some(migrated)) => {
-                            settings = migrated;
-                            settings_revision = Settings::storage_revision();
+                        Ok(true) => {
+                            settings_valid = false;
+                            settings_event_pending = true;
                             last_signature = None;
-                            let _ = app.emit("settings-updated", &settings);
                             continue;
                         }
-                        Ok(None) => {}
+                        Ok(false) => {}
                         Err(err) => {
                             last_signature = None;
                             eprintln!("[taskbar] monitor key migration failed: {err}");
+                        }
+                    }
+                    let profile_topology = taskbar_profile_topology_keys(&snapshot);
+                    if let Some(stable_topology) = topology_stability.observe(profile_topology) {
+                        let _profile_guard = TASKBAR_PROFILE_GATE
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner());
+                        let pending = pending_taskbar_profile_placements(&app, &stable_topology);
+                        match reconcile_taskbar_layout_profile(
+                            &settings,
+                            &stable_topology,
+                            &pending,
+                        ) {
+                            Ok(true) => {
+                                clear_pending_taskbar_profile_placements(&app, &pending);
+                                if !set_stable_taskbar_topology(&app, &stable_topology) {
+                                    topology_stability.rearm();
+                                }
+                                settings_valid = false;
+                                settings_event_pending = true;
+                                profile_ratio_sync_pending = true;
+                                last_signature = None;
+                                continue;
+                            }
+                            Ok(false) => {
+                                clear_pending_taskbar_profile_placements(&app, &pending);
+                                if !set_stable_taskbar_topology(&app, &stable_topology) {
+                                    topology_stability.rearm();
+                                    settings_valid = false;
+                                    last_signature = None;
+                                    continue;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = set_stable_taskbar_topology(&app, &[]);
+                                topology_stability.rearm();
+                                settings_valid = false;
+                                last_signature = None;
+                                eprintln!("[taskbar] layout profile reconciliation failed: {err}");
+                                continue;
+                            }
                         }
                     }
                     let dock_result = (|| -> anyhow::Result<Option<String>> {
@@ -4338,6 +4893,7 @@ pub fn run() {
             open_release_page,
             get_settings,
             save_settings,
+            clear_taskbar_layout_profiles,
             get_taskbar_orientation,
             set_taskbar_content_width,
             set_taskbar_tooltip,
@@ -4355,6 +4911,7 @@ pub fn run() {
             app.manage(TaskbarMenuState::default());
             app.manage(TaskbarRecoveryState::default());
             app.manage(TaskbarDragState::default());
+            app.manage(TaskbarStableTopologyState::default());
             app.manage(TaskbarTooltipTextState::default());
             app.manage(TaskbarContentLayoutState::default());
             app.manage(TaskbarWindowState::default());
@@ -4371,7 +4928,7 @@ pub fn run() {
                 Ok(loaded) => {
                     #[cfg(windows)]
                     let loaded = match initialize_pending_taskbar_targets(app, &loaded) {
-                        Ok(settings) => settings,
+                        Ok(snapshot) => snapshot.settings,
                         Err(err) => {
                             eprintln!("[taskbar] initial left placement failed: {err}");
                             loaded
@@ -4424,10 +4981,322 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::Settings,
+        config::{
+            canonical_taskbar_monitor_keys, Settings, TaskbarLayoutProfile, TaskbarPlacement,
+        },
         model::{AccountLimit, AgentStatus, SessionInfo, Tool},
         taskbar,
     };
+
+    #[test]
+    fn forced_taskbar_hover_requires_an_isolated_runtime() {
+        assert_eq!(
+            super::isolated_forced_taskbar_hover(true, Some("claude")),
+            Some("claude")
+        );
+        assert_eq!(
+            super::isolated_forced_taskbar_hover(true, Some("codex")),
+            Some("codex")
+        );
+        assert_eq!(
+            super::isolated_forced_taskbar_hover(false, Some("claude")),
+            None
+        );
+        assert_eq!(
+            super::isolated_forced_taskbar_hover(true, Some("unknown")),
+            None
+        );
+    }
+
+    #[test]
+    fn taskbar_layout_profiles_restore_only_the_exact_monitor_setup() {
+        let office =
+            canonical_taskbar_monitor_keys(vec!["monitor-office".into(), "monitor-laptop".into()]);
+        let mobile = canonical_taskbar_monitor_keys(vec!["monitor-laptop".into()]);
+        let mut settings = Settings::default();
+        super::set_taskbar_target(&mut settings, "claude", "monitor-office", 0.2);
+        super::set_taskbar_target(&mut settings, "codex", "monitor-laptop", 0.7);
+        assert!(super::record_taskbar_layout_profile(&mut settings, &office));
+
+        super::set_taskbar_target(&mut settings, "claude", "monitor-laptop", 0.1);
+        super::set_taskbar_target(&mut settings, "codex", "monitor-laptop", 0.45);
+        assert!(super::record_taskbar_layout_profile(&mut settings, &mobile));
+        assert_eq!(settings.taskbar_layout_profiles.len(), 2);
+
+        assert!(super::apply_taskbar_layout_profile(&mut settings, &office));
+        assert_eq!(settings.claude_taskbar_monitor_key, "monitor-office");
+        assert_eq!(settings.claude_taskbar_offset_ratio, 0.2);
+        assert_eq!(settings.codex_taskbar_monitor_key, "monitor-laptop");
+        assert_eq!(settings.codex_taskbar_offset_ratio, 0.7);
+
+        let similar =
+            canonical_taskbar_monitor_keys(vec!["monitor-laptop".into(), "monitor-home".into()]);
+        assert!(!super::apply_taskbar_layout_profile(
+            &mut settings,
+            &similar
+        ));
+        assert_eq!(settings.claude_taskbar_monitor_key, "monitor-office");
+    }
+
+    #[test]
+    fn disabled_taskbar_layout_memory_does_not_capture_a_dragged_position() {
+        let mut settings = Settings {
+            taskbar_layout_memory_on: false,
+            ..Settings::default()
+        };
+        super::set_taskbar_target(&mut settings, "claude", "monitor-laptop", 0.3);
+        assert!(!super::record_taskbar_layout_profile(
+            &mut settings,
+            &["monitor-laptop".into()]
+        ));
+        assert!(settings.taskbar_layout_profiles.is_empty());
+        assert!(!settings.taskbar_layout_memory_initialized);
+    }
+
+    #[test]
+    fn partial_taskbar_layout_profile_adds_only_the_missing_current_tool() {
+        let topology =
+            canonical_taskbar_monitor_keys(vec!["monitor-office".into(), "monitor-laptop".into()]);
+        let mut settings = Settings::default();
+        super::set_taskbar_target(&mut settings, "claude", "monitor-office", 0.9);
+        super::set_taskbar_target(&mut settings, "codex", "monitor-laptop", 0.7);
+        assert!(
+            settings.upsert_taskbar_layout_profile(TaskbarLayoutProfile {
+                monitor_keys: topology.clone(),
+                claude: Some(TaskbarPlacement {
+                    monitor_key: "monitor-office".into(),
+                    offset_ratio: 0.2,
+                }),
+                codex: None,
+            })
+        );
+
+        assert!(super::complete_taskbar_layout_profile(
+            &mut settings,
+            &topology
+        ));
+        let profile = settings.taskbar_layout_profile(&topology).unwrap();
+        assert_eq!(profile.claude.as_ref().unwrap().offset_ratio, 0.2);
+        assert_eq!(profile.codex.as_ref().unwrap().offset_ratio, 0.7);
+
+        assert!(super::apply_taskbar_layout_profile(
+            &mut settings,
+            &topology
+        ));
+        assert_eq!(settings.claude_taskbar_offset_ratio, 0.2);
+        assert_eq!(settings.codex_taskbar_offset_ratio, 0.7);
+    }
+
+    #[test]
+    fn pending_drag_updates_only_its_profile_placement_after_topology_stabilizes() {
+        let topology =
+            canonical_taskbar_monitor_keys(vec!["monitor-office".into(), "monitor-laptop".into()]);
+        let mut settings = Settings::default();
+        assert!(
+            settings.upsert_taskbar_layout_profile(TaskbarLayoutProfile {
+                monitor_keys: topology.clone(),
+                claude: Some(TaskbarPlacement {
+                    monitor_key: "monitor-office".into(),
+                    offset_ratio: 0.2,
+                }),
+                codex: Some(TaskbarPlacement {
+                    monitor_key: "monitor-laptop".into(),
+                    offset_ratio: 0.7,
+                }),
+            })
+        );
+        let pending = vec![super::PendingTaskbarProfilePlacement {
+            monitor_keys: topology.clone(),
+            tool: "claude",
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-laptop".into(),
+                offset_ratio: 0.9,
+            },
+        }];
+        super::set_taskbar_target(&mut settings, "claude", "monitor-laptop", 0.9);
+
+        assert!(super::apply_pending_taskbar_profile_placements(
+            &mut settings,
+            &topology,
+            &pending,
+        ));
+        let profile = settings.taskbar_layout_profile(&topology).unwrap();
+        assert_eq!(
+            profile.claude.as_ref().unwrap().monitor_key,
+            "monitor-laptop"
+        );
+        assert_eq!(profile.claude.as_ref().unwrap().offset_ratio, 0.9);
+        assert_eq!(
+            profile.codex.as_ref().unwrap().monitor_key,
+            "monitor-laptop"
+        );
+        assert_eq!(profile.codex.as_ref().unwrap().offset_ratio, 0.7);
+        assert_eq!(settings.claude_taskbar_offset_ratio, 0.9);
+        assert_eq!(settings.codex_taskbar_offset_ratio, 0.7);
+
+        super::set_taskbar_target(&mut settings, "claude", "monitor-laptop", 0.4);
+        assert!(super::apply_pending_taskbar_profile_placements(
+            &mut settings,
+            &topology,
+            &pending,
+        ));
+        assert_eq!(settings.claude_taskbar_offset_ratio, 0.9);
+        assert_eq!(
+            settings
+                .taskbar_layout_profile(&topology)
+                .unwrap()
+                .claude
+                .as_ref()
+                .unwrap()
+                .offset_ratio,
+            0.9,
+        );
+    }
+
+    #[test]
+    fn pending_drag_blocks_stable_topology_publication_until_it_is_processed() {
+        let topology = vec!["monitor-office".to_string()];
+        let mut state = super::TaskbarStableTopologyData::default();
+        let first = super::PendingTaskbarProfilePlacement {
+            monitor_keys: topology.clone(),
+            tool: "claude",
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-office".into(),
+                offset_ratio: 0.2,
+            },
+        };
+        assert!(super::store_pending_taskbar_profile_placement(
+            &mut state,
+            first.clone(),
+        ));
+        assert!(!super::try_publish_stable_taskbar_topology(
+            &mut state, &topology,
+        ));
+
+        let home_topology = vec!["monitor-home".to_string()];
+        let home = super::PendingTaskbarProfilePlacement {
+            monitor_keys: home_topology.clone(),
+            tool: "codex",
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-home".into(),
+                offset_ratio: 0.4,
+            },
+        };
+        assert!(super::store_pending_taskbar_profile_placement(
+            &mut state,
+            home.clone(),
+        ));
+
+        let replacement = super::PendingTaskbarProfilePlacement {
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-office".into(),
+                offset_ratio: 0.8,
+            },
+            ..first
+        };
+        assert!(super::store_pending_taskbar_profile_placement(
+            &mut state,
+            replacement.clone(),
+        ));
+        assert_eq!(state.pending_placements, vec![home, replacement.clone()]);
+        super::clear_pending_taskbar_profile_state(&mut state);
+        assert!(state.pending_placements.is_empty());
+        assert!(super::try_publish_stable_taskbar_topology(
+            &mut state, &topology,
+        ));
+        assert_eq!(state.monitor_keys, topology);
+        assert!(!super::store_pending_taskbar_profile_placement(
+            &mut state,
+            replacement,
+        ));
+    }
+
+    #[test]
+    fn pending_drag_storage_is_bounded_and_refreshes_replaced_entries() {
+        let mut state = super::TaskbarStableTopologyData::default();
+        for index in 0..super::MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS {
+            let monitor_key = format!("monitor-{index}");
+            assert!(super::store_pending_taskbar_profile_placement(
+                &mut state,
+                super::PendingTaskbarProfilePlacement {
+                    monitor_keys: vec![monitor_key.clone()],
+                    tool: "claude",
+                    placement: TaskbarPlacement {
+                        monitor_key,
+                        offset_ratio: index as f32 / 100.0,
+                    },
+                },
+            ));
+        }
+        assert_eq!(
+            state.pending_placements.len(),
+            super::MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS
+        );
+
+        let refreshed = super::PendingTaskbarProfilePlacement {
+            monitor_keys: vec!["monitor-0".into()],
+            tool: "claude",
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-0".into(),
+                offset_ratio: 0.99,
+            },
+        };
+        assert!(super::store_pending_taskbar_profile_placement(
+            &mut state,
+            refreshed.clone(),
+        ));
+        assert_eq!(
+            state.pending_placements.len(),
+            super::MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS
+        );
+        assert_eq!(state.pending_placements.last(), Some(&refreshed));
+
+        let newest = super::PendingTaskbarProfilePlacement {
+            monitor_keys: vec!["monitor-32".into()],
+            tool: "codex",
+            placement: TaskbarPlacement {
+                monitor_key: "monitor-32".into(),
+                offset_ratio: 0.5,
+            },
+        };
+        assert!(super::store_pending_taskbar_profile_placement(
+            &mut state,
+            newest.clone(),
+        ));
+        assert_eq!(
+            state.pending_placements.len(),
+            super::MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS
+        );
+        assert!(!state
+            .pending_placements
+            .iter()
+            .any(|item| item.monitor_keys == ["monitor-1"]));
+        assert!(state.pending_placements.contains(&refreshed));
+        assert_eq!(state.pending_placements.last(), Some(&newest));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskbar_topology_requires_three_consecutive_observations() {
+        let mut stability = super::TaskbarTopologyStability::default();
+        let laptop = vec!["monitor-laptop".into()];
+        assert_eq!(stability.observe(laptop.clone()), None);
+        assert_eq!(stability.observe(laptop.clone()), None);
+        assert_eq!(stability.observe(laptop.clone()), Some(laptop.clone()));
+        assert_eq!(stability.observe(laptop.clone()), None);
+
+        stability.rearm();
+        assert_eq!(stability.observe(laptop.clone()), None);
+        assert_eq!(stability.observe(laptop.clone()), None);
+        assert_eq!(stability.observe(laptop.clone()), Some(laptop.clone()));
+
+        let office = vec!["monitor-laptop".into(), "monitor-office".into()];
+        assert_eq!(stability.observe(office.clone()), None);
+        assert_eq!(stability.observe(Vec::new()), None);
+        assert_eq!(stability.observe(office.clone()), None);
+        assert_eq!(stability.observe(office.clone()), None);
+        assert_eq!(stability.observe(office.clone()), Some(office));
+    }
 
     #[test]
     fn taskbar_layout_contention_fails_without_waiting() {
@@ -4640,6 +5509,20 @@ mod tests {
             None
         );
         assert_eq!(super::taskbar_content_width_for_mode("full", None), None);
+    }
+
+    #[test]
+    fn restored_profile_ratio_replaces_the_cached_content_layout_ratio() {
+        let mut layout = Some(super::TaskbarContentLayout {
+            mode: "full".into(),
+            width: 188,
+            ratio: Some(0.75),
+        });
+
+        super::update_taskbar_content_layout_ratio(&mut layout, 0.2);
+        assert_eq!(layout.as_ref().unwrap().ratio, Some(0.2));
+        super::update_taskbar_content_layout_ratio(&mut layout, 2.0);
+        assert_eq!(layout.as_ref().unwrap().ratio, Some(1.0));
     }
 
     #[test]
@@ -5809,6 +6692,50 @@ mod tests {
             .count();
         assert_eq!(temp_files, 0);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn panel_save_always_preserves_concurrent_layout_profile_state() {
+        let topology = vec!["monitor-office".to_string()];
+        let mut baseline = Settings::default();
+        super::set_taskbar_target(&mut baseline, "claude", "monitor-office", 0.2);
+
+        let mut current = baseline.clone();
+        assert!(super::record_taskbar_layout_profile(
+            &mut current,
+            &topology
+        ));
+        let mut requested = baseline.clone();
+        requested.theme = "dark".into();
+        requested.claude_taskbar_offset_ratio = 0.35;
+
+        super::preserve_concurrent_taskbar_state(&current, &baseline, &mut requested, false);
+
+        assert_eq!(requested.theme, "dark");
+        assert_eq!(requested.claude_taskbar_offset_ratio, 0.35);
+        assert!(requested.taskbar_layout_memory_initialized);
+        assert_eq!(
+            requested.taskbar_layout_profiles,
+            current.taskbar_layout_profiles
+        );
+
+        let profile_baseline = current.clone();
+        let mut cleared = profile_baseline.clone();
+        cleared.taskbar_layout_profiles.clear();
+        let mut stale_requested = profile_baseline.clone();
+        stale_requested.theme = "light".into();
+        super::preserve_concurrent_taskbar_state(
+            &cleared,
+            &profile_baseline,
+            &mut stale_requested,
+            false,
+        );
+        assert_eq!(stale_requested.theme, "light");
+        assert!(stale_requested.taskbar_layout_profiles.is_empty());
+
+        super::set_taskbar_target(&mut current, "claude", "monitor-office", 0.8);
+        super::preserve_concurrent_taskbar_state(&current, &baseline, &mut requested, false);
+        assert_eq!(requested.claude_taskbar_offset_ratio, 0.8);
     }
 
     #[test]
