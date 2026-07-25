@@ -207,7 +207,7 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
     ["juice-v014-panel-activity.png", [1240, 674]],
     ["juice-v014-panel-appearance.png", [1240, 1436]],
     ["juice-v014-panel-taskbar.png", [1240, 1274]],
-    ["juice-v014-panel-collection.png", [1240, 1132]],
+    ["juice-v014-panel-collection.png", [1240, 1416]],
     ["juice-v014-panel-effects.png", [1240, 2428]],
     ["juice-v014-panel-update.png", [1240, 588]],
     ["juice-v014-taskbar-modes.png", [1520, 584]],
