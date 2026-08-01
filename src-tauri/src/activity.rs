@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const SCHEMA_VERSION: &str = "usage_activity.v1";
+const SCHEMA_VERSION: &str = "usage_activity.v2";
 const INDEX_FILE_NAME: &str = "usage-activity-v1.json";
 const RETENTION_DAYS: i64 = 371;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -571,15 +571,7 @@ fn apply_claude_line(
     let Some(usage) = root.pointer("/message/usage") else {
         return;
     };
-    let tokens = [
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-    ]
-    .into_iter()
-    .filter_map(|key| usage.get(key).and_then(Value::as_u64))
-    .fold(0u64, u64::saturating_add);
+    let tokens = claude_usage_tokens(usage);
     if tokens == 0 {
         return;
     }
@@ -608,6 +600,34 @@ fn apply_claude_line(
         .insert(message_id, ClaudeMessageContribution { date, tokens });
 }
 
+fn claude_usage_tokens(usage: &Value) -> u64 {
+    if let Some(iterations) = usage
+        .get("iterations")
+        .and_then(Value::as_array)
+        .filter(|iterations| !iterations.is_empty())
+    {
+        let total = iterations.iter().fold(0u64, |total, iteration| {
+            total.saturating_add(usage_token_fields(iteration))
+        });
+        if total > 0 {
+            return total;
+        }
+    }
+    usage_token_fields(usage)
+}
+
+fn usage_token_fields(usage: &Value) -> u64 {
+    [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .into_iter()
+    .filter_map(|key| usage.get(key).and_then(Value::as_u64))
+    .fold(0u64, u64::saturating_add)
+}
+
 fn apply_codex_line(
     checkpoint: &mut FileCheckpoint,
     root: &Value,
@@ -625,20 +645,22 @@ fn apply_codex_line(
     let cumulative = root
         .pointer("/payload/info/total_token_usage/total_tokens")
         .and_then(Value::as_u64);
+    let last_usage = root
+        .pointer("/payload/info/last_token_usage/total_tokens")
+        .and_then(Value::as_u64);
     let delta = if let Some(total) = cumulative {
         let delta = match checkpoint.codex_last_total {
             Some(previous) if total >= previous => total - previous,
-            Some(_) | None => total,
-        }
-        .saturating_sub(checkpoint.codex_fallback_total);
+            Some(_) => last_usage.unwrap_or(total),
+            None => {
+                last_usage.unwrap_or_else(|| total.saturating_sub(checkpoint.codex_fallback_total))
+            }
+        };
         checkpoint.codex_last_total = Some(total);
         checkpoint.codex_fallback_total = 0;
         delta
     } else {
-        let fallback = root
-            .pointer("/payload/info/last_token_usage/total_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let fallback = last_usage.unwrap_or(0);
         if checkpoint.codex_last_total.is_none() {
             checkpoint.codex_fallback_total =
                 checkpoint.codex_fallback_total.saturating_add(fallback);
@@ -685,7 +707,29 @@ fn snapshot_from_index(
     cutoff: &str,
 ) -> ActivitySnapshot {
     let mut days: BTreeMap<String, ActivityDay> = BTreeMap::new();
-    for checkpoint in index.files.values() {
+    let mut claude_messages: BTreeMap<String, &ClaudeMessageContribution> = BTreeMap::new();
+    for (file_key, checkpoint) in &index.files {
+        if checkpoint.tool == ActivityTool::Claude {
+            for (message_id, contribution) in &checkpoint.claude_messages {
+                if contribution.date.as_str() < cutoff {
+                    continue;
+                }
+                let dedupe_key = if message_id.starts_with("offset:") {
+                    format!("{file_key}\0{message_id}")
+                } else {
+                    message_id.clone()
+                };
+                let should_replace = claude_messages.get(&dedupe_key).is_none_or(|previous| {
+                    contribution.tokens > previous.tokens
+                        || (contribution.tokens == previous.tokens
+                            && contribution.date < previous.date)
+                });
+                if should_replace {
+                    claude_messages.insert(dedupe_key, contribution);
+                }
+            }
+            continue;
+        }
         for (date, tokens) in &checkpoint.days {
             if date.as_str() < cutoff {
                 continue;
@@ -694,13 +738,17 @@ fn snapshot_from_index(
                 date: date.clone(),
                 ..ActivityDay::default()
             });
-            match checkpoint.tool {
-                ActivityTool::Claude => {
-                    day.claude_tokens = day.claude_tokens.saturating_add(*tokens)
-                }
-                ActivityTool::Codex => day.codex_tokens = day.codex_tokens.saturating_add(*tokens),
-            }
+            day.codex_tokens = day.codex_tokens.saturating_add(*tokens);
         }
+    }
+    for contribution in claude_messages.into_values() {
+        let day = days
+            .entry(contribution.date.clone())
+            .or_insert_with(|| ActivityDay {
+                date: contribution.date.clone(),
+                ..ActivityDay::default()
+            });
+        day.claude_tokens = day.claude_tokens.saturating_add(contribution.tokens);
     }
     ActivitySnapshot {
         schema_version: SCHEMA_VERSION.into(),
@@ -827,6 +875,76 @@ mod tests {
     }
 
     #[test]
+    fn claude_sums_iterations_and_deduplicates_messages_across_files() {
+        let root = temp_root("claude-iterations");
+        let claude = root.join("claude");
+        fs::create_dir_all(&claude).unwrap();
+        let message = |iterations: Value| {
+            serde_json::json!({
+                "timestamp": "2026-07-19T01:00:00Z",
+                "message": {
+                    "id": "shared-message",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cache_creation_input_tokens": 1,
+                        "cache_read_input_tokens": 1,
+                        "iterations": iterations
+                    }
+                }
+            })
+            .to_string()
+                + "\n"
+        };
+        fs::write(
+            claude.join("session-a.jsonl"),
+            message(serde_json::json!([{
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_creation_input_tokens": 30,
+                "cache_read_input_tokens": 40
+            }])),
+        )
+        .unwrap();
+        fs::write(
+            claude.join("session-b.jsonl"),
+            message(serde_json::json!([
+                {
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 30,
+                    "cache_read_input_tokens": 40
+                },
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 4
+                }
+            ])),
+        )
+        .unwrap();
+        let no_id_message = serde_json::json!({
+            "timestamp": "2026-07-19T01:00:00Z",
+            "message": {"usage": {"input_tokens": 2, "output_tokens": 2}}
+        })
+        .to_string()
+            + "\n";
+        fs::write(claude.join("no-id-a.jsonl"), &no_id_message).unwrap();
+        fs::write(claude.join("no-id-b.jsonl"), &no_id_message).unwrap();
+
+        let index = root.join("index.json");
+        let first =
+            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let repeated =
+            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+
+        assert_eq!(first.days[0].claude_tokens, 118);
+        assert_eq!(repeated.days[0].claude_tokens, 118);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn codex_uses_positive_cumulative_deltas_and_handles_counter_reset() {
         let root = temp_root("codex-delta");
         let codex = root.join("codex");
@@ -881,6 +999,54 @@ mod tests {
         assert_eq!(snapshot.days[0].codex_tokens, 100);
         assert_eq!(snapshot.days[1].date, "2026-07-19");
         assert_eq!(snapshot.days[1].codex_tokens, 190);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_uses_last_usage_for_resumed_baselines_and_counter_resets() {
+        let root = temp_root("codex-resumed-baseline");
+        let codex = root.join("codex");
+        fs::create_dir_all(&codex).unwrap();
+        let event = |total: u64, last: u64| {
+            serde_json::json!({
+                "timestamp": "2026-07-19T01:00:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {"total_tokens": total},
+                        "last_token_usage": {"total_tokens": last}
+                    }
+                }
+            })
+            .to_string()
+        };
+        fs::write(
+            codex.join("rollout.jsonl"),
+            [
+                event(201_791_695, 203_203),
+                event(201_791_695, 203_203),
+                event(202_005_633, 213_938),
+                event(500, 100),
+                event(650, 150),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let snapshot = refresh_at(
+            &root.join("index.json"),
+            &roots(&root),
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.days[0].codex_tokens, 417_391);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -964,6 +1130,36 @@ mod tests {
         assert_eq!(snapshot.days[0].claude_tokens, 20);
         assert_eq!(fs::read_to_string(&source).unwrap(), contents);
         let saved: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"], SCHEMA_VERSION);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_schema_index_is_rebuilt_from_source_logs() {
+        let root = temp_root("stale-schema");
+        let claude = root.join("claude");
+        fs::create_dir_all(&claude).unwrap();
+        fs::write(
+            claude.join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-07-19T01:00:00Z","message":{"id":"m1","usage":{"input_tokens":12,"output_tokens":8}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let index = root.join("index.json");
+        let mut stale = ActivityIndex::new(9 * 60);
+        stale.schema_version = "usage_activity.v1".into();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        checkpoint.days.insert("2026-07-19".into(), 999_999);
+        stale.files.insert("stale-file".into(), checkpoint);
+        fs::write(&index, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let snapshot =
+            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+
+        assert_eq!(snapshot.days[0].claude_tokens, 20);
         assert_eq!(saved["schema_version"], SCHEMA_VERSION);
         fs::remove_dir_all(root).unwrap();
     }

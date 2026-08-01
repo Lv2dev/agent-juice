@@ -29,6 +29,10 @@ const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8").r
   /\r\n?/g,
   "\n",
 );
+const rustSystemActivity = readFileSync(
+  resolve(here, "../src-tauri/src/system_activity.rs"),
+  "utf8",
+).replace(/\r\n?/g, "\n");
 const rustConfig = readFileSync(resolve(here, "../src-tauri/src/config.rs"), "utf8").replace(
   /\r\n?/g,
   "\n",
@@ -240,6 +244,7 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   const track = cssBlock(".panel-shell::-webkit-scrollbar-track");
   const thumb = cssBlock(".panel-shell::-webkit-scrollbar-thumb");
   const panelWindowConfig = tauriConfig.app.windows.find((item) => item.label === "panel");
+  const createPanelWindow = rustLib.match(/fn create_panel_window[\s\S]*?\n}/)?.[0] ?? "";
 
   assert.equal(panelWindowConfig?.title, "Juice");
   assert.ok(panelWindowConfig?.width >= 560);
@@ -250,8 +255,11 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.equal(panelWindowConfig?.resizable, true);
   assert.equal(panelWindowConfig?.visible, false);
   assert.equal(panelWindowConfig?.skipTaskbar, false);
+  assert.equal(panelWindowConfig?.alwaysOnTop, false);
+  assert.match(createPanelWindow, /\.always_on_top\(false\)/);
   for (const barWindow of tauriConfig.app.windows.filter((item) => item.label.startsWith("bar-"))) {
     assert.equal(barWindow.skipTaskbar, true);
+    assert.equal(barWindow.alwaysOnTop, true);
   }
   assert.match(rustLib, /CloseRequested/);
   assert.match(rustLib, /prevent_close\(\)/);
@@ -1456,7 +1464,7 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
   assert.match(rustLib, /window\.label\(\)/);
 });
 
-test("status refresh is available from panel and taskbar bars and periodic loop always emits", () => {
+test("manual refresh remains available while the periodic loop gates inactive Windows sessions", () => {
   const statusLoop = rustLib.match(/fn spawn_status_loop[\s\S]*?^}/m)?.[0] ?? "";
 
   assert.match(
@@ -1465,8 +1473,23 @@ test("status refresh is available from panel and taskbar bars and periodic loop 
   );
   assert.match(rustLib, /refresh_status,/);
   assert.match(statusLoop, /handle\.emit\("status-updated"/);
+  assert.match(statusLoop, /wait_until_ready_or_timeout/);
+  assert.match(statusLoop, /wait_until_active\(\)\.await/);
+  assert.match(statusLoop, /publish_if_current\(started/);
+  assert.match(statusLoop, /wait_for_change_or_timeout/);
   assert.doesNotMatch(statusLoop, /last_payload_signature/);
   assert.doesNotMatch(statusLoop, /payload_signature !=/);
+  assert.match(rustSystemActivity, /WTSRegisterSessionNotification/);
+  assert.match(rustSystemActivity, /GUID_SESSION_DISPLAY_STATUS/);
+  assert.match(rustSystemActivity, /WTSQuerySessionInformationW/);
+  assert.match(rustSystemActivity, /for attempt in 0\.\.4/);
+  assert.doesNotMatch(rustSystemActivity, /PBT_APMRESUMEAUTOMATIC/);
+  assert.match(rustLib, /system_activity_shutdown/);
+  assert.match(rustLib, /shutdown\.stop\(\)/);
+  assert.match(readme, /Windows가 잠기거나 모든 디스플레이가 꺼지면 자동 주기 수집을 쉬고/);
+  assert.match(readme, /Automatic polling pauses while Windows is locked or every display is off/);
+  assert.match(cargoToml, /"Win32_System_Power"/);
+  assert.match(cargoToml, /"Win32_System_RemoteDesktop"/);
   assert.match(capabilities.map((item) => item.identifier).join(","), /taskbar-bars/);
   assert.match(capabilities.map((item) => item.identifier).join(","), /panel/);
 });
@@ -1538,7 +1561,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.10"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.11"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

@@ -90,6 +90,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 - 숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다.
 - 기본으로 켜진 `바 겹침 자동 방지`는 값이나 리셋 문구가 길어질 때 같은 작업표시줄의 뒤쪽 바만 임시로 밀어냅니다. 사용자가 저장한 위치와 간격은 바뀌지 않으며 내용이 짧아지면 원래 배치로 돌아갑니다.
 - 재부팅이나 첫 실행의 최초 수집 중에는 `로딩 중`을 표시합니다. 지난 리셋 시간이 남아 있고 새 한도를 아직 받지 못한 경우에는 `갱신 대기`로 구분합니다.
+- Windows가 잠기거나 모든 디스플레이가 꺼지면 자동 주기 수집을 쉬고, 잠금 해제 또는 화면 ON 시 즉시 한 번 갱신합니다. 사용자가 누른 수동 새로고침은 그대로 동작합니다.
 - 바에 마우스를 올리면 도구명과 사용 가능한 5h·주간 한도의 초기화까지 남은 시간을 보여줍니다.
 - 바 우클릭 메뉴의 `새로고침`은 일반 캐시를 우회해 로컬 수집을 다시 실행합니다.
 - 트레이 메뉴에서 전체 바 표출을 일시중지하거나 재개할 수 있습니다.
@@ -306,6 +307,7 @@ Juice provides **four bar modes**.
 - Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars.
 - `Prevent bar overlap` is enabled by default. When values or reset text grow, Juice temporarily moves only the trailing bar on the same taskbar. Saved positions and spacing remain unchanged, and the original layout returns when content shrinks.
 - During the first collection after startup or reboot, the bar shows `Loading`. If a stored reset time has passed but a new limit has not arrived yet, it shows `Waiting for refresh`.
+- Automatic polling pauses while Windows is locked or every display is off, then refreshes once immediately after unlock or display-on. Explicit manual refresh remains available.
 - Hovering a bar shows the tool name and time remaining until each available 5-hour or weekly limit resets.
 - The taskbar context menu `Refresh` action bypasses the normal cache and recollects local status.
 - Pause or resume all taskbar bars from the Juice tray menu.

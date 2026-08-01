@@ -8,6 +8,7 @@ pub mod render;
 #[cfg(windows)]
 mod single_instance;
 pub mod statusline;
+mod system_activity;
 #[cfg(windows)]
 pub mod taskbar;
 pub mod update;
@@ -431,6 +432,9 @@ pub fn tray_quit_menu_id() -> &'static str {
 fn exit_after_taskbar_cleanup(app: tauri::AppHandle) {
     if let Some(state) = app.try_state::<TaskbarShutdownState>() {
         state.0.store(true, Ordering::Release);
+    }
+    if let Some(shutdown) = app.try_state::<system_activity::SystemActivityShutdown>() {
+        shutdown.stop();
     }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1300,7 +1304,7 @@ fn create_panel_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWi
         .decorations(false)
         .visible(false)
         .skip_taskbar(false)
-        .always_on_top(true)
+        .always_on_top(false)
         .resizable(true)
         .shadow(true)
         .build()?;
@@ -1345,22 +1349,58 @@ fn setup_panel_close_hide(app: &tauri::App) {
     }
 }
 
-fn spawn_status_loop(handle: tauri::AppHandle) {
+fn spawn_status_loop(
+    handle: tauri::AppHandle,
+    mut system_activity: system_activity::SystemActivityMonitor,
+) {
     tauri::async_runtime::spawn(async move {
+        system_activity
+            .wait_until_ready_or_timeout(std::time::Duration::from_millis(1_500))
+            .await;
         loop {
+            if system_activity.is_shutdown() {
+                return;
+            }
+            system_activity.wait_until_active().await;
+            if system_activity.is_shutdown() {
+                return;
+            }
             let settings = match Settings::try_load() {
                 Ok(settings) => settings,
                 Err(err) => {
                     eprintln!("[collector] settings unavailable; poll skipped: {err}");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let snapshot = system_activity.snapshot();
+                    system_activity
+                        .wait_for_change_or_timeout(
+                            snapshot.generation,
+                            std::time::Duration::from_secs(1),
+                        )
+                        .await;
                     continue;
                 }
             };
             let interval_secs = settings.poll_interval_secs.max(1);
+            let started = system_activity.snapshot();
+            if !started.active {
+                continue;
+            }
             let representatives = collect_representatives_off_thread(settings, false).await;
 
-            let _ = handle.emit("status-updated", &representatives);
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            if !system_activity.publish_if_current(started, || {
+                let _ = handle.emit("status-updated", &representatives);
+            }) {
+                continue;
+            }
+            let waiting = system_activity.snapshot();
+            if !waiting.active {
+                continue;
+            }
+            system_activity
+                .wait_for_change_or_timeout(
+                    waiting.generation,
+                    std::time::Duration::from_secs(interval_secs),
+                )
+                .await;
         }
     });
 }
@@ -4960,7 +5000,10 @@ pub fn run() {
                 retry_settings_side_effects(app.handle().clone(), taskbar_retry, autostart_retry);
                 spawn_claude_statusline_reconcile(settings.show_claude);
             }
-            spawn_status_loop(app.handle().clone());
+            let (system_activity, system_activity_shutdown) =
+                system_activity::SystemActivityMonitor::start();
+            app.manage(system_activity_shutdown);
+            spawn_status_loop(app.handle().clone(), system_activity);
             spawn_taskbar_drag_loop(app.handle().clone());
             spawn_taskbar_visibility_loop(app.handle().clone());
             spawn_update_check(app.handle().clone());
