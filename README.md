@@ -38,7 +38,7 @@ Juice는 현재 PC에 로그인된 Claude Code와 Codex CLI의 **5시간 한도�
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
 | 도구별 독립 바 | Claude와 Codex를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
-| 업데이트 알림 | 하루 한 번 최신 정식 릴리즈를 확인하고 자동 설치 없이 알림과 릴리즈 링크만 제공합니다. |
+| 원클릭 업데이트 | 하루 한 번 최신 정식 릴리즈를 확인하고, 사용자가 승인하면 서명을 검증한 설치 파일을 내려받아 업데이트 후 재시작합니다. |
 
 ### 데이터는 어디서 가져오나요?
 
@@ -154,7 +154,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 | 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 모니터 조합별 위치 기억·초기화, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
 | 색상 | 9개 팔레트, 도구·한도별 기본 4색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
-| 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 릴리즈 페이지, 최근 확인 결과 |
+| 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 서명 검증 업데이트·재시작, 릴리즈 페이지 fallback, 최근 확인 결과 |
 | 정보 카드 | 프로그램 설명, 현재 버전, 로컬 처리 원칙 |
 
 ### 업데이트 확인과 알림
@@ -166,7 +166,9 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 - 기본값은 켜짐이며 시작 15초 후, 마지막 성공 확인에서 24시간이 지난 경우에만 최신 정식 GitHub Release를 확인합니다.
 - 새 버전은 버전당 한 번 Windows 알림으로 안내하고 설정창에도 계속 확인 가능한 업데이트 띠를 표시합니다.
 - `업데이트 확인`은 24시간 캐시를 우회합니다. 자동 확인 실패는 조용히 넘어가고 수동 확인 실패만 설정창에 표시합니다.
-- Juice는 설치 파일을 자동으로 받거나 실행하지 않습니다. 사용자가 누른 경우에만 허용된 공식 Releases 페이지를 기본 브라우저로 엽니다.
+- `업데이트 및 재시작`을 누르면 다운로드·서명 확인 진행 상태를 표시하며 공식 릴리즈의 설치 파일을 내려받고, 앱에 내장된 공개키와 설치 파일 버전을 검증한 뒤 passive 설치와 재시작을 수행합니다.
+- 다운로드·서명·버전 검증 또는 업데이트 인계가 실패하면 현재 앱과 설정을 유지합니다. 설치가 끝나면 Juice가 설치된 버전을 다시 확인하고 앱을 재시작하며, 공식 Releases 페이지는 수동 설치가 필요한 경우를 위한 fallback으로 남습니다.
+- 앱 내 업데이터가 없는 v0.1.10 이하에서는 v0.1.11을 한 번 수동 설치해야 하며, 이후 정식 버전부터 원클릭 업데이트를 사용할 수 있습니다.
 - 확인 요청에는 GitHub token, Juice 계정, 사용량 데이터, 사용자 식별값, telemetry가 포함되지 않습니다.
 
 ### 정보와 로컬 처리 원칙
@@ -206,7 +208,7 @@ Claude와 Codex는 서로 다른 투명 창이므로 한쪽만 잡아 다른 모
 - **전체화면 숨김:** 신규 설치 기본값은 꺼짐입니다. 켜면 같은 모니터의 전체화면 앱을 감지할 때 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
 - **다중 모니터:** 각 바를 원하는 모니터 작업표시줄로 직접 끌어 놓으면 모니터와 상대 위치를 기억합니다.
 - **오래됨 표시:** 마지막 기록이 설정한 시간보다 오래되면 값이 오래된 상태임을 표시합니다.
-- **업데이트:** 최신 정식 릴리즈를 하루 한 번 확인하며 자동 다운로드나 자동 설치는 하지 않습니다.
+- **업데이트:** 최신 정식 릴리즈를 하루 한 번 확인하고, 사용자가 승인한 경우에만 서명 검증·설치·재시작을 진행합니다.
 
 ### 다른 PC에서 값이 안 보일 때
 
@@ -231,7 +233,7 @@ Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않�
 
 - Juice가 저장하는 설정과 수집 결과는 현재 PC에만 남으며 별도 Juice 서버로 전송하지 않습니다.
 - Claude 계정 자동 수집은 로컬 Claude Code OAuth token을 Anthropic의 Claude usage endpoint에만 보내 계정 한도를 조회합니다.
-- 업데이트 확인을 켜면 고정된 GitHub Release API로 표준 HTTPS 요청만 전송합니다. 계정 token, 사용량, PC 식별값은 보내지 않습니다.
+- 업데이트 확인은 고정된 GitHub `latest.json` 주소로 표준 HTTPS 요청만 전송합니다. 사용자가 설치를 승인하면 해당 manifest가 지정한 서명된 설치 파일만 내려받으며, 계정 token, 사용량, PC 식별값은 보내지 않습니다.
 - LLM API 키나 Juice 전용 계정을 저장하지 않습니다.
 - Claude OAuth usage endpoint는 Claude Code 내부 계약이라 향후 CLI 변경의 영향을 받을 수 있습니다. 실패하면 statusline과 구버전 `/usage` fallback만 유지합니다.
 - 별도 Juice 로그인이나 외부 토큰 저장소는 사용하지 않습니다.
@@ -255,7 +257,7 @@ Juice reads the **5-hour and weekly limits** from Claude Code and the Codex CLI 
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
 | Independent tool bars | Claude and Codex can be enabled independently. Disabling a tool stops both its bar and collection; each bar can still be moved and assigned to a monitor separately. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
-| Update notices | Checks the latest stable release once a day and offers notifications and a release link without automatic installation. |
+| One-click updates | Checks the latest stable release once a day and, after user approval, downloads a signed installer, verifies it, updates Juice, and restarts. |
 
 ### Where does the data come from?
 
@@ -371,7 +373,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup position memory and reset, fullscreen/maximized hiding, per-tool display and collection |
 | Colors | Nine palettes, four tool/limit base colors, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
-| Updates card | Automatic and manual checks, Releases page, and the latest check result |
+| Updates card | Automatic and manual checks, signed update and restart, Releases fallback, and the latest check result |
 | About card | Product description, current version, and local-processing policy |
 
 ### Update checks and notifications
@@ -383,7 +385,9 @@ The settings card is split into five task-focused tabs. Updates and About remain
 - Enabled by default. Juice checks the latest stable GitHub Release 15 seconds after startup only when 24 hours have passed since the last successful check.
 - A new version produces one Windows notification per version and a persistent update band in Settings.
 - `Check for updates` bypasses the 24-hour cache. Automatic failures stay quiet; manual failures are shown in Settings.
-- Juice never downloads or runs an installer automatically. It opens only the allowlisted official Releases page after a user action.
+- `Update and restart` shows download and signature-verification progress, fetches the installer from the official release, verifies its signature and embedded product version, and then performs a passive install and restart.
+- If download, signature, version validation, or updater handoff fails, the current app and settings remain intact. After installation, Juice verifies the installed version again and restarts the app; the official Releases page remains available as a manual-install fallback.
+- Versions up to v0.1.10 do not contain the in-app updater, so v0.1.11 must be installed manually once. Later stable releases can then use one-click updates.
 - Requests include no GitHub token, Juice account, usage data, user identifier, or telemetry.
 
 ### About and local processing
@@ -423,7 +427,7 @@ The `About` card contains only the current version, product purpose, and local-p
 - **Fullscreen hiding:** Off by default on a new installation. When enabled, it hides each bar while a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
 - **Multiple monitors:** Drag each bar onto a monitor's taskbar to remember that monitor and relative position.
 - **Stale state:** Marks data as old after the configured time since the last record.
-- **Updates:** Checks the latest stable release once a day without automatic download or installation.
+- **Updates:** Checks the latest stable release once a day and performs signature verification, installation, and restart only after user approval.
 
 ### If another PC shows no data
 
@@ -448,7 +452,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
 - Settings and collected results stored by Juice remain on the current PC and are not sent to a separate Juice server.
 - Claude account auto-collection sends the local Claude Code OAuth token only to Anthropic's Claude usage endpoint to read account limits.
-- When update checks are enabled, Juice sends only a standard HTTPS request to the fixed GitHub Release API. It sends no account token, usage data, or PC identifier.
+- Update checks send only a standard HTTPS request to the fixed GitHub `latest.json` endpoint. After user approval, Juice downloads only the signed installer named by that manifest. It sends no account token, usage data, or PC identifier.
 - Juice stores no LLM API key and requires no Juice account.
 - The Claude OAuth usage endpoint is an internal Claude Code contract and may change with future CLI versions. Juice falls back to statusline and legacy `/usage` data.
 - Juice uses no separate login flow or external token store.

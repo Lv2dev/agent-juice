@@ -75,5 +75,16 @@
         "installerHooks": "./windows/hooks.nsh"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1MEYxMTM3MzNDQ0FBNkEKUldScXFzd3pOeEVQMVpmeFQ3QmFvYjREbS9DQTI2N1AvYUgvVFA1V3d6MjhUOTFKVUs0d1FKOEwK",
+      "endpoints": [
+        "https://github.com/Lv2dev/agent-juice/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

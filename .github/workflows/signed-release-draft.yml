@@ -1,0 +1,405 @@
+name: Signed Release Draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without a leading v
+        required: true
+        type: string
+      release_body:
+        description: Approved Korean and English release notes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify unsigned Windows installer
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out approved main commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify immutable release commit
+        shell: powershell
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((git rev-parse HEAD).Trim() -ne $env:RELEASE_COMMIT) {
+            throw "checkout does not match the workflow release commit"
+          }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Verify requested version matches every source
+        shell: powershell
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = $env:INPUT_VERSION.Trim()
+          if ($expected -notmatch '^\d+\.\d+\.\d+$') { throw "invalid release version: $expected" }
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = Get-Content src-tauri\Cargo.toml -Raw
+          $cargoVersion = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          foreach ($actual in @($packageVersion, $tauriVersion, $cargoVersion)) {
+            if ($actual -ne $expected) { throw "version mismatch: expected $expected, got $actual" }
+          }
+
+      - name: Run JavaScript tests
+        run: npm test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build unsigned NSIS installer
+        run: npm run tauri -- build
+
+      - name: Stage installer and checksum
+        shell: powershell
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:INPUT_VERSION.Trim()
+          $expectedName = "Juice_${version}_x64-setup.exe"
+          $source = Join-Path "src-tauri\target\release\bundle\nsis" $expectedName
+          if (-not (Test-Path -LiteralPath $source)) { throw "missing NSIS installer: $source" }
+          $productVersion = (Get-Item -LiteralPath $source).VersionInfo.ProductVersion
+          if (($productVersion -split '\+')[0].Trim() -ne $version) {
+            throw "installer ProductVersion mismatch: $productVersion"
+          }
+          New-Item -ItemType Directory -Path release-artifact | Out-Null
+          Copy-Item -LiteralPath $source -Destination (Join-Path release-artifact $expectedName)
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash
+          [System.IO.File]::WriteAllText(
+            (Join-Path release-artifact "$expectedName.sha256"),
+            "$hash *$expectedName`n"
+          )
+          [System.IO.File]::WriteAllText(
+            (Join-Path release-artifact "release-commit.txt"),
+            "$env:GITHUB_SHA`n"
+          )
+
+      - name: Upload verified unsigned installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: juice-release-input-${{ github.sha }}
+          path: release-artifact
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-draft:
+    name: Sign installer and create protected draft
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the immutable signer source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+
+      - name: Install lockfile-verified signer dependencies without scripts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((git rev-parse HEAD).Trim() -ne "${{ github.sha }}") {
+            throw "signer source does not match the workflow release commit"
+          }
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw "failed to install lockfile-verified signer dependencies" }
+          if ((npx --no-install tauri --version) -notmatch '2\.11\.4$') {
+            throw "unexpected Tauri signer version"
+          }
+
+      - name: Download verified unsigned installer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: juice-release-input-${{ github.sha }}
+          path: release-artifact
+
+      - name: Revalidate installer before signing
+        shell: powershell
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:INPUT_VERSION.Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "invalid release version" }
+          $name = "Juice_${version}_x64-setup.exe"
+          $installer = Join-Path release-artifact $name
+          $checksum = Join-Path release-artifact "$name.sha256"
+          foreach ($path in @($installer, $checksum)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing release input: $path" }
+          }
+          $artifactCommit = (Get-Content -LiteralPath release-artifact\release-commit.txt -Raw).Trim()
+          if ($artifactCommit -ne $env:RELEASE_COMMIT) {
+            throw "build artifact commit mismatch"
+          }
+          $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          if ($actualHash -ne $expectedHash) { throw "build artifact SHA256 mismatch" }
+          $productVersion = (Get-Item -LiteralPath $installer).VersionInfo.ProductVersion
+          if (($productVersion -split '\+')[0].Trim() -ne $version) {
+            throw "installer ProductVersion mismatch: $productVersion"
+          }
+
+      - name: Sign only the verified installer
+        shell: powershell
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path release-artifact "Juice_$($env:INPUT_VERSION.Trim())_x64-setup.exe"
+          npx --no-install tauri signer sign $installer
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "$installer.sig")) {
+            throw "updater signing failed"
+          }
+
+      - name: Create signed manifest and draft release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_BODY: ${{ inputs.release_body }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:INPUT_VERSION.Trim()
+          $tag = "v$version"
+          $name = "Juice_${version}_x64-setup.exe"
+          $installer = Join-Path release-artifact $name
+          $signaturePath = "$installer.sig"
+          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          $url = "https://github.com/Lv2dev/agent-juice/releases/download/$tag/$name"
+          $manifest = [ordered]@{
+            version = $version
+            notes = $env:INPUT_RELEASE_BODY
+            pub_date = (Get-Date).ToUniversalTime().ToString("o")
+            platforms = [ordered]@{
+              "windows-x86_64-nsis" = [ordered]@{
+                signature = $signature
+                url = $url
+              }
+            }
+          }
+          [System.IO.File]::WriteAllText(
+            "release-artifact\latest.json",
+            ($manifest | ConvertTo-Json -Depth 8),
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          [System.IO.File]::WriteAllText("release-artifact\release-notes.md", $env:INPUT_RELEASE_BODY)
+          $assets = @(
+            $installer,
+            $signaturePath,
+            (Join-Path release-artifact "$name.sha256"),
+            "release-artifact\latest.json"
+          )
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
+          $tagLookupExit = $LASTEXITCODE
+          if ($tagLookupExit -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
+            throw "existing release tag points to a different commit"
+          }
+          if ($tagLookupExit -notin @(0, 1)) { throw "failed to inspect the release tag" }
+          $existingJson = gh release view $tag --json isDraft,tagName,targetCommitish 2>$null
+          $viewExit = $LASTEXITCODE
+          if ($viewExit -eq 0) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (-not $existing.isDraft -or $existing.targetCommitish -ne $env:RELEASE_COMMIT) {
+              throw "an existing release is not a draft for the immutable release commit"
+            }
+            gh release upload $tag $assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "failed to replace existing draft assets" }
+            gh release edit $tag `
+              --draft `
+              --target $env:RELEASE_COMMIT `
+              --title "Juice $tag" `
+              --notes-file release-artifact\release-notes.md
+          } elseif ($viewExit -eq 1) {
+            gh release create $tag `
+              $assets `
+              --draft `
+              --target $env:RELEASE_COMMIT `
+              --title "Juice $tag" `
+              --notes-file release-artifact\release-notes.md
+          } else {
+            throw "failed to inspect an existing release"
+          }
+          if ($LASTEXITCODE -ne 0) { throw "failed to create or update the draft release" }
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
+          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
+            throw "release tag changed after draft creation"
+          }
+          $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
+          $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
+          if ($LASTEXITCODE -ne 0 -or (Compare-Object $expectedAssets $actualAssets)) {
+            throw "draft release assets do not match the exact approved set"
+          }
+
+      - name: Verify remote draft assets and updater manifest
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:INPUT_VERSION.Trim()
+          $tag = "v$version"
+          $name = "Juice_${version}_x64-setup.exe"
+          $release = gh release view $tag --json isDraft,tagName,targetCommitish | ConvertFrom-Json
+          if (-not $release.isDraft) { throw "release must remain a draft" }
+          if ($release.tagName -ne $tag -or $release.targetCommitish -ne $env:RELEASE_COMMIT) {
+            throw "unexpected draft release target"
+          }
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
+          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
+            throw "remote release tag points to a different commit"
+          }
+          $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
+          $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
+          if ($LASTEXITCODE -ne 0 -or (Compare-Object $expectedAssets $actualAssets)) {
+            throw "remote draft contains an unexpected asset set"
+          }
+
+          $verify = Join-Path $env:RUNNER_TEMP "juice-release-$version"
+          New-Item -ItemType Directory -Path $verify | Out-Null
+          gh release download $tag --dir $verify
+          $latest = Get-Content (Join-Path $verify "latest.json") -Raw | ConvertFrom-Json
+          if ($latest.version -ne $version) { throw "latest.json version mismatch" }
+          $platform = $latest.platforms.'windows-x86_64-nsis'
+          if ($null -eq $platform -or [string]::IsNullOrWhiteSpace($platform.signature)) {
+            throw "latest.json has no signed Windows NSIS target"
+          }
+          $expectedUrl = "https://github.com/Lv2dev/agent-juice/releases/download/$tag/$name"
+          if ($platform.url -ne $expectedUrl) { throw "latest.json download URL mismatch" }
+
+          $installer = Join-Path $verify $name
+          $signature = "$installer.sig"
+          $checksum = Join-Path $verify "$name.sha256"
+          foreach ($path in @($installer, $signature, $checksum)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "missing release asset: $path" }
+          }
+          if ((Get-Content $signature -Raw).Trim() -ne $platform.signature.Trim()) {
+            throw "latest.json signature does not match the uploaded signature"
+          }
+          $expectedHash = ((Get-Content $checksum -Raw).Trim() -split '\s+')[0]
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          if ($actualHash -ne $expectedHash) { throw "remote installer SHA256 mismatch" }
+          $productVersion = (Get-Item -LiteralPath $installer).VersionInfo.ProductVersion
+          if (($productVersion -split '\+')[0].Trim() -ne $version) {
+            throw "remote installer ProductVersion mismatch"
+          }
+
+
+  verify-draft:
+    name: Verify protected draft against the immutable source
+    needs: sign-draft
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the immutable release commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Rust signature verifier
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Download and cryptographically verify the protected draft
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((git rev-parse HEAD).Trim() -ne $env:RELEASE_COMMIT) {
+            throw "verification source does not match the workflow release commit"
+          }
+          $version = $env:INPUT_VERSION.Trim()
+          $tag = "v$version"
+          $name = "Juice_${version}_x64-setup.exe"
+          $release = gh release view $tag --json isDraft,targetCommitish | ConvertFrom-Json
+          if (-not $release.isDraft -or $release.targetCommitish -ne $env:RELEASE_COMMIT) {
+            throw "draft target changed before cryptographic verification"
+          }
+          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
+          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
+            throw "draft tag changed before cryptographic verification"
+          }
+          $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
+          $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
+          if ($LASTEXITCODE -ne 0 -or (Compare-Object $expectedAssets $actualAssets)) {
+            throw "draft assets changed before cryptographic verification"
+          }
+          $verify = Join-Path $env:RUNNER_TEMP "juice-verified-draft-$version"
+          New-Item -ItemType Directory -Path $verify | Out-Null
+          gh release download $tag --dir $verify
+          if ($LASTEXITCODE -ne 0) { throw "failed to download the protected draft" }
+          $env:JUICE_UPDATER_ARTIFACT = Join-Path $verify $name
+          $env:JUICE_UPDATER_SIGNATURE = "$env:JUICE_UPDATER_ARTIFACT.sig"
+          cargo test --manifest-path src-tauri/Cargo.toml --test updater_signature -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw "remote updater signature verification failed" }

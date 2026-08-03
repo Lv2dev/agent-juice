@@ -28,6 +28,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 
 const TASKBAR_DOCK_PADDING: f32 = 0.0;
 const TASKBAR_FULL_TEXT_BUDGET: f32 = 179.0;
@@ -56,11 +57,30 @@ const CLAUDE_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
 const TRAY_ID: &str = "juice";
 const TRAY_ICON_IDS: [&str; 1] = [TRAY_ID];
 const UPDATE_START_DELAY_SECS: u64 = 15;
+const UPDATE_CHECK_TIMEOUT_SECS: u64 = 20;
+const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+
+static UPDATE_OPERATION_GATE: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
 
 #[derive(Clone, serde::Serialize)]
 struct TaskbarDraggingPayload {
     tool: &'static str,
     dragging: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum UpdateInstallEvent {
+    Started {
+        version: String,
+    },
+    Progress {
+        downloaded_bytes: u64,
+        content_length: Option<u64>,
+    },
+    Verifying,
+    Installing,
 }
 
 #[derive(Default)]
@@ -429,16 +449,30 @@ pub fn tray_quit_menu_id() -> &'static str {
     "juice-quit"
 }
 
-fn exit_after_taskbar_cleanup(app: tauri::AppHandle) {
+fn begin_native_shutdown(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<TaskbarShutdownState>() {
         state.0.store(true, Ordering::Release);
     }
     if let Some(shutdown) = app.try_state::<system_activity::SystemActivityShutdown>() {
         shutdown.stop();
     }
+}
+
+fn exit_after_taskbar_cleanup(app: tauri::AppHandle) {
+    begin_native_shutdown(&app);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         app.exit(0);
+    });
+}
+
+fn exit_after_update_cleanup(app: tauri::AppHandle) {
+    begin_native_shutdown(&app);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.exit(0);
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::process::exit(0);
     });
 }
 
@@ -2922,13 +2956,41 @@ fn update_error_result() -> update::UpdateCheckResult {
     }
 }
 
-async fn run_update_check(force: bool) -> Result<update::UpdateCheckResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        update::check_for_update(env!("CARGO_PKG_VERSION"), force)
-    })
-    .await
-    .map_err(|_| "update check task failed".to_string())?
-    .map_err(|_| "update check failed".to_string())
+fn updater_with_timeout(
+    app: &tauri::AppHandle,
+    timeout_secs: u64,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    app.updater_builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|_| "update client unavailable".to_string())
+}
+
+async fn run_update_check(
+    app: &tauri::AppHandle,
+    force: bool,
+) -> Result<update::UpdateCheckResult, String> {
+    if !update::update_check_is_due(force) {
+        return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
+    }
+    let Ok(_guard) = UPDATE_OPERATION_GATE.try_lock() else {
+        return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
+    };
+    if !update::update_check_is_due(force) {
+        return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
+    }
+
+    let available = updater_with_timeout(app, UPDATE_CHECK_TIMEOUT_SECS)?
+        .check()
+        .await
+        .map_err(|_| "update check failed".to_string())?;
+    update::record_update_check(
+        env!("CARGO_PKG_VERSION"),
+        available
+            .as_ref()
+            .map(|candidate| candidate.version.as_str()),
+    )
+    .map_err(|_| "update state save failed".to_string())
 }
 
 fn show_update_notification(app: &tauri::AppHandle, result: &update::UpdateCheckResult) {
@@ -2995,7 +3057,7 @@ fn spawn_update_check(app: tauri::AppHandle) {
         if !settings.update_check_on {
             return;
         }
-        let Ok(result) = run_update_check(false).await else {
+        let Ok(result) = run_update_check(&app, false).await else {
             return;
         };
         show_update_notification(&app, &result);
@@ -3015,11 +3077,110 @@ async fn check_for_updates(
     app: tauri::AppHandle,
 ) -> Result<update::UpdateCheckResult, String> {
     ensure_panel_command(window.label())?;
-    let result = run_update_check(true)
+    let result = run_update_check(&app, true)
         .await
         .unwrap_or_else(|_| update_error_result());
     let _ = app.emit("update-status", &result);
     Ok(result)
+}
+
+#[tauri::command]
+async fn install_update(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    expected_version: String,
+    on_event: tauri::ipc::Channel<UpdateInstallEvent>,
+) -> Result<(), String> {
+    ensure_panel_command(window.label())?;
+    drop(window);
+    let expected = update::release_info_for_version(&expected_version)
+        .map_err(|_| "invalid expected update version".to_string())?;
+    let _guard = UPDATE_OPERATION_GATE
+        .try_lock()
+        .map_err(|_| "update operation already in progress".to_string())?;
+    let updater = updater_with_timeout(&app, UPDATE_DOWNLOAD_TIMEOUT_SECS)?;
+    let available = tokio::time::timeout(
+        std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS),
+        updater.check(),
+    )
+    .await
+    .map_err(|_| "update check timed out".to_string())?
+    .map_err(|_| "update check failed".to_string())?
+    .ok_or_else(|| "update is no longer available".to_string())?;
+    let actual = update::release_info_for_version(&available.version)
+        .map_err(|_| "invalid available update version".to_string())?;
+    if actual.version != expected.version {
+        return Err("available update changed; check again".to_string());
+    }
+    if !update::is_updater_asset_url_allowed(available.download_url.as_str(), &actual.version) {
+        return Err("update download URL is not allowed".to_string());
+    }
+
+    let _ = on_event.send(UpdateInstallEvent::Started {
+        version: actual.version.clone(),
+    });
+    let downloaded = std::sync::Arc::new(AtomicU64::new(0));
+    let progress_downloaded = downloaded.clone();
+    let progress_events = on_event.clone();
+    let verifying_events = on_event.clone();
+    let oversize = std::sync::Arc::new(AtomicBool::new(false));
+    let oversize_progress = oversize.clone();
+    let oversize_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let oversize_progress_notify = oversize_notify.clone();
+    let download = available.download(
+        move |chunk_length, content_length| {
+            let total = progress_downloaded
+                .fetch_add(chunk_length as u64, Ordering::Relaxed)
+                .saturating_add(chunk_length as u64);
+            if update::update_package_size_is_allowed(total, content_length) {
+                let _ = progress_events.send(UpdateInstallEvent::Progress {
+                    downloaded_bytes: total,
+                    content_length,
+                });
+            } else if !oversize_progress.swap(true, Ordering::AcqRel) {
+                oversize_progress_notify.notify_one();
+            }
+        },
+        move || {
+            let _ = verifying_events.send(UpdateInstallEvent::Verifying);
+        },
+    );
+    tokio::pin!(download);
+    let bytes = tokio::select! {
+        result = &mut download => result
+            .map_err(|_| "update download or signature verification failed".to_string())?,
+        _ = oversize_notify.notified() => {
+            return Err("update package exceeds the size limit".to_string());
+        },
+    };
+    if !update::update_package_size_is_allowed(bytes.len() as u64, Some(bytes.len() as u64)) {
+        return Err("update package exceeds the size limit".to_string());
+    }
+
+    let version = actual.version.clone();
+    let installer = tauri::async_runtime::spawn_blocking(move || {
+        update::prepare_verified_installer(&bytes, &version)
+    })
+    .await
+    .map_err(|_| "update installer validation task failed".to_string())?
+    .map_err(|_| "update installer version validation failed".to_string())?;
+
+    let launch_path = installer.clone();
+    let launch_version = actual.version.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = update::spawn_update_helper(&launch_path, &launch_version);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&launch_path);
+        }
+        result
+    })
+    .await
+    .map_err(|_| "update helper launch task failed".to_string())?
+    .map_err(|error| format!("update helper could not be started: {error}"))?;
+
+    let _ = on_event.send(UpdateInstallEvent::Installing);
+    exit_after_update_cleanup(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -4918,18 +5079,23 @@ pub fn run() {
         }
     };
 
+    #[cfg(windows)]
+    update::start_update_temp_cleanup();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_activity,
             refresh_status,
             get_update_status,
             check_for_updates,
+            install_update,
             open_release_page,
             get_settings,
             save_settings,

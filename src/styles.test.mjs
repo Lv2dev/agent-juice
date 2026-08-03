@@ -17,6 +17,9 @@ const i18nJs = existsSync(i18nJsPath)
 const tauriConfig = JSON.parse(
   readFileSync(resolve(here, "../src-tauri/tauri.conf.json"), "utf8"),
 );
+const updaterConfig = JSON.parse(
+  readFileSync(resolve(here, "../src-tauri/tauri.updater.conf.json"), "utf8"),
+);
 const packageJson = JSON.parse(readFileSync(resolve(here, "../package.json"), "utf8"));
 const packageLock = JSON.parse(readFileSync(resolve(here, "../package-lock.json"), "utf8"));
 const cargoToml = readFileSync(resolve(here, "../src-tauri/Cargo.toml"), "utf8");
@@ -62,6 +65,9 @@ const runtimeVerifier = readOptional(resolve(here, "../.ai/scripts/verify-g3.86-
 const runtimeRestoreVerifier = readOptional(resolve(here, "../.ai/scripts/verify-g3.103-runtime.ps1"));
 const cargoConfig = readOptional(resolve(here, "../.cargo/config.toml"));
 const windowsCi = readOptional(resolve(here, "../.github/workflows/windows-ci.yml"));
+const signedReleaseWorkflow = readOptional(
+  resolve(here, "../.github/workflows/signed-release-draft.yml"),
+);
 const runtimeSmoke = readOptional(resolve(here, "../.github/scripts/runtime-smoke.ps1"));
 const barMarkup = readFileSync(resolve(here, "bar.html"), "utf8").replace(/\r\n?/g, "\n");
 
@@ -1218,17 +1224,22 @@ test("about and update sections keep product copy separate from guarded update c
   const about = markupSection("about");
   const update = markupSection("update");
 
-  assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="open-available-release"/);
+  assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="install-update"/);
   assert.match(about, /Claude Code와 Codex의 5시간·주간 사용량/);
   assert.match(about, /별도 Juice 서버에 저장하지 않습니다/);
   assert.match(update, /name="update_check_on" checked/);
   assert.match(update, /data-action="check-updates"/);
+  assert.match(update, /data-action="install-update"/);
   assert.match(update, /data-action="open-releases"/);
   assert.doesNotMatch(about, /name="update_check_on"|data-action="check-updates"/);
   assert.match(settingsJs, /invoke\("get_update_status"\)/);
   assert.match(settingsJs, /invoke\("check_for_updates"\)/);
+  assert.match(settingsJs, /new Channel\(\)/);
+  assert.match(settingsJs, /invoke\("install_update", \{ expectedVersion: version, onEvent \}\)/);
   assert.match(settingsJs, /invoke\("open_release_page", \{ url:/);
   assert.match(rustLib, /plugin\(tauri_plugin_notification::init\(\)\)/);
+  assert.match(rustLib, /plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
+  assert.match(rustLib, /async fn install_update[\s\S]*ensure_panel_command\(window\.label\(\)\)\?/);
   assert.match(rustLib, /spawn_update_check\(app\.handle\(\)\.clone\(\)\)/);
   const notification = rustLib.match(/fn show_update_notification[\s\S]*?\n}\n\nfn notification_uses_korean/)?.[0] ?? "";
   assert.match(notification, /Settings::try_load\(\)/);
@@ -1241,12 +1252,72 @@ test("about and update sections keep product copy separate from guarded update c
   assert.match(i18nJs, /"status\.updateFailed": "Could not check for updates/);
 });
 
-test("manual update checks keep the Windows curl process hidden", () => {
-  assert.match(rustUpdate, /#\[cfg\(windows\)\][\s\S]*use std::os::windows::process::CommandExt;/);
-  assert.match(
-    rustUpdate,
-    /fn fetch_latest_release\(\)[\s\S]*command\.creation_flags\(0x08000000\);[\s\S]*command_output_with_input/,
+test("updates use one signed HTTPS manifest without exposing updater capability to WebViews", () => {
+  assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
+    "https://github.com/Lv2dev/agent-juice/releases/latest/download/latest.json",
+  ]);
+  assert.match(tauriConfig.plugins.updater.pubkey, /^[A-Za-z0-9+/=]+$/);
+  assert.equal(tauriConfig.plugins.updater.windows.installMode, "passive");
+  assert.equal(updaterConfig.bundle.createUpdaterArtifacts, true);
+  assert.match(cargoToml, /tauri-plugin-updater = "2\.10\.1"/);
+  assert.doesNotMatch(rustUpdate, /api\.github\.com|curl\.exe|fetch_latest_release/);
+  assert.match(rustLib, /UPDATE_OPERATION_GATE[\s\S]*available\.download\(/);
+  assert.match(rustLib, /available update changed; check again/);
+  assert.match(rustLib, /is_updater_asset_url_allowed/);
+  assert.match(rustLib, /update_package_size_is_allowed/);
+  assert.match(rustLib, /prepare_verified_installer/);
+  assert.match(rustLib, /spawn_update_helper/);
+  assert.match(rustLib, /exit_after_update_cleanup\(app\)/);
+  assert.doesNotMatch(rustLib, /\.download_and_install\(/);
+  assert.doesNotMatch(rustLib, /launch_verified_installer/);
+  for (const capability of capabilities) {
+    assert.doesNotMatch(JSON.stringify(capability.permissions), /updater|process/);
+  }
+});
+
+test("signed updater releases are manual draft-only jobs with isolated secrets and remote verification", () => {
+  assert.match(signedReleaseWorkflow, /^on:\n\s+workflow_dispatch:/m);
+  assert.doesNotMatch(signedReleaseWorkflow, /^\s+(push|pull_request|schedule):/m);
+  assert.match(signedReleaseWorkflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(signedReleaseWorkflow, /github\.actor == github\.repository_owner/);
+  assert.match(signedReleaseWorkflow, /^\s{2}build:\n[\s\S]*^\s{2}sign-draft:/m);
+  assert.match(signedReleaseWorkflow, /^\s{2}verify-draft:/m);
+  assert.match(signedReleaseWorkflow, /^\s+environment: release$/m);
+  assert.match(signedReleaseWorkflow, /Build unsigned NSIS installer/);
+  assert.match(signedReleaseWorkflow, /Sign only the verified installer/);
+  assert.match(signedReleaseWorkflow, /gh release create[\s\S]*--draft/);
+  const unsignedBuildJob = signedReleaseWorkflow.match(/^  build:\n[\s\S]*?^  sign-draft:/m)?.[0] ?? "";
+  assert.doesNotMatch(unsignedBuildJob, /TAURI_SIGNING_PRIVATE_KEY|contents: write/);
+  const signingJob = signedReleaseWorkflow.match(/^  sign-draft:\n[\s\S]*?^  verify-draft:/m)?.[0] ?? "";
+  assert.match(signingJob, /actions\/checkout@[0-9a-f]{40}/);
+  assert.match(signingJob, /npm ci --ignore-scripts/);
+  assert.match(signingJob, /npx --no-install tauri --version/);
+  assert.match(signingJob, /npx --no-install tauri signer sign \$installer/);
+  assert.doesNotMatch(signingJob, /npm install --global|npm run tauri/);
+  assert.match(signedReleaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
+  assert.match(signedReleaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/);
+  assert.doesNotMatch(signedReleaseWorkflow, /tauri-apps\/tauri-action/);
+  assert.doesNotMatch(signedReleaseWorkflow, /\$\w+\s*=\s*"\$\{\{ inputs\./);
+  assert.match(signedReleaseWorkflow, /INPUT_VERSION: \$\{\{ inputs\.version \}\}/);
+  assert.match(signedReleaseWorkflow, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(signedReleaseWorkflow, /--target \$env:RELEASE_COMMIT/);
+  assert.match(signedReleaseWorkflow, /gh release upload \$tag \$assets --clobber/);
+  assert.match(signedReleaseWorkflow, /commits\/\$tag[\s\S]*release tag points to a different commit/);
+  assert.match(signedReleaseWorkflow, /Compare-Object \$expectedAssets \$actualAssets/);
+  assert.match(signedReleaseWorkflow, /latest\.json download URL mismatch/);
+  assert.match(signedReleaseWorkflow, /latest\.json signature does not match the uploaded signature/);
+  assert.match(signedReleaseWorkflow, /remote installer SHA256 mismatch/);
+  assert.match(signedReleaseWorkflow, /remote installer ProductVersion mismatch/);
+  assert.match(signedReleaseWorkflow, /--test updater_signature -- --ignored/);
+  assert.match(signedReleaseWorkflow, /remote updater signature verification failed/);
+  const uses = [...signedReleaseWorkflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map(
+    (match) => match[1],
   );
+  assert.ok(uses.length >= 5);
+  for (const action of uses) {
+    assert.match(action, /^[^@\s]+@[0-9a-f]{40}$/);
+  }
+  assert.doesNotMatch(windowsCi, /TAURI_SIGNING_PRIVATE_KEY|createUpdaterArtifacts|uploadUpdaterJson/);
 });
 
 test("public README and release template are the only tracked markdown exceptions", (t) => {
@@ -1263,6 +1334,10 @@ test("public README and release template are the only tracked markdown exception
   assert.doesNotMatch(readme, /Connect Claude/);
   assert.match(readme, /Claude가 활성화되어 있으면 Juice 설치본은 시작할 때 statusline 수집 연결을 비파괴·멱등으로 조정합니다/);
   assert.match(readme, /When Claude is enabled, the installed app non-destructively and idempotently reconciles its statusline collection/);
+  assert.match(readme, /업데이트 및 재시작/);
+  assert.match(readme, /Update and restart/);
+  assert.match(readme, /v0\.1\.11을 한 번 수동 설치/);
+  assert.match(readme, /v0\.1\.11 must be installed manually once/);
 });
 
 test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {

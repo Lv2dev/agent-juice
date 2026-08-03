@@ -22,6 +22,12 @@ const activityScalePreview = document.querySelector("[data-activity-scale-previe
 const updateBand = document.querySelector("#update-band");
 const updateVersionEl = document.querySelector("[data-update-version]");
 const updateStatusEl = document.querySelector("#update-check-status");
+const updateInstallProgressEls = [...(document.querySelectorAll?.("[data-update-install-progress]") ?? [])];
+const updateProgressBars = [...(document.querySelectorAll?.("[data-update-progress-bar]") ?? [])];
+const updateProgressTexts = [...(document.querySelectorAll?.("[data-update-progress-text]") ?? [])];
+const updateFallbackButtons = [...(document.querySelectorAll?.("[data-update-fallback]") ?? [])];
+const updateInstallButtons = [...(document.querySelectorAll?.('[data-action="install-update"]') ?? [])];
+const updateActionButtons = [...(document.querySelectorAll?.('[data-action^="install-update"], [data-action="check-updates"]') ?? [])];
 const appVersionEls = document.querySelectorAll?.("[data-app-version]") ?? [];
 const settingsTabs = [...(document.querySelectorAll?.("[data-settings-tab]") ?? [])];
 const settingsTabPanels = [...(document.querySelectorAll?.("[data-settings-tab-panel]") ?? [])];
@@ -33,6 +39,7 @@ let savedRevision = 0;
 let saveQueue = Promise.resolve();
 let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
+let updateInstallPromise = null;
 let toastTimer = null;
 let toastHideTimer = null;
 let settingsEventGeneration = 0;
@@ -491,6 +498,7 @@ function renderUpdateStatus(result) {
 
   const updateAvailable = state?.status === "update_available" && state?.release_url;
   if (updateBand) updateBand.hidden = !updateAvailable;
+  for (const button of updateInstallButtons) button.hidden = !updateAvailable;
   if (updateVersionEl) {
     updateVersionEl.textContent = state?.latest_version ? `v${state.latest_version}` : "";
   }
@@ -505,6 +513,108 @@ function renderUpdateStatus(result) {
         : "status.updateUnknown";
   updateStatusEl.textContent = t(key, language);
   updateStatusEl.dataset.state = state?.status ?? "unknown";
+}
+
+function setUpdateInstallBusy(busy) {
+  for (const button of updateActionButtons) button.disabled = busy;
+  if (updateBand) updateBand.setAttribute?.("aria-busy", String(busy));
+  if (form) {
+    form.inert = busy;
+    form.setAttribute?.("aria-disabled", String(busy));
+  }
+}
+
+function setUpdateFallbackVisible(visible) {
+  for (const button of updateFallbackButtons) button.hidden = !visible;
+}
+
+function showUpdateProgress(percent, text, state = "progress") {
+  const determinate = percent !== null && percent !== undefined && Number.isFinite(Number(percent));
+  const value = determinate ? Math.max(0, Math.min(100, Math.round(Number(percent)))) : 0;
+  for (const progress of updateInstallProgressEls) {
+    progress.hidden = false;
+    progress.dataset.state = state;
+    progress.setAttribute?.("aria-valuetext", text);
+    if (determinate) progress.setAttribute?.("aria-valuenow", String(value));
+    else progress.removeAttribute?.("aria-valuenow");
+  }
+  for (const bar of updateProgressBars) bar.style.width = determinate ? `${value}%` : "35%";
+  for (const progressText of updateProgressTexts) progressText.textContent = text;
+}
+
+function renderUpdateInstallEvent(event) {
+  const language = currentLanguageSettings();
+  if (event?.event === "progress") {
+    const downloaded = Number(event.downloaded_bytes) || 0;
+    const total = Number(event.content_length) || 0;
+    const percent = total > 0 ? (downloaded / total) * 100 : null;
+    const progress = total > 0
+      ? t("status.updateProgress", language).replace("{percent}", String(Math.round(percent)))
+      : t("status.updateDownloading", language);
+    showUpdateProgress(percent, progress, total > 0 ? "downloading" : "indeterminate");
+    if (updateStatusEl) updateStatusEl.dataset.state = "downloading";
+    return;
+  }
+
+  const key = event?.event === "installing"
+    ? "status.updateInstalling"
+    : event?.event === "verifying"
+      ? "status.updateVerifying"
+    : event?.event === "started"
+      ? "status.updateDownloading"
+      : "status.updatePreparing";
+  if (updateStatusEl) {
+    updateStatusEl.textContent = t(key, language);
+    updateStatusEl.dataset.state = event?.event ?? "preparing";
+  }
+  const percent = event?.event === "installing" ? 100 : event?.event === "verifying" ? null : 0;
+  showUpdateProgress(percent, t(key, language), event?.event ?? "preparing");
+}
+
+async function installAvailableUpdate() {
+  if (updateInstallPromise) return updateInstallPromise;
+  const version = currentUpdateStatus?.latest_version;
+  const Channel = tauriApi().core?.Channel;
+  if (!version || typeof Channel !== "function") {
+    const message = t("status.updateInstallFailed", currentLanguageSettings());
+    if (updateStatusEl) {
+      updateStatusEl.textContent = message;
+      updateStatusEl.dataset.state = "error";
+    }
+    showUpdateProgress(0, message, "error");
+    setUpdateFallbackVisible(true);
+    return;
+  }
+
+  const onEvent = new Channel();
+  onEvent.onmessage = renderUpdateInstallEvent;
+  setUpdateInstallBusy(true);
+  setUpdateFallbackVisible(false);
+  renderUpdateInstallEvent({ event: "preparing" });
+  let stage = "saving";
+  let handoffAccepted = false;
+  const attempt = (async () => {
+    await enqueueLatestSettingsSave({ failOnRollback: true });
+    stage = "installing";
+    await invoke("install_update", { expectedVersion: version, onEvent });
+    handoffAccepted = true;
+  })();
+  updateInstallPromise = attempt;
+  try {
+    await attempt;
+  } catch {
+    const key = stage === "saving" ? "status.updateSettingsSaveFailed" : "status.updateInstallFailed";
+    const message = t(key, currentLanguageSettings());
+    if (updateStatusEl) {
+      updateStatusEl.textContent = message;
+      updateStatusEl.dataset.state = "error";
+    }
+    showUpdateProgress(0, message, "error");
+    setUpdateFallbackVisible(true);
+  } finally {
+    if (updateInstallPromise === attempt) updateInstallPromise = null;
+    if (!handoffAccepted) setUpdateInstallBusy(false);
+  }
 }
 
 async function loadUpdateStatus() {
@@ -546,7 +656,7 @@ async function rollbackFailedSave(revision, error) {
   if (!recovered) throw error;
 }
 
-function enqueueLatestSettingsSave() {
+function enqueueLatestSettingsSave({ failOnRollback = false } = {}) {
   clearTimeout(autosaveTimer);
   autosaveTimer = null;
   if (!hasLoadedSettings || localRevision <= savedRevision) return saveQueue;
@@ -556,7 +666,10 @@ function enqueueLatestSettingsSave() {
   saveQueue = saveQueue
     .catch(() => {})
     .then(() => saveSettings(input, revision))
-    .catch((error) => rollbackFailedSave(revision, error));
+    .catch(async (error) => {
+      await rollbackFailedSave(revision, error);
+      if (failOnRollback) throw error;
+    });
   return saveQueue;
 }
 
@@ -632,12 +745,13 @@ async function runAction(action) {
     }
     return;
   }
+  if (action === "install-update") {
+    await installAvailableUpdate();
+    return;
+  }
   if (action === "open-releases") {
     await invoke("open_release_page", { url: null });
     return;
-  }
-  if (action === "open-available-release" && currentUpdateStatus?.release_url) {
-    await invoke("open_release_page", { url: currentUpdateStatus.release_url });
   }
 }
 
