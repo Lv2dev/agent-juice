@@ -1323,6 +1323,7 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.match(signedReleaseWorkflow, /--target \$env:RELEASE_COMMIT/);
   assert.match(signedReleaseWorkflow, /gh release upload \$tag \$assets --clobber/);
   assert.match(signedReleaseWorkflow, /commits\/\$tag[\s\S]*release tag points to a different commit/);
+  assert.equal((signedReleaseWorkflow.match(/commits\/\$tag/g) ?? []).length, 1);
   assert.match(signedReleaseWorkflow, /Compare-Object \$expectedAssets \$actualAssets/);
   assert.match(signedReleaseWorkflow, /latest\.json download URL mismatch/);
   assert.match(signedReleaseWorkflow, /latest\.json signature does not match the uploaded signature/);
