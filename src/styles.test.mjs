@@ -1306,6 +1306,14 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.match(signingJob, /npx --no-install tauri --version/);
   assert.match(signingJob, /npx --no-install tauri signer sign \$installer/);
   assert.doesNotMatch(signingJob, /npm install --global|npm run tauri/);
+  assert.match(
+    signingJob,
+    /\$ErrorActionPreference = "Continue"\n\s+\$tagCommit = gh api[\s\S]*?\$tagLookupExit = \$LASTEXITCODE\n\s+\$ErrorActionPreference = "Stop"/,
+  );
+  assert.match(
+    signingJob,
+    /\$ErrorActionPreference = "Continue"\n\s+\$existingJson = gh release view[\s\S]*?\$viewExit = \$LASTEXITCODE\n\s+\$ErrorActionPreference = "Stop"/,
+  );
   assert.match(signedReleaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(signedReleaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/);
   assert.doesNotMatch(signedReleaseWorkflow, /tauri-apps\/tauri-action/);
