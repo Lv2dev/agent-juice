@@ -1293,6 +1293,13 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.match(signedReleaseWorkflow, /gh release create[\s\S]*--draft/);
   const unsignedBuildJob = signedReleaseWorkflow.match(/^  build:\n[\s\S]*?^  sign-draft:/m)?.[0] ?? "";
   assert.doesNotMatch(unsignedBuildJob, /TAURI_SIGNING_PRIVATE_KEY|contents: write/);
+  assert.match(unsignedBuildJob, /actions\/setup-python@[0-9a-f]{40}/);
+  assert.match(unsignedBuildJob, /python-version: "3\.13"/);
+  assert.match(unsignedBuildJob, /python -m pip install --disable-pip-version-check pillow/);
+  assert.ok(
+    unsignedBuildJob.indexOf("Install image test dependency") <
+      unsignedBuildJob.indexOf("Run JavaScript tests"),
+  );
   const signingJob = signedReleaseWorkflow.match(/^  sign-draft:\n[\s\S]*?^  verify-draft:/m)?.[0] ?? "";
   assert.match(signingJob, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(signingJob, /npm ci --ignore-scripts/);
