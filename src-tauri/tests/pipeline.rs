@@ -7,18 +7,35 @@ use agent_juice::{
 use chrono::{TimeZone, Utc};
 use std::{
     fs,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn unique_temp_dir() -> std::path::PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "agent-juice-pipeline-test-{}-{suffix}",
-        std::process::id()
+        "agent-juice-pipeline-test-{}-{suffix}-{sequence}",
+        std::process::id(),
     ))
+}
+
+#[test]
+fn temp_fixture_paths_are_unique_across_parallel_calls() {
+    let workers: Vec<_> = (0..32)
+        .map(|_| std::thread::spawn(unique_temp_dir))
+        .collect();
+    let paths: std::collections::HashSet<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+
+    assert_eq!(paths.len(), 32);
 }
 
 #[test]
