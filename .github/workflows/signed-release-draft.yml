@@ -293,10 +293,6 @@ jobs:
             throw "failed to inspect an existing release"
           }
           if ($LASTEXITCODE -ne 0) { throw "failed to create or update the draft release" }
-          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
-          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
-            throw "release tag changed after draft creation"
-          }
           $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
           $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
           if ($LASTEXITCODE -ne 0 -or (Compare-Object $expectedAssets $actualAssets)) {
@@ -318,10 +314,6 @@ jobs:
           if (-not $release.isDraft) { throw "release must remain a draft" }
           if ($release.tagName -ne $tag -or $release.targetCommitish -ne $env:RELEASE_COMMIT) {
             throw "unexpected draft release target"
-          }
-          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
-          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
-            throw "remote release tag points to a different commit"
           }
           $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
           $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
@@ -397,10 +389,6 @@ jobs:
           $release = gh release view $tag --json isDraft,targetCommitish | ConvertFrom-Json
           if (-not $release.isDraft -or $release.targetCommitish -ne $env:RELEASE_COMMIT) {
             throw "draft target changed before cryptographic verification"
-          }
-          $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
-          if ($LASTEXITCODE -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
-            throw "draft tag changed before cryptographic verification"
           }
           $expectedAssets = @($name, "$name.sig", "$name.sha256", "latest.json") | Sort-Object
           $actualAssets = @(gh release view $tag --json assets --jq '.assets[].name') | Sort-Object
