@@ -258,14 +258,18 @@ jobs:
             (Join-Path release-artifact "$name.sha256"),
             "release-artifact\latest.json"
           )
+          $ErrorActionPreference = "Continue"
           $tagCommit = gh api "repos/$env:GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>$null
           $tagLookupExit = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
           if ($tagLookupExit -eq 0 -and $tagCommit.Trim() -ne $env:RELEASE_COMMIT) {
             throw "existing release tag points to a different commit"
           }
           if ($tagLookupExit -notin @(0, 1)) { throw "failed to inspect the release tag" }
+          $ErrorActionPreference = "Continue"
           $existingJson = gh release view $tag --json isDraft,tagName,targetCommitish 2>$null
           $viewExit = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
           if ($viewExit -eq 0) {
             $existing = $existingJson | ConvertFrom-Json
             if (-not $existing.isDraft -or $existing.targetCommitish -ne $env:RELEASE_COMMIT) {
