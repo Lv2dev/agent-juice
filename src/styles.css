@@ -367,6 +367,19 @@ h1::before {
   flex: 0 0 auto;
 }
 
+.update-band-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.update-band-progress {
+  width: min(360px, 52vw);
+  padding: 3px 0 0;
+}
+
 .tool-card {
   position: relative;
   min-width: 0;
@@ -2784,6 +2797,65 @@ input[type="range"]::-moz-range-thumb {
   padding: 2px 4px;
 }
 
+.update-install-action,
+.update-band [data-action="install-update"] {
+  border-color: color-mix(in srgb, var(--ok) 46%, var(--line-strong));
+  color: color-mix(in srgb, var(--ok) 74%, var(--text));
+  background: color-mix(in srgb, var(--ok) 11%, var(--field));
+}
+
+.update-install-action:hover:not(:disabled),
+.update-band [data-action="install-update"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ok) 64%, var(--line-strong));
+  background: color-mix(in srgb, var(--ok) 17%, var(--field));
+}
+
+.update-install-progress {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 2px 4px;
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+
+.update-install-progress[hidden] {
+  display: none;
+}
+
+.update-install-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 13%, transparent);
+}
+
+.update-install-track i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ok);
+  transition: width 120ms ease-out;
+}
+
+.update-install-progress[data-state="indeterminate"] .update-install-track i,
+.update-install-progress[data-state="verifying"] .update-install-track i {
+  background: color-mix(in srgb, var(--ok) 62%, var(--text-muted));
+}
+
+.update-install-progress[data-state="error"] {
+  color: var(--danger);
+}
+
+.update-install-progress[data-state="error"] .update-install-track i {
+  background: var(--danger);
+}
+
 .update-check-status {
   grid-column: 1 / -1;
   min-height: 16px;
@@ -2917,6 +2989,19 @@ button[type="submit"] {
 }
 
 @media (max-width: 560px) {
+  .update-band {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .update-band-actions {
+    justify-content: flex-start;
+  }
+
+  .update-band-progress {
+    width: 100%;
+  }
+
   .effect-picker {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

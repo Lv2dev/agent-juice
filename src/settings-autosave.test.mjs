@@ -34,6 +34,9 @@ test("settings form auto-saves changed values without a submit button", async ()
   let deferSaveResponses = false;
   let deferClearResponse = false;
   let failNextSave = false;
+  let installUpdateCalls = 0;
+  let resolveInstallUpdate = null;
+  let installEventChannel = null;
   let persistedSettings = { maximized_hide_on: true, language: "ko" };
   const eventHandlers = {};
   const listenerOrder = [];
@@ -55,6 +58,47 @@ test("settings form auto-saves changed values without a submit button", async ()
   const indicatorTrackColorRow = { dataset: {} };
   const fullResetRow = { hidden: false };
   const updateStatusEl = { textContent: "", dataset: {} };
+  const updateBand = {
+    hidden: true,
+    attributes: {},
+    addEventListener() {},
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+  };
+  const updateVersionEl = { textContent: "" };
+  const updateInstallButtons = [
+    { hidden: true, disabled: false },
+    { hidden: true, disabled: false },
+  ];
+  const updateCheckButton = { disabled: false };
+  const updateInstallProgress = {
+    hidden: true,
+    dataset: {},
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+  };
+  const updateBandProgress = {
+    hidden: true,
+    dataset: {},
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+  };
+  const updateProgressBar = { style: {} };
+  const updateBandProgressBar = { style: {} };
+  const updateProgressText = { textContent: "" };
+  const updateBandProgressText = { textContent: "" };
+  const updateFallbackButton = { hidden: true };
   const effectOptions = ["flat", "soft", "depth", "glow", "breathe"].map((value) => ({
     dataset: { effectValue: value },
     setAttribute(name, next) {
@@ -193,9 +237,20 @@ test("settings form auto-saves changed values without a submit button", async ()
     },
     __TAURI__: {
       core: {
+        Channel: class {
+          onmessage = null;
+        },
         async invoke(command, args) {
           invokedCommands.push(command);
           if (command === "get_settings") return persistedSettings;
+          if (command === "get_update_status") {
+            return {
+              status: "update_available",
+              current_version: "0.1.11",
+              latest_version: "0.1.12",
+              release_url: "https://github.com/Lv2dev/agent-juice/releases/tag/v0.1.12",
+            };
+          }
           if (command === "clear_taskbar_layout_profiles") {
             const cleared = { ...persistedSettings, taskbar_layout_profiles: [] };
             if (deferClearResponse) {
@@ -220,6 +275,19 @@ test("settings form auto-saves changed values without a submit button", async ()
             return { settings: args.input, warnings: ["taskbar retry"] };
           }
           if (command === "check_for_updates") throw new Error("offline");
+          if (command === "install_update") {
+            installUpdateCalls += 1;
+            installEventChannel = args.onEvent;
+            args.onEvent.onmessage?.({ event: "started", version: "0.1.12" });
+            args.onEvent.onmessage?.({
+              event: "progress",
+              downloaded_bytes: 50,
+              content_length: 100,
+            });
+            return new Promise((resolve) => {
+              resolveInstallUpdate = resolve;
+            });
+          }
           return null;
         },
       },
@@ -254,11 +322,27 @@ test("settings form auto-saves changed values without a submit button", async ()
       if (selector === "[data-full-reset-toggle]") return fullResetRow;
       if (selector === "[data-effect-picker]") return effectPicker;
       if (selector === "#update-check-status") return updateStatusEl;
+      if (selector === "#update-band") return updateBand;
+      if (selector === "[data-update-version]") return updateVersionEl;
       return null;
     },
     querySelectorAll(selector) {
       if (selector === "[data-settings-tab]") return settingsTabs;
       if (selector === "[data-settings-tab-panel]") return settingsTabPanels;
+      if (selector === '[data-action="install-update"]') return updateInstallButtons;
+      if (selector === "[data-update-install-progress]") {
+        return [updateBandProgress, updateInstallProgress];
+      }
+      if (selector === "[data-update-progress-bar]") {
+        return [updateBandProgressBar, updateProgressBar];
+      }
+      if (selector === "[data-update-progress-text]") {
+        return [updateBandProgressText, updateProgressText];
+      }
+      if (selector === "[data-update-fallback]") return [updateFallbackButton];
+      if (selector === '[data-action^="install-update"], [data-action="check-updates"]') {
+        return [...updateInstallButtons, updateCheckButton];
+      }
       return [];
     },
   };
@@ -282,6 +366,37 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(settingsTabs[0].tabIndex, 0);
   assert.equal(settingsTabPanels[0].hidden, false);
   assert.ok(settingsTabPanels.slice(1).every((panel) => panel.hidden));
+  assert.equal(updateBand.hidden, false);
+  assert.ok(updateInstallButtons.every((button) => button.hidden === false));
+
+  listeners.click?.({ target: { dataset: { action: "install-update" } } });
+  listeners.click?.({ target: { dataset: { action: "install-update" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(installUpdateCalls, 1, "duplicate update clicks must share one install operation");
+  assert.ok(updateInstallButtons.every((button) => button.disabled));
+  assert.equal(form.inert, true, "settings editing must stay locked during updater handoff");
+  assert.equal(updateInstallProgress.hidden, false);
+  assert.equal(updateBandProgress.hidden, false);
+  assert.equal(updateInstallProgress.attributes["aria-valuenow"], "50");
+  assert.equal(updateBandProgress.attributes["aria-valuenow"], "50");
+  assert.equal(updateProgressBar.style.width, "50%");
+  assert.equal(updateBandProgressBar.style.width, "50%");
+  assert.match(updateProgressText.textContent, /50%/);
+  assert.match(updateBandProgressText.textContent, /50%/);
+  installEventChannel.onmessage?.({
+    event: "progress",
+    downloaded_bytes: 75,
+    content_length: null,
+  });
+  assert.equal(updateInstallProgress.attributes["aria-valuenow"], undefined);
+  assert.equal(updateProgressBar.style.width, "35%");
+  installEventChannel.onmessage?.({ event: "verifying" });
+  assert.match(updateProgressText.textContent, /서명을 확인/);
+  assert.equal(updateInstallProgress.attributes["aria-valuetext"], updateProgressText.textContent);
+  resolveInstallUpdate();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(updateInstallButtons.every((button) => button.disabled));
+  assert.equal(form.inert, true, "a successful handoff stays locked until the app exits");
 
   listeners.click?.({ target: settingsTabs[3] });
   assert.equal(settingsTabs[3]["aria-selected"], "true");
@@ -444,6 +559,26 @@ test("settings form auto-saves changed values without a submit button", async ()
   );
   deferClearResponse = false;
   pendingClearResponse = null;
+
+  const installsBeforeFailedFlush = installUpdateCalls;
+  persistedSettings = { ...savedInputs.at(-1) };
+  failNextSave = true;
+  fields.theme.value = "light";
+  listeners.input?.({ target: fields.theme });
+  listeners.click?.({ target: { dataset: { action: "install-update" } } });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(installUpdateCalls, installsBeforeFailedFlush, "a failed settings flush must stop the updater");
+  assert.equal(updateFallbackButton.hidden, false);
+  assert.equal(updateInstallProgress.attributes["aria-valuenow"], "0");
+  assert.equal(updateProgressBar.style.width, "0%");
+  assert.match(updateProgressText.textContent, /설정을 저장하지 못해/);
+  assert.ok(updateInstallButtons.every((button) => !button.disabled));
+  assert.equal(form.inert, false, "a failed handoff must restore settings editing");
+  fields.theme.value = "system";
+  listeners.input?.({ target: fields.theme });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(statusHost.hidden, true);
 
   listeners.click?.({ target: { dataset: { action: "check-updates" } } });
   await new Promise((resolve) => setImmediate(resolve));

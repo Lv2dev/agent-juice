@@ -1,4 +1,4 @@
-use crate::{collector, paths};
+use crate::paths;
 use chrono::{DateTime, Duration, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -7,18 +7,33 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::Duration as StdDuration,
 };
 
-const GITHUB_LATEST_API: &str = "https://api.github.com/repos/Lv2dev/agent-juice/releases/latest";
 const RELEASES_URL: &str = "https://github.com/Lv2dev/agent-juice/releases";
 const CHECK_INTERVAL_HOURS: i64 = 24;
-const HTTP_TIMEOUT_SECS: &str = "5";
+pub const MAX_UPDATE_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(windows)]
+const WINDOWS_NSIS_UPDATE_PARAMETERS: &str = "/P /UPDATE";
+#[cfg(windows)]
+const UPDATE_HELPER_MARKER: &str = "--juice-update-helper";
+#[cfg(windows)]
+const UPDATE_PARENT_EXIT_TIMEOUT_MS: u32 = 30_000;
+#[cfg(windows)]
+const UPDATE_HELPER_READY_TIMEOUT_MS: u32 = 5_000;
+#[cfg(windows)]
+const UPDATE_INSTALL_TIMEOUT_SECS: u64 = 300;
+#[cfg(windows)]
+const UPDATE_PROCESS_CLEANUP_SECS: u64 = 2;
+#[cfg(windows)]
+const UPDATE_APP_START_VERIFY_MS: u64 = 1_500;
+#[cfg(windows)]
+const UPDATE_TEMP_STALE_SECS: u64 = 10 * 60;
+#[cfg(windows)]
+const UPDATE_TEMP_CLEANUP_ENTRY_LIMIT: usize = 256;
 
 static UPDATE_STATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static PENDING_NOTIFICATIONS: Lazy<Mutex<HashSet<(PathBuf, String)>>> =
@@ -79,16 +94,6 @@ impl Drop for PreparedNotification {
     }
 }
 
-#[derive(Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    html_url: String,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    prerelease: bool,
-}
-
 pub fn state_path() -> Option<PathBuf> {
     paths::data_dir().map(|dir| dir.join("update-state.json"))
 }
@@ -97,25 +102,734 @@ pub fn releases_url() -> &'static str {
     RELEASES_URL
 }
 
-pub fn parse_latest_release(contents: &str) -> anyhow::Result<ReleaseInfo> {
-    let release: GithubRelease = serde_json::from_str(contents)?;
-    if release.draft || release.prerelease {
-        anyhow::bail!("latest release is not stable");
-    }
-    parse_version(&release.tag_name).ok_or_else(|| anyhow::anyhow!("invalid release version"))?;
-    if !is_release_url_allowed(&release.html_url) {
-        anyhow::bail!("release URL is not allowed");
-    }
-
-    let expected_suffix = format!("/tag/{}", release.tag_name);
-    if !release.html_url.ends_with(&expected_suffix) {
-        anyhow::bail!("release URL does not match its version");
-    }
-
+pub fn release_info_for_version(version: &str) -> anyhow::Result<ReleaseInfo> {
+    let version = version.strip_prefix('v').unwrap_or(version);
+    parse_version(version).ok_or_else(|| anyhow::anyhow!("invalid release version"))?;
     Ok(ReleaseInfo {
-        version: release.tag_name.trim_start_matches('v').to_string(),
-        url: release.html_url,
+        version: version.to_string(),
+        url: format!("{RELEASES_URL}/tag/v{version}"),
     })
+}
+
+pub fn updater_asset_url_for_version(version: &str) -> anyhow::Result<String> {
+    let version = release_info_for_version(version)?.version;
+    Ok(format!(
+        "{RELEASES_URL}/download/v{version}/Juice_{version}_x64-setup.exe"
+    ))
+}
+
+pub fn is_updater_asset_url_allowed(url: &str, version: &str) -> bool {
+    updater_asset_url_for_version(version).is_ok_and(|expected| url == expected)
+}
+
+pub fn update_package_size_is_allowed(downloaded: u64, content_length: Option<u64>) -> bool {
+    downloaded <= MAX_UPDATE_PACKAGE_BYTES
+        && content_length.is_none_or(|length| length <= MAX_UPDATE_PACKAGE_BYTES)
+}
+
+#[cfg(windows)]
+pub fn prepare_verified_installer(bytes: &[u8], version: &str) -> anyhow::Result<PathBuf> {
+    let expected =
+        parse_version(version).ok_or_else(|| anyhow::anyhow!("invalid update version"))?;
+    if bytes.len() < 2 || &bytes[..2] != b"MZ" {
+        anyhow::bail!("invalid Windows updater format");
+    }
+
+    let directory = std::env::temp_dir().join("Juice-updates");
+    std::fs::create_dir_all(&directory)?;
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("Juice_{version}_{}_{}", std::process::id(), sequence);
+    let partial = directory.join(format!("{stem}.partial"));
+    let installer = directory.join(format!("{stem}_x64-setup.exe"));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&partial, &installer)
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&partial);
+        let _ = std::fs::remove_file(&installer);
+        return Err(error.into());
+    }
+
+    let actual = installer_product_version(&installer);
+    if actual.as_ref().map_or(true, |actual| *actual != expected) {
+        let _ = std::fs::remove_file(&installer);
+        anyhow::bail!("updater ProductVersion does not match the manifest");
+    }
+    Ok(installer)
+}
+
+#[cfg(windows)]
+pub fn spawn_update_helper(installer: &Path, version: &str) -> anyhow::Result<()> {
+    use std::{
+        os::windows::{ffi::OsStrExt, process::CommandExt},
+        process::Stdio,
+    };
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{CreateEventW, WaitForSingleObject, CREATE_NO_WINDOW},
+        },
+    };
+
+    let version = release_info_for_version(version)?.version;
+    let app_exe = std::env::current_exe()?;
+    let directory = installer
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("updater has no parent directory"))?;
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let helper = directory.join(format!(
+        "Juice_update_helper_{}_{}.exe",
+        std::process::id(),
+        sequence
+    ));
+    let backup = directory.join(format!(
+        "Juice_update_backup_{}_{}",
+        std::process::id(),
+        sequence
+    ));
+    let ready_event_name = format!(
+        r"Local\AgentJuiceUpdaterReady_{}_{}",
+        std::process::id(),
+        sequence
+    );
+    let ready_event_name_wide = std::ffi::OsStr::new(&ready_event_name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let ready_event =
+        unsafe { CreateEventW(None, false, false, PCWSTR(ready_event_name_wide.as_ptr())) }
+            .map_err(|error| anyhow::anyhow!("could not create helper ready event: {error}"))?;
+    let prepare_result = (|| -> anyhow::Result<()> {
+        std::fs::copy(&app_exe, &helper)
+            .map_err(|error| anyhow::anyhow!("could not copy update helper: {error}"))?;
+        sync_handoff_file(&helper)
+            .map_err(|error| anyhow::anyhow!("could not sync update helper: {error}"))?;
+        create_update_backup(&app_exe, &backup).map_err(|error| {
+            anyhow::anyhow!("could not back up the current installation: {error}")
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = prepare_result {
+        let _ = unsafe { CloseHandle(ready_event) };
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_dir_all(&backup);
+        return Err(error);
+    }
+
+    let result = std::process::Command::new(&helper)
+        .arg(UPDATE_HELPER_MARKER)
+        .arg(installer)
+        .arg(std::process::id().to_string())
+        .arg(&app_exe)
+        .arg(&version)
+        .arg(&backup)
+        .arg(&ready_event_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .spawn();
+    let mut child = match result {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = unsafe { CloseHandle(ready_event) };
+            let _ = std::fs::remove_file(&helper);
+            let _ = std::fs::remove_dir_all(&backup);
+            return Err(anyhow::anyhow!("could not execute update helper: {error}"));
+        }
+    };
+    let ready = unsafe { WaitForSingleObject(ready_event, UPDATE_HELPER_READY_TIMEOUT_MS) };
+    let _ = unsafe { CloseHandle(ready_event) };
+    if ready != WAIT_OBJECT_0 {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_dir_all(&backup);
+        anyhow::bail!("update helper did not become ready");
+    }
+    match child.try_wait() {
+        Ok(None) => {}
+        Ok(Some(status)) => {
+            let _ = std::fs::remove_file(&helper);
+            let _ = std::fs::remove_dir_all(&backup);
+            anyhow::bail!("update helper exited before handoff with {status}");
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&helper);
+            let _ = std::fs::remove_dir_all(&backup);
+            return Err(anyhow::anyhow!(
+                "could not confirm update helper readiness: {error}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn update_helper_exit_code() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _ = args.next();
+    if args.next().as_deref() != Some(std::ffi::OsStr::new(UPDATE_HELPER_MARKER)) {
+        return None;
+    }
+    let result = parse_update_helper_args(args).and_then(|args| run_update_helper(&args));
+    if let Err(error) = &result {
+        eprintln!("[update-helper] {error}");
+    }
+    Some(if result.is_ok() { 0 } else { 1 })
+}
+
+#[cfg(not(windows))]
+pub fn update_helper_exit_code() -> Option<i32> {
+    None
+}
+
+#[cfg(windows)]
+struct UpdateHelperArgs {
+    installer: PathBuf,
+    parent_pid: u32,
+    app_exe: PathBuf,
+    expected_version: String,
+    backup_dir: PathBuf,
+    ready_event_name: String,
+}
+
+#[cfg(windows)]
+fn parse_update_helper_args(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> anyhow::Result<UpdateHelperArgs> {
+    let installer = args
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing updater installer path"))?;
+    let parent_pid = args
+        .next()
+        .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+        .ok_or_else(|| anyhow::anyhow!("invalid updater parent process"))?;
+    let app_exe = args
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing updater recovery executable"))?;
+    let expected_version = args
+        .next()
+        .and_then(|value| value.to_str().map(str::to_owned))
+        .and_then(|value| {
+            release_info_for_version(&value)
+                .ok()
+                .map(|item| item.version)
+        })
+        .ok_or_else(|| anyhow::anyhow!("invalid updater expected version"))?;
+    let backup_dir = args
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing updater backup directory"))?;
+    let ready_event_name = args
+        .next()
+        .and_then(|value| value.to_str().map(str::to_owned))
+        .filter(|value| value.starts_with(r"Local\AgentJuiceUpdaterReady_"))
+        .ok_or_else(|| anyhow::anyhow!("invalid updater ready event"))?;
+    if args.next().is_some() {
+        anyhow::bail!("unexpected updater helper argument");
+    }
+    Ok(UpdateHelperArgs {
+        installer,
+        parent_pid,
+        app_exe,
+        expected_version,
+        backup_dir,
+        ready_event_name,
+    })
+}
+
+#[cfg(windows)]
+fn run_update_helper(args: &UpdateHelperArgs) -> anyhow::Result<()> {
+    let helper_exe = std::env::current_exe()?;
+    let parent = open_parent_and_signal_ready(args.parent_pid, &args.ready_event_name)?;
+    if let Err(error) = wait_for_process_exit(parent) {
+        let _ = std::fs::remove_file(&args.installer);
+        let _ = std::fs::remove_dir_all(&args.backup_dir);
+        schedule_file_deletion(&helper_exe);
+        return Err(error);
+    }
+    let status = run_installer_and_wait(&args.installer);
+    let result = finish_installer_handoff(status, || {
+        verify_installed_version(&args.app_exe, &args.expected_version)?;
+        restart_app_and_confirm(&args.app_exe)
+    });
+    let result = match result {
+        Ok(()) => Ok(()),
+        Err(install_error) => restore_and_restart(&helper_exe, &args.backup_dir, &args.app_exe)
+            .map_err(|recovery_error| {
+                anyhow::anyhow!(
+                    "update failed ({install_error}); recovery failed ({recovery_error})"
+                )
+            }),
+    };
+    if result.is_ok() {
+        let _ = std::fs::remove_file(&args.installer);
+        let _ = std::fs::remove_dir_all(&args.backup_dir);
+        schedule_file_deletion(&helper_exe);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn finish_installer_handoff(
+    status: std::io::Result<std::process::ExitStatus>,
+    complete: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match status {
+        Ok(status) if status.success() => complete(),
+        Ok(status) => anyhow::bail!("updater installer exited with {status}"),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn open_parent_and_signal_ready(
+    pid: u32,
+    event_name: &str,
+) -> anyhow::Result<windows::Win32::Foundation::HANDLE> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenEventW, OpenProcess, SetEvent, EVENT_MODIFY_STATE, PROCESS_SYNCHRONIZE,
+            },
+        },
+    };
+
+    let parent = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }?;
+    let event_name = std::ffi::OsStr::new(event_name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let ready_event =
+        match unsafe { OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(event_name.as_ptr())) } {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = unsafe { CloseHandle(parent) };
+                return Err(error.into());
+            }
+        };
+    let signal = unsafe { SetEvent(ready_event) };
+    let _ = unsafe { CloseHandle(ready_event) };
+    if let Err(error) = signal {
+        let _ = unsafe { CloseHandle(parent) };
+        return Err(error.into());
+    }
+    Ok(parent)
+}
+
+#[cfg(windows)]
+fn wait_for_process_exit(handle: windows::Win32::Foundation::HANDLE) -> anyhow::Result<()> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+
+    let wait = unsafe { WaitForSingleObject(handle, UPDATE_PARENT_EXIT_TIMEOUT_MS) };
+    unsafe { CloseHandle(handle) }?;
+    if wait == WAIT_OBJECT_0 {
+        Ok(())
+    } else if wait == WAIT_TIMEOUT {
+        anyhow::bail!("timed out waiting for Juice to exit")
+    } else {
+        anyhow::bail!("failed while waiting for Juice to exit")
+    }
+}
+
+#[cfg(windows)]
+fn run_installer_and_wait(installer: &Path) -> std::io::Result<std::process::ExitStatus> {
+    use std::{os::windows::process::CommandExt, time::Instant};
+    use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+
+    let tree = UpdateProcessTree::create().map_err(std::io::Error::other)?;
+    let mut child = std::process::Command::new(installer)
+        .args(WINDOWS_NSIS_UPDATE_PARAMETERS.split_ascii_whitespace())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0)
+        .spawn()?;
+    if let Err(error) = tree.assign(&child).and_then(|()| tree.resume(&child)) {
+        tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(std::io::Error::other(error));
+    }
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(UPDATE_INSTALL_TIMEOUT_SECS);
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None if Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            None => {
+                tree.terminate();
+                let cleanup_deadline =
+                    Instant::now() + std::time::Duration::from_secs(UPDATE_PROCESS_CLEANUP_SECS);
+                while child.try_wait()?.is_none() && Instant::now() < cleanup_deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "updater installer timed out",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct UpdateProcessTree(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl UpdateProcessTree {
+    fn create() -> anyhow::Result<Self> {
+        use windows::{
+            core::PCWSTR,
+            Win32::System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null())? };
+        let tree = Self(job);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                tree.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )?;
+        }
+        Ok(tree)
+    }
+
+    fn assign(&self, child: &std::process::Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::JobObjects::AssignProcessToJobObject};
+
+        unsafe { AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle()))? };
+        Ok(())
+    }
+
+    fn resume(&self, child: &std::process::Child) -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            fn NtResumeProcess(process_handle: *mut std::ffi::c_void) -> i32;
+        }
+
+        let status = unsafe { NtResumeProcess(child.as_raw_handle()) };
+        if status < 0 {
+            anyhow::bail!("NtResumeProcess failed with NTSTATUS 0x{status:08x}");
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        let _ = unsafe { windows::Win32::System::JobObjects::TerminateJobObject(self.0, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for UpdateProcessTree {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn verify_installed_version(app_exe: &Path, expected_version: &str) -> anyhow::Result<()> {
+    let expected = parse_version(expected_version)
+        .ok_or_else(|| anyhow::anyhow!("invalid expected installed version"))?;
+    if installer_product_version(app_exe)? != expected {
+        anyhow::bail!("installed updater version does not match the manifest");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restart_app_and_confirm(app_exe: &Path) -> anyhow::Result<()> {
+    let mut child = std::process::Command::new(app_exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::sleep(std::time::Duration::from_millis(UPDATE_APP_START_VERIFY_MS));
+    match child.try_wait()? {
+        None => Ok(()),
+        Some(status) => anyhow::bail!("updated Juice exited during startup with {status}"),
+    }
+}
+
+#[cfg(windows)]
+fn create_update_backup(app_exe: &Path, backup_dir: &Path) -> anyhow::Result<()> {
+    let app_dir = app_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("installed Juice has no parent directory"))?;
+    std::fs::create_dir(backup_dir)?;
+    let result = (|| -> anyhow::Result<()> {
+        let mut backed_up_app = false;
+        let owned_files = [
+            app_exe.to_path_buf(),
+            app_dir.join("agentjuice-statusline.exe"),
+            app_dir.join("uninstall.exe"),
+        ];
+        for source in owned_files {
+            if !source.is_file() {
+                continue;
+            }
+            let file_name = source
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("installed Juice file has no name"))?;
+            let destination = backup_dir.join(file_name);
+            std::fs::copy(&source, &destination)?;
+            sync_handoff_file(&destination)?;
+            backed_up_app |= source == app_exe;
+        }
+        if !backed_up_app {
+            anyhow::bail!("current Juice executable was not backed up");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(backup_dir);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn restore_and_restart(helper_exe: &Path, backup_dir: &Path, app_exe: &Path) -> anyhow::Result<()> {
+    let restore = restore_update_backup(backup_dir, app_exe).and_then(|()| {
+        let expected = installer_product_version(helper_exe)?;
+        if installer_product_version(app_exe)? != expected {
+            anyhow::bail!("recovered Juice version does not match the previous installation");
+        }
+        Ok(())
+    });
+    let restart = restart_app_and_confirm(app_exe);
+    match (restore, restart) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(restore_error), Ok(())) => Err(restore_error),
+        (Ok(()), Err(restart_error)) => Err(restart_error),
+        (Err(restore_error), Err(restart_error)) => anyhow::bail!(
+            "installation restore failed ({restore_error}); restart failed ({restart_error})"
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn restore_update_backup(backup_dir: &Path, app_exe: &Path) -> anyhow::Result<()> {
+    let app_dir = app_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("installed Juice has no parent directory"))?;
+    std::fs::create_dir_all(app_dir)?;
+    let app_name = app_exe
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("installed Juice has no file name"))?;
+    let mut entries = std::fs::read_dir(backup_dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.retain(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()));
+    entries.sort_by_key(|entry| entry.file_name() == app_name);
+
+    let mut restored_app = false;
+    let mut first_error = None;
+    for entry in entries {
+        let destination = app_dir.join(entry.file_name());
+        restored_app |= destination == app_exe;
+        if let Err(error) = replace_file_from_backup(&entry.path(), &destination) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    if !restored_app {
+        anyhow::bail!("backup does not contain the previous Juice executable");
+    }
+    if let Some(error) = first_error {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file_from_backup(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        },
+    };
+
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let recovery = destination.with_extension(format!(
+        "juice-recovery-{}-{sequence}.tmp",
+        std::process::id()
+    ));
+    std::fs::copy(source, &recovery)?;
+    sync_handoff_file(&recovery)?;
+    let recovery_wide = recovery
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            PCWSTR(recovery_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result.is_err() {
+        let _ = std::fs::remove_file(recovery);
+    }
+    result.map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(windows)]
+fn sync_handoff_file(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn schedule_file_deletion(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT},
+    };
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let _ = unsafe {
+        MoveFileExW(
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        )
+    };
+}
+
+#[cfg(windows)]
+pub fn start_update_temp_cleanup() {
+    let _ = std::thread::Builder::new()
+        .name("juice-update-temp-cleanup".into())
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            cleanup_stale_update_files_at(std::time::SystemTime::now());
+            std::thread::sleep(std::time::Duration::from_secs(UPDATE_TEMP_STALE_SECS + 60));
+            cleanup_stale_update_files_at(std::time::SystemTime::now());
+        });
+}
+
+#[cfg(windows)]
+fn cleanup_stale_update_files_at(now: std::time::SystemTime) {
+    let directory = std::env::temp_dir().join("Juice-updates");
+    cleanup_stale_update_files_in(&directory, now);
+}
+
+#[cfg(windows)]
+fn cleanup_stale_update_files_in(directory: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.take(UPDATE_TEMP_CLEANUP_ENTRY_LIMIT).flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() || !is_cleanup_candidate(&entry.file_name()) {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age.as_secs() >= UPDATE_TEMP_STALE_SECS);
+        if is_stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_cleanup_candidate(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    (name.starts_with("Juice_update_helper_") && name.ends_with(".exe"))
+        || (name.starts_with("Juice_") && name.ends_with("_x64-setup.exe"))
+        || (name.starts_with("Juice_") && name.ends_with(".partial"))
+}
+
+#[cfg(windows)]
+fn installer_product_version(path: &Path) -> anyhow::Result<(u64, u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::Storage::FileSystem::{
+            GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+        },
+    };
+
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()), None) };
+    if size == 0 {
+        anyhow::bail!("updater has no Windows version metadata");
+    }
+    let mut data = vec![0_u8; size as usize];
+    unsafe { GetFileVersionInfoW(PCWSTR(path.as_ptr()), None, size, data.as_mut_ptr().cast()) }?;
+
+    let mut value = std::ptr::null_mut();
+    let mut value_len = 0_u32;
+    let found =
+        unsafe { VerQueryValueW(data.as_ptr().cast(), w!("\\"), &mut value, &mut value_len) };
+    if !found.as_bool()
+        || value.is_null()
+        || value_len < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
+    {
+        anyhow::bail!("updater has invalid Windows version metadata");
+    }
+    let info = unsafe { &*value.cast::<VS_FIXEDFILEINFO>() };
+    if info.dwSignature != 0xFEEF04BD {
+        anyhow::bail!("updater has invalid Windows version signature");
+    }
+    Ok((
+        u64::from(info.dwProductVersionMS >> 16),
+        u64::from(info.dwProductVersionMS & 0xffff),
+        u64::from(info.dwProductVersionLS >> 16),
+    ))
 }
 
 pub fn is_update_available(current: &str, latest: &str) -> anyhow::Result<bool> {
@@ -154,37 +868,37 @@ pub fn cached_result(current_version: &str) -> UpdateCheckResult {
     result_from_state(current_version, &load_state(), false)
 }
 
-pub fn check_for_update(current_version: &str, force: bool) -> anyhow::Result<UpdateCheckResult> {
-    let path = state_path().ok_or_else(|| anyhow::anyhow!("no update state path"))?;
-    check_for_update_at(
-        &path,
-        current_version,
-        force,
-        Utc::now(),
-        fetch_latest_release,
-    )
+pub fn update_check_is_due(force: bool) -> bool {
+    state_path()
+        .as_deref()
+        .map(|path| update_check_is_due_at(path, force, Utc::now()))
+        .unwrap_or(true)
 }
 
-pub fn check_for_update_at<F>(
+pub fn update_check_is_due_at(path: &Path, force: bool, now: DateTime<Utc>) -> bool {
+    force || check_is_due(&load_state_from(path), now)
+}
+
+pub fn record_update_check(
+    current_version: &str,
+    available_version: Option<&str>,
+) -> anyhow::Result<UpdateCheckResult> {
+    let path = state_path().ok_or_else(|| anyhow::anyhow!("no update state path"))?;
+    record_update_check_at(&path, current_version, available_version, Utc::now())
+}
+
+pub fn record_update_check_at(
     path: &Path,
     current_version: &str,
-    force: bool,
+    available_version: Option<&str>,
     now: DateTime<Utc>,
-    fetch: F,
-) -> anyhow::Result<UpdateCheckResult>
-where
-    F: FnOnce() -> anyhow::Result<String>,
-{
+) -> anyhow::Result<UpdateCheckResult> {
     parse_version(current_version).ok_or_else(|| anyhow::anyhow!("invalid current version"))?;
     let _guard = UPDATE_STATE_LOCK
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     let mut state = load_state_from(path);
-    if !force && !check_is_due(&state, now) {
-        return Ok(result_from_state(current_version, &state, false));
-    }
-
-    let release = parse_latest_release(&fetch()?)?;
+    let release = release_info_for_version(available_version.unwrap_or(current_version))?;
     state.last_checked_at = Some(now.to_rfc3339());
     state.latest_release = Some(release);
     save_state_to(path, &state)?;
@@ -311,65 +1025,6 @@ fn parse_version_part(value: &str) -> Option<u64> {
     value.parse().ok()
 }
 
-fn fetch_latest_release() -> anyhow::Result<String> {
-    let executable = if cfg!(windows) {
-        windows_system_directory()?.join("curl.exe")
-    } else {
-        PathBuf::from("curl")
-    };
-    let mut command = Command::new(executable);
-    command.args([
-        "-q",
-        "--silent",
-        "--show-error",
-        "--fail",
-        "--max-time",
-        HTTP_TIMEOUT_SECS,
-        "--header",
-        "Accept: application/vnd.github+json",
-        "--header",
-        "X-GitHub-Api-Version: 2022-11-28",
-        "--user-agent",
-        concat!("Juice/", env!("CARGO_PKG_VERSION")),
-        GITHUB_LATEST_API,
-    ]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        command.creation_flags(0x08000000);
-    }
-    collector::command_output_with_input(
-        command,
-        None,
-        StdDuration::from_secs(6),
-        "GitHub release check",
-    )
-}
-
-#[cfg(windows)]
-fn windows_system_directory() -> anyhow::Result<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-
-    let mut buffer = vec![0u16; 260];
-    loop {
-        let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
-        if length == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        if length < buffer.len() {
-            return Ok(std::ffi::OsString::from_wide(&buffer[..length]).into());
-        }
-        buffer.resize(length + 1, 0);
-    }
-}
-
-#[cfg(not(windows))]
-fn windows_system_directory() -> anyhow::Result<PathBuf> {
-    anyhow::bail!("Windows system directory is unavailable")
-}
-
 fn save_state_to(path: &Path, state: &UpdateState) -> anyhow::Result<()> {
     save_state_to_with(path, state, replace_state_file)
 }
@@ -477,10 +1132,153 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn system_directory_is_absolute_and_not_environment_derived() {
-        let directory = windows_system_directory().unwrap();
-        assert!(directory.is_absolute());
-        assert!(directory.is_dir());
-        assert!(directory.join("curl.exe").is_file());
+    fn nsis_update_switches_are_unquoted_and_match_tauri_contract() {
+        assert_eq!(WINDOWS_NSIS_UPDATE_PARAMETERS, "/P /UPDATE");
+        assert!(!WINDOWS_NSIS_UPDATE_PARAMETERS.contains('"'));
+        assert!(!WINDOWS_NSIS_UPDATE_PARAMETERS
+            .split_ascii_whitespace()
+            .any(|value| value == "/R"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_helper_arguments_are_strict_and_path_safe() {
+        use std::ffi::OsString;
+
+        let args = parse_update_helper_args(
+            [
+                OsString::from(r"C:\Temp\installer with spaces.exe"),
+                OsString::from("42"),
+                OsString::from(r"C:\Program Files\Juice\agent-juice.exe"),
+                OsString::from("0.1.12"),
+                OsString::from(r"C:\Temp\Juice_update_backup_42_1"),
+                OsString::from(r"Local\AgentJuiceUpdaterReady_42_1"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(args.parent_pid, 42);
+        assert_eq!(args.expected_version, "0.1.12");
+        assert_eq!(
+            args.installer,
+            PathBuf::from(r"C:\Temp\installer with spaces.exe")
+        );
+        assert_eq!(
+            args.app_exe,
+            PathBuf::from(r"C:\Program Files\Juice\agent-juice.exe")
+        );
+        assert_eq!(
+            args.backup_dir,
+            PathBuf::from(r"C:\Temp\Juice_update_backup_42_1")
+        );
+        assert!(parse_update_helper_args([OsString::from("only-one")].into_iter()).is_err());
+        assert!(parse_update_helper_args(
+            [
+                OsString::from("installer.exe"),
+                OsString::from("42"),
+                OsString::from("app.exe"),
+                OsString::from("0.1.12"),
+                OsString::from("backup"),
+                OsString::from(r"Local\AgentJuiceUpdaterReady_42_1"),
+                OsString::from("extra"),
+            ]
+            .into_iter(),
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_helper_completes_only_after_installer_success() {
+        use std::{cell::Cell, os::windows::process::ExitStatusExt};
+
+        let restarted = Cell::new(false);
+        finish_installer_handoff(Ok(std::process::ExitStatus::from_raw(0)), || {
+            restarted.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(restarted.get());
+
+        restarted.set(false);
+
+        let failed = finish_installer_handoff(Ok(std::process::ExitStatus::from_raw(7)), || {
+            restarted.set(true);
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert!(!restarted.get());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_handoff_sync_uses_a_windows_writable_handle() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-juice-helper-sync-{}-{}.exe",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, b"helper").unwrap();
+        sync_handoff_file(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_install_restores_every_preexisting_application_file() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-update-backup-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let app_dir = root.join("app");
+        let backup_dir = root.join("backup");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let app_exe = app_dir.join("agent-juice.exe");
+        let statusline = app_dir.join("agentjuice-statusline.exe");
+        let uninstaller = app_dir.join("uninstall.exe");
+        std::fs::write(&app_exe, b"old-app").unwrap();
+        std::fs::write(&statusline, b"old-statusline").unwrap();
+        std::fs::write(&uninstaller, b"old-uninstaller").unwrap();
+
+        create_update_backup(&app_exe, &backup_dir).unwrap();
+        std::fs::write(&app_exe, b"partial-new-app").unwrap();
+        std::fs::write(&statusline, b"partial-new-statusline").unwrap();
+        std::fs::write(&uninstaller, b"partial-new-uninstaller").unwrap();
+        restore_update_backup(&backup_dir, &app_exe).unwrap();
+
+        assert_eq!(std::fs::read(&app_exe).unwrap(), b"old-app");
+        assert_eq!(std::fs::read(&statusline).unwrap(), b"old-statusline");
+        assert_eq!(std::fs::read(&uninstaller).unwrap(), b"old-uninstaller");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_temp_cleanup_is_bounded_to_known_files_and_preserves_backups() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-update-cleanup-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(root.join("Juice_update_backup_1_1")).unwrap();
+        let helper = root.join("Juice_update_helper_1_1.exe");
+        let installer = root.join("Juice_0.1.12_1_1_x64-setup.exe");
+        let unrelated = root.join("keep-me.exe");
+        std::fs::write(&helper, b"helper").unwrap();
+        std::fs::write(&installer, b"installer").unwrap();
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        cleanup_stale_update_files_in(
+            &root,
+            std::time::SystemTime::now()
+                + std::time::Duration::from_secs(UPDATE_TEMP_STALE_SECS + 1),
+        );
+
+        assert!(!helper.exists());
+        assert!(!installer.exists());
+        assert!(unrelated.exists());
+        assert!(root.join("Juice_update_backup_1_1").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
