@@ -53,6 +53,7 @@ function readOptional(path) {
   return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";
 }
 
+const gitAttributes = readOptional(resolve(here, "../.gitattributes"));
 const readme = readOptional(resolve(here, "../README.md"));
 const pushAllowlist = readOptional(resolve(here, "../.ai/scripts/verify-git-push-allowlist.ps1"));
 const releaseVerifier = readOptional(resolve(here, "../.ai/scripts/verify-release-installer.ps1"));
@@ -1276,6 +1277,10 @@ test("updates use one signed HTTPS manifest without exposing updater capability 
 });
 
 test("signed updater releases are manual draft-only jobs with isolated secrets and remote verification", () => {
+  assert.match(
+    gitAttributes,
+    /^src-tauri\/tests\/fixtures\/updater-signature-payload\.txt -text$/m,
+  );
   assert.match(signedReleaseWorkflow, /^on:\n\s+workflow_dispatch:/m);
   assert.doesNotMatch(signedReleaseWorkflow, /^\s+(push|pull_request|schedule):/m);
   assert.match(signedReleaseWorkflow, /github\.ref == 'refs\/heads\/main'/);
