@@ -358,7 +358,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Check out the immutable release commit

@@ -1331,6 +1331,10 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.match(signedReleaseWorkflow, /remote installer ProductVersion mismatch/);
   assert.match(signedReleaseWorkflow, /--test updater_signature -- --ignored/);
   assert.match(signedReleaseWorkflow, /remote updater signature verification failed/);
+  const verifierJob = signedReleaseWorkflow.match(/^  verify-draft:\n[\s\S]*$/m)?.[0] ?? "";
+  assert.match(verifierJob, /permissions:\n\s+contents: write/);
+  assert.doesNotMatch(verifierJob, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.doesNotMatch(verifierJob, /gh release (?:create|edit|upload|delete)|gh api --method/);
   const uses = [...signedReleaseWorkflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map(
     (match) => match[1],
   );
