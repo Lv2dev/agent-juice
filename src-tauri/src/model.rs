@@ -21,6 +21,8 @@ pub enum Tool {
     Claude,
     #[serde(rename = "codex")]
     Codex,
+    #[serde(rename = "grok")]
+    Grok,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

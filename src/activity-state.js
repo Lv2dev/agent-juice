@@ -33,15 +33,18 @@ function dateKey(date) {
 function tokensForFilter(day, filter, settings) {
   const claude = settings?.show_claude === false ? 0 : finiteInteger(day?.claude_tokens);
   const codex = settings?.show_codex === false ? 0 : finiteInteger(day?.codex_tokens);
+  const grok = settings?.show_grok === true ? finiteInteger(day?.grok_tokens) : 0;
   if (filter === "claude") return claude;
   if (filter === "codex") return codex;
-  return Math.min(Number.MAX_SAFE_INTEGER, claude + codex);
+  if (filter === "grok") return grok;
+  return Math.min(Number.MAX_SAFE_INTEGER, claude + codex + grok);
 }
 
 function normalizedFilter(value, settings) {
-  const filter = ["claude", "codex"].includes(value) ? value : "all";
+  const filter = ["claude", "codex", "grok"].includes(value) ? value : "all";
   if (filter === "claude" && settings?.show_claude === false) return "all";
   if (filter === "codex" && settings?.show_codex === false) return "all";
+  if (filter === "grok" && settings?.show_grok === false) return "all";
   return filter;
 }
 
@@ -101,6 +104,7 @@ export function buildActivityView(
       future: date > today,
       claudeTokens: finiteInteger(source?.claude_tokens),
       codexTokens: finiteInteger(source?.codex_tokens),
+      grokTokens: finiteInteger(source?.grok_tokens),
       tokens: tokensForFilter(source, filter, settings),
       level: 0,
     });

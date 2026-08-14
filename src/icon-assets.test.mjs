@@ -178,6 +178,14 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /Automatic Claude account usage collection/);
   assert.match(readme, /on by default/);
   assert.match(readme, /Exact OAuth account limits take priority over stale statusline account values/);
+  assert.match(readme, /Grok Build 사용량 자동 수집/);
+  assert.match(readme, /Grok은 기존 사용자에게[^\n]+기본값이 \*\*꺼짐\*\*/);
+  assert.match(readme, /`initialize` 뒤 `_x\.ai\/billing`만 호출합니다/);
+  assert.match(readme, /주간이면 `주간`, 월간이면 `월간` 한도 하나만 표시합니다/);
+  assert.match(readme, /Automatic Grok Build usage collection/);
+  assert.match(readme, /Grok defaults to \*\*off\*\*/);
+  assert.match(readme, /calls only `initialize` followed by `_x\.ai\/billing`/);
+  assert.match(readme, /weekly ACP period appears as one `Weekly` limit and a monthly period as one `Monthly` limit/);
   assert.match(readme, /4가지 바 모드/);
   assert.match(readme, /four bar modes/);
   assert.match(readme, /원·바 표현 스타일/);
@@ -203,15 +211,15 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
 test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
-    ["juice-v014-panel-overview.png", [1240, 944]],
-    ["juice-v014-panel-activity.png", [1240, 674]],
-    ["juice-v014-panel-appearance.png", [1240, 1436]],
-    ["juice-v014-panel-taskbar.png", [1240, 1274]],
+    ["juice-v014-panel-overview.png", [1240, 1320]],
+    ["juice-v014-panel-activity.png", [1240, 726]],
+    ["juice-v014-panel-appearance.png", [1240, 1592]],
+    ["juice-v014-panel-taskbar.png", [1240, 1412]],
     ["juice-v014-panel-collection.png", [1240, 1416]],
     ["juice-v014-panel-effects.png", [1240, 2428]],
     ["juice-v014-panel-update.png", [1240, 588]],
-    ["juice-v014-taskbar-modes.png", [1520, 584]],
-    ["juice-v014-taskbar-bars.png", [1520, 584]],
+    ["juice-v014-taskbar-modes.png", [1800, 584]],
+    ["juice-v014-taskbar-bars.png", [1800, 584]],
   ]);
 
   for (const [name, dimensions] of assets) {
@@ -261,9 +269,9 @@ import sys
 from PIL import Image
 
 image = Image.open(sys.argv[1]).convert("RGB")
-colors = [(215, 154, 50), (211, 107, 134), (47, 172, 125), (77, 134, 214)]
+colors = [(215, 154, 50), (211, 107, 134), (47, 172, 125), (77, 134, 214), (217, 87, 139), (138, 111, 209)]
 rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
-columns = [(224, 850), (850, 1476)]
+columns = [(224, 734), (734, 1245), (1245, 1756)]
 heights = []
 for top, bottom in rows:
     row = []
@@ -283,7 +291,7 @@ print(json.dumps(heights))
       { encoding: "utf8" },
     ),
   );
-  assert.deepEqual(ringHeights, [[64, 64], [64, 64], [64, 64], [64, 64]]);
+  assert.deepEqual(ringHeights, [[64, 64, 64], [64, 64, 64], [64, 64, 64], [64, 64, 64]]);
 
   const taskbarBarsPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-bars.png");
   const barBounds = JSON.parse(
@@ -300,9 +308,10 @@ image = Image.open(sys.argv[1]).convert("RGB")
 tool_colors = [
     [(215, 154, 50), (211, 107, 134)],
     [(47, 172, 125), (77, 134, 214)],
+    [(217, 87, 139), (138, 111, 209)],
 ]
 rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
-columns = [(224, 850), (850, 1476)]
+columns = [(224, 734), (734, 1245), (1245, 1756)]
 bounds = []
 for top, bottom in rows:
     row = []
@@ -349,10 +358,10 @@ print(json.dumps(bounds))
   assert.doesNotMatch(readme, /\| 외형 \||\| 표시·수집 \||\| 원·바 세부 \|/);
   assert.match(readme, /최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다/);
   assert.match(readme, /숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다/);
-  assert.match(readme, /바에 마우스를 올리면 도구명과 사용 가능한 5h·주간 한도의 초기화까지 남은 시간을 보여줍니다/);
+  assert.match(readme, /바에 마우스를 올리면 도구명과 실제로 존재하는 5h·주간·월간 한도의 초기화까지 남은 시간을 보여줍니다/);
   assert.match(readme, /On first launch, visible bars are placed from the left edge of the taskbar without overlapping/);
   assert.match(readme, /Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars/);
-  assert.match(readme, /Hovering a bar shows the tool name and time remaining until each available 5-hour or weekly limit resets/);
+  assert.match(readme, /Hovering a bar shows the tool name and time remaining until each available 5-hour, weekly, or monthly limit resets/);
   assert.match(readme, /전체화면 숨김:[^\n]*신규 설치 기본값은 꺼짐입니다/);
   assert.match(readme, /Fullscreen hiding:[^\n]*Off by default on a new installation/);
   assert.doesNotMatch(readme, /\b(?:RAII|HWND|AppHang)\b|z-order/i);

@@ -10,7 +10,7 @@ import { applyFont } from "./font.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
-const TOOLS = ["claude", "codex"];
+const TOOLS = ["claude", "codex", "grok"];
 const WINDOW_ACTION_COMMANDS = {
   close: "hide_panel_window",
   minimize: "minimize_panel",
@@ -121,12 +121,14 @@ function setText(scope, selector, value) {
 function toolEnabled(tool) {
   if (tool === "claude") return settings.show_claude !== false;
   if (tool === "codex") return settings.show_codex !== false;
+  if (tool === "grok") return settings.show_grok === true;
   return true;
 }
 
 function setBar(scope, selector, model) {
   const root = scope.querySelector(selector);
   if (!root) return;
+  root.hidden = model.visible === false;
 
   const fill = root.querySelector(".fill");
   if (fill) {
@@ -136,6 +138,7 @@ function setBar(scope, selector, model) {
 
   setText(root, ".val", model.value);
   setText(root, ".reset", model.reset);
+  setText(root, ".metric-row span", model.label);
 }
 
 function renderTool(tool, now) {
@@ -180,6 +183,9 @@ function tooltipCopy(cell) {
   if (settings.show_codex !== false) {
     details.push(`Codex ${formatActivityTokens(cell.codexTokens, language)}`);
   }
+  if (settings.show_grok === true) {
+    details.push(`Grok ${formatActivityTokens(cell.grokTokens, language)}`);
+  }
   return { title, detail: details.join(" · ") };
 }
 
@@ -214,7 +220,11 @@ function activityCellLabel(cell) {
 function renderActivity(now = new Date()) {
   const card = document.querySelector("#activity-card");
   if (!card) return;
-  if (settings.show_claude === false && settings.show_codex === false) {
+  if (
+    settings.show_claude === false
+    && settings.show_codex === false
+    && settings.show_grok !== true
+  ) {
     card.hidden = true;
     return;
   }
@@ -227,9 +237,11 @@ function renderActivity(now = new Date()) {
     settings.activity_tokens_per_level,
     settings.show_claude,
     settings.show_codex,
+    settings.show_grok,
     settings.language,
     toolBrandColor("claude", settings),
     toolBrandColor("codex", settings),
+    toolBrandColor("grok", settings),
     `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`,
   ]);
   if (renderSignature === lastActivityRenderSignature) return;
@@ -250,11 +262,13 @@ function renderActivity(now = new Date()) {
   card.style.setProperty("--activity-chart-width", `${view.weeks * 11 - 2}px`);
   card.style.setProperty("--activity-color-claude", toolBrandColor("claude", settings));
   card.style.setProperty("--activity-color-codex", toolBrandColor("codex", settings));
+  card.style.setProperty("--activity-color-grok", toolBrandColor("grok", settings));
 
   for (const button of card.querySelectorAll("[data-activity-filter]")) {
     const filter = button.dataset.activityFilter;
     button.hidden = (filter === "claude" && settings.show_claude === false)
-      || (filter === "codex" && settings.show_codex === false);
+      || (filter === "codex" && settings.show_codex === false)
+      || (filter === "grok" && settings.show_grok !== true);
     button.setAttribute("aria-pressed", String(filter === view.filter));
   }
 

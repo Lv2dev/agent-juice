@@ -507,3 +507,38 @@ test("barViewModel filters hidden tools without restoring the removed tool-to-to
   });
   assert.deepEqual(none.tools, []);
 });
+
+test("Grok renders one dynamic weekly or monthly limit without an empty sibling", () => {
+  const weekly = barViewModel(
+    [{
+      tool: "grok",
+      captured_at: "2026-08-13T00:00:00Z",
+      primary: { label: "week", used_percent: 34, resets_at: null },
+      secondary: null,
+      session: { active: true },
+    }],
+    { ...settings, language: "en", show_grok: true, limit_order: "secondary_first" },
+  );
+
+  assert.deepEqual(weekly.tools.map((tool) => tool.tool), ["claude", "codex", "grok"]);
+  const grok = weekly.tools[2];
+  assert.equal(grok.primary.text, "Weekly 66%");
+  assert.equal(grok.primary.color, "#d9578b");
+  assert.equal(grok.secondary.visible, false);
+  assert.equal(grok.tooltip, "Grok\nWeekly –");
+  assert.doesNotMatch(grok.ariaLabel, /Monthly/);
+
+  const monthly = barToolViewModel(
+    [{
+      tool: "grok",
+      captured_at: "2026-08-13T00:00:00Z",
+      primary: { label: "month", used_percent: 10, resets_at: null },
+      secondary: null,
+      session: { active: true },
+    }],
+    "grok",
+    { ...settings, language: "en" },
+  );
+  assert.equal(monthly.primary.text, "Monthly 90%");
+  assert.equal(monthly.primary.color, "#8a6fd1");
+});

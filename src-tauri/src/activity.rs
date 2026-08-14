@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const SCHEMA_VERSION: &str = "usage_activity.v2";
+const SCHEMA_VERSION: &str = "usage_activity.v3";
 const INDEX_FILE_NAME: &str = "usage-activity-v1.json";
 const RETENTION_DAYS: i64 = 371;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -32,6 +32,8 @@ pub struct ActivityDay {
     pub date: String,
     pub claude_tokens: u64,
     pub codex_tokens: u64,
+    #[serde(default)]
+    pub grok_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,7 @@ pub struct ActivitySnapshot {
 pub struct ActivityRoots {
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
+    pub grok: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,10 +77,21 @@ impl Default for ScanOptions {
 enum ActivityTool {
     Claude,
     Codex,
+    Grok,
+}
+
+impl ActivityTool {
+    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Grok];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ClaudeMessageContribution {
+    date: String,
+    tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct GrokResponseContribution {
     date: String,
     tokens: u64,
 }
@@ -96,6 +110,8 @@ struct FileCheckpoint {
     #[serde(default)]
     claude_messages: BTreeMap<String, ClaudeMessageContribution>,
     #[serde(default)]
+    grok_responses: BTreeMap<String, GrokResponseContribution>,
+    #[serde(default)]
     codex_last_total: Option<u64>,
     #[serde(default)]
     codex_fallback_total: u64,
@@ -112,6 +128,7 @@ impl FileCheckpoint {
             lossy: false,
             days: BTreeMap::new(),
             claude_messages: BTreeMap::new(),
+            grok_responses: BTreeMap::new(),
             codex_last_total: None,
             codex_fallback_total: 0,
         }
@@ -120,6 +137,8 @@ impl FileCheckpoint {
     fn prune(&mut self, cutoff: &str) {
         self.days.retain(|date, _| date.as_str() >= cutoff);
         self.claude_messages
+            .retain(|_, contribution| contribution.date.as_str() >= cutoff);
+        self.grok_responses
             .retain(|_, contribution| contribution.date.as_str() >= cutoff);
     }
 }
@@ -167,11 +186,18 @@ pub fn local_roots() -> ActivityRoots {
         claude: home
             .as_ref()
             .map(|path| path.join(".claude").join("projects")),
-        codex: home.map(|path| path.join(".codex").join("sessions")),
+        codex: home
+            .as_ref()
+            .map(|path| path.join(".codex").join("sessions")),
+        grok: home.map(|path| path.join(".grok").join("sessions")),
     }
 }
 
-pub fn refresh(show_claude: bool, show_codex: bool) -> anyhow::Result<ActivitySnapshot> {
+pub fn refresh(
+    show_claude: bool,
+    show_codex: bool,
+    show_grok: bool,
+) -> anyhow::Result<ActivitySnapshot> {
     let _guard = SCAN_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let path = index_path().ok_or_else(|| anyhow::anyhow!("activity data path unavailable"))?;
     let timezone = Local::now().offset().fix();
@@ -180,17 +206,20 @@ pub fn refresh(show_claude: bool, show_codex: bool) -> anyhow::Result<ActivitySn
         &local_roots(),
         show_claude,
         show_codex,
+        show_grok,
         Utc::now(),
         timezone,
         ScanOptions::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_at(
     index_path: &Path,
     roots: &ActivityRoots,
     show_claude: bool,
     show_codex: bool,
+    show_grok: bool,
     now: DateTime<Utc>,
     timezone: FixedOffset,
     options: ScanOptions,
@@ -206,8 +235,7 @@ pub fn refresh_at(
 
     let (mut candidates, enumeration_partial) = collect_candidates(
         roots,
-        show_claude,
-        show_codex,
+        [show_claude, show_codex, show_grok],
         &cutoff,
         timezone,
         deadline,
@@ -281,32 +309,27 @@ pub fn refresh_at(
 }
 
 fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
-    let mut claude = candidates
-        .iter()
-        .filter(|candidate| candidate.tool == ActivityTool::Claude)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut codex = candidates
-        .into_iter()
-        .filter(|candidate| candidate.tool == ActivityTool::Codex)
-        .collect::<Vec<_>>();
     let newest_first = |left: &CandidateFile, right: &CandidateFile| {
         right
             .modified_millis
             .cmp(&left.modified_millis)
             .then_with(|| left.key.cmp(&right.key))
     };
-    claude.sort_by(newest_first);
-    codex.sort_by(newest_first);
-    let mut claude = VecDeque::from(claude);
-    let mut codex = VecDeque::from(codex);
-    let mut ordered = Vec::with_capacity(claude.len() + codex.len());
-    while !claude.is_empty() || !codex.is_empty() {
-        if let Some(candidate) = claude.pop_front() {
-            ordered.push(candidate);
-        }
-        if let Some(candidate) = codex.pop_front() {
-            ordered.push(candidate);
+    let mut queues = ActivityTool::ALL.map(|tool| {
+        let mut tool_candidates = candidates
+            .iter()
+            .filter(|candidate| candidate.tool == tool)
+            .cloned()
+            .collect::<Vec<_>>();
+        tool_candidates.sort_by(newest_first);
+        VecDeque::from(tool_candidates)
+    });
+    let mut ordered = Vec::with_capacity(candidates.len());
+    while queues.iter().any(|queue| !queue.is_empty()) {
+        for queue in &mut queues {
+            if let Some(candidate) = queue.pop_front() {
+                ordered.push(candidate);
+            }
         }
     }
     ordered
@@ -336,8 +359,7 @@ fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
 
 fn collect_candidates(
     roots: &ActivityRoots,
-    show_claude: bool,
-    show_codex: bool,
+    enabled_tools: [bool; 3],
     cutoff: &str,
     timezone: FixedOffset,
     deadline: Instant,
@@ -347,10 +369,12 @@ fn collect_candidates(
     let mut partial = false;
     let mut entries_seen = 0usize;
 
-    for (enabled, root, tool) in [
-        (show_claude, roots.claude.as_deref(), ActivityTool::Claude),
-        (show_codex, roots.codex.as_deref(), ActivityTool::Codex),
-    ] {
+    let roots = [
+        roots.claude.as_deref(),
+        roots.codex.as_deref(),
+        roots.grok.as_deref(),
+    ];
+    for ((enabled, root), tool) in enabled_tools.into_iter().zip(roots).zip(ActivityTool::ALL) {
         let Some(root) = root.filter(|_| enabled) else {
             continue;
         };
@@ -384,8 +408,12 @@ fn collect_candidates(
                     pending.push_back(entry.path());
                     continue;
                 }
+                let path = entry.path();
                 if !file_type.is_file()
-                    || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
+                    || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+                    || (tool == ActivityTool::Grok
+                        && path.file_name().and_then(|value| value.to_str())
+                            != Some("updates.jsonl"))
                 {
                     continue;
                 }
@@ -402,7 +430,6 @@ fn collect_candidates(
                 if modified_date.as_str() < cutoff {
                     continue;
                 }
-                let path = entry.path();
                 candidates.push(CandidateFile {
                     key: path.to_string_lossy().into_owned(),
                     path,
@@ -482,6 +509,9 @@ fn scan_file(
                         apply_claude_line(checkpoint, &value, cutoff, timezone, line_start)
                     }
                     ActivityTool::Codex => apply_codex_line(checkpoint, &value, cutoff, timezone),
+                    ActivityTool::Grok => {
+                        apply_grok_line(checkpoint, &value, cutoff, timezone, line_start)
+                    }
                 }
                 checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
             }
@@ -674,14 +704,74 @@ fn apply_codex_line(
     }
 }
 
+fn apply_grok_line(
+    checkpoint: &mut FileCheckpoint,
+    root: &Value,
+    cutoff: &str,
+    timezone: FixedOffset,
+    line_start: u64,
+) {
+    if !matches!(
+        root.get("method").and_then(Value::as_str),
+        Some("session/update" | "_x.ai/session/update")
+    ) || root
+        .pointer("/params/update/sessionUpdate")
+        .and_then(Value::as_str)
+        != Some("response_completed")
+    {
+        return;
+    }
+    let Some(usage) = root.pointer("/params/update/usage") else {
+        return;
+    };
+    let tokens = usage_token_fields(usage);
+    if tokens == 0 {
+        return;
+    }
+    let Some(date) = local_date(root.get("timestamp"), timezone) else {
+        return;
+    };
+    if date.as_str() < cutoff {
+        return;
+    }
+    let response_id = root
+        .pointer("/params/_meta/eventId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            root.pointer("/params/update/message_id")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("offset:{line_start}"));
+
+    checkpoint
+        .grok_responses
+        .insert(response_id, GrokResponseContribution { date, tokens });
+}
+
 fn local_date(timestamp: Option<&Value>, timezone: FixedOffset) -> Option<String> {
-    let timestamp = timestamp?.as_str()?;
-    DateTime::parse_from_rfc3339(timestamp).ok().map(|value| {
+    let timestamp = timestamp?;
+    let value = match timestamp {
+        Value::String(timestamp) => DateTime::parse_from_rfc3339(timestamp)
+            .ok()?
+            .with_timezone(&Utc),
+        Value::Number(_) => {
+            let timestamp = timestamp.as_u64()?;
+            let timestamp = i64::try_from(timestamp).ok()?;
+            if timestamp >= 100_000_000_000 {
+                DateTime::<Utc>::from_timestamp_millis(timestamp)?
+            } else {
+                DateTime::<Utc>::from_timestamp(timestamp, 0)?
+            }
+        }
+        _ => return None,
+    };
+    Some(
         value
             .with_timezone(&timezone)
             .format("%Y-%m-%d")
-            .to_string()
-    })
+            .to_string(),
+    )
 }
 
 fn add_day(days: &mut BTreeMap<String, u64>, date: &str, tokens: u64) {
@@ -708,6 +798,7 @@ fn snapshot_from_index(
 ) -> ActivitySnapshot {
     let mut days: BTreeMap<String, ActivityDay> = BTreeMap::new();
     let mut claude_messages: BTreeMap<String, &ClaudeMessageContribution> = BTreeMap::new();
+    let mut grok_responses: BTreeMap<String, &GrokResponseContribution> = BTreeMap::new();
     for (file_key, checkpoint) in &index.files {
         if checkpoint.tool == ActivityTool::Claude {
             for (message_id, contribution) in &checkpoint.claude_messages {
@@ -730,6 +821,20 @@ fn snapshot_from_index(
             }
             continue;
         }
+        if checkpoint.tool == ActivityTool::Grok {
+            for (response_id, contribution) in &checkpoint.grok_responses {
+                if contribution.date.as_str() < cutoff {
+                    continue;
+                }
+                let dedupe_key = if response_id.starts_with("offset:") {
+                    format!("{file_key}\0{response_id}")
+                } else {
+                    response_id.clone()
+                };
+                grok_responses.entry(dedupe_key).or_insert(contribution);
+            }
+            continue;
+        }
         for (date, tokens) in &checkpoint.days {
             if date.as_str() < cutoff {
                 continue;
@@ -738,7 +843,12 @@ fn snapshot_from_index(
                 date: date.clone(),
                 ..ActivityDay::default()
             });
-            day.codex_tokens = day.codex_tokens.saturating_add(*tokens);
+            match checkpoint.tool {
+                ActivityTool::Codex => day.codex_tokens = day.codex_tokens.saturating_add(*tokens),
+                ActivityTool::Claude | ActivityTool::Grok => {
+                    unreachable!("message contributions are handled above")
+                }
+            }
         }
     }
     for contribution in claude_messages.into_values() {
@@ -749,6 +859,15 @@ fn snapshot_from_index(
                 ..ActivityDay::default()
             });
         day.claude_tokens = day.claude_tokens.saturating_add(contribution.tokens);
+    }
+    for contribution in grok_responses.into_values() {
+        let day = days
+            .entry(contribution.date.clone())
+            .or_insert_with(|| ActivityDay {
+                date: contribution.date.clone(),
+                ..ActivityDay::default()
+            });
+        day.grok_tokens = day.grok_tokens.saturating_add(contribution.tokens);
     }
     ActivitySnapshot {
         schema_version: SCHEMA_VERSION.into(),
@@ -824,6 +943,7 @@ mod tests {
         ActivityRoots {
             claude: Some(root.join("claude")),
             codex: Some(root.join("codex")),
+            grok: Some(root.join("grok")),
         }
     }
 
@@ -833,6 +953,33 @@ mod tests {
 
     fn kst() -> FixedOffset {
         FixedOffset::east_opt(9 * 3600).unwrap()
+    }
+
+    fn grok_event(timestamp: Value, method: &str, usage: Value) -> String {
+        grok_event_with_id(timestamp, method, usage, None)
+    }
+
+    fn grok_event_with_id(
+        timestamp: Value,
+        method: &str,
+        usage: Value,
+        event_id: Option<&str>,
+    ) -> String {
+        let mut event = serde_json::json!({
+            "timestamp": timestamp,
+            "method": method,
+            "params": {
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "response_completed",
+                    "usage": usage
+                }
+            }
+        });
+        if let Some(event_id) = event_id {
+            event["params"]["_meta"] = serde_json::json!({ "eventId": event_id });
+        }
+        event.to_string()
     }
 
     #[test]
@@ -860,6 +1007,7 @@ mod tests {
             &root.join("index.json"),
             &roots(&root),
             true,
+            false,
             false,
             now(),
             kst(),
@@ -934,10 +1082,28 @@ mod tests {
         fs::write(claude.join("no-id-b.jsonl"), &no_id_message).unwrap();
 
         let index = root.join("index.json");
-        let first =
-            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
-        let repeated =
-            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let first = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        let repeated = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
 
         assert_eq!(first.days[0].claude_tokens, 118);
         assert_eq!(repeated.days[0].claude_tokens, 118);
@@ -988,6 +1154,7 @@ mod tests {
             &roots(&root),
             false,
             true,
+            false,
             now(),
             kst(),
             options(),
@@ -1040,6 +1207,7 @@ mod tests {
             &roots(&root),
             false,
             true,
+            false,
             now(),
             kst(),
             options(),
@@ -1067,37 +1235,344 @@ mod tests {
         .unwrap();
         let index = root.join("index.json");
 
-        let first =
-            refresh_at(&index, &roots(&root), false, true, now(), kst(), options()).unwrap();
+        let first = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            true,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(first.days[0].codex_tokens, 100);
         assert!(first.partial);
         assert!(first.backfill_pending);
 
-        let unchanged =
-            refresh_at(&index, &roots(&root), false, true, now(), kst(), options()).unwrap();
+        let unchanged = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            true,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(unchanged.days[0].codex_tokens, 100);
 
         let mut output = OpenOptions::new().append(true).open(&file).unwrap();
         output.write_all(b"{\"total_tokens\":175}}}}\n").unwrap();
         drop(output);
-        let appended =
-            refresh_at(&index, &roots(&root), false, true, now(), kst(), options()).unwrap();
+        let appended = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            true,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(appended.days[0].codex_tokens, 175);
         assert!(!appended.backfill_pending);
 
-        let repeated =
-            refresh_at(&index, &roots(&root), false, true, now(), kst(), options()).unwrap();
+        let repeated = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            true,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(repeated.days[0].codex_tokens, 175);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn candidate_order_alternates_tools_and_keeps_each_tool_newest_first() {
+    fn activity_day_defaults_grok_tokens_for_legacy_payloads() {
+        let day: ActivityDay = serde_json::from_value(serde_json::json!({
+            "date": "2026-07-19",
+            "claude_tokens": 10,
+            "codex_tokens": 20
+        }))
+        .unwrap();
+
+        assert_eq!(day.grok_tokens, 0);
+    }
+
+    #[test]
+    fn grok_sums_completed_responses_without_double_counting_reasoning() {
+        let root = temp_root("grok-responses");
+        let grok = root.join("grok").join("workspace").join("session");
+        fs::create_dir_all(&grok).unwrap();
+        let timestamp = Utc.with_ymd_and_hms(2026, 7, 19, 1, 0, 0).unwrap();
+        let events = [
+            grok_event(
+                serde_json::json!(timestamp.timestamp_millis()),
+                "session/update",
+                serde_json::json!({
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 30,
+                    "cache_creation_input_tokens": 40,
+                    "reasoning_tokens": 999
+                }),
+            ),
+            grok_event(
+                serde_json::json!(timestamp.to_rfc3339()),
+                "_x.ai/session/update",
+                serde_json::json!({
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 4
+                }),
+            ),
+            grok_event(
+                serde_json::json!(timestamp.timestamp()),
+                "_x.ai/session/update",
+                serde_json::json!({"input_tokens": 5, "output_tokens": 6}),
+            ),
+            serde_json::json!({
+                "timestamp": timestamp.timestamp_millis(),
+                "method": "_x.ai/session/update",
+                "params": {"update": {"sessionUpdate": "response_started", "usage": {"input_tokens": 1000}}}
+            })
+            .to_string(),
+            grok_event(
+                serde_json::json!(timestamp.timestamp_millis()),
+                "other/update",
+                serde_json::json!({"input_tokens": 1000}),
+            ),
+            grok_event(
+                serde_json::json!("not-a-timestamp"),
+                "_x.ai/session/update",
+                serde_json::json!({"input_tokens": 1000}),
+            ),
+            grok_event(
+                serde_json::json!(timestamp.timestamp_millis()),
+                "_x.ai/session/update",
+                serde_json::json!({"inputTokens": 1000, "outputTokens": 1000}),
+            ),
+        ];
+        fs::write(grok.join("updates.jsonl"), events.join("\n") + "\n").unwrap();
+
+        let snapshot = refresh_at(
+            &root.join("index.json"),
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.days.len(), 1);
+        assert_eq!(snapshot.days[0].date, "2026-07-19");
+        assert_eq!(snapshot.days[0].grok_tokens, 121);
+        assert_eq!(snapshot.days[0].claude_tokens, 0);
+        assert_eq!(snapshot.days[0].codex_tokens, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn grok_incremental_append_is_idempotent_and_retries_an_incomplete_line() {
+        let root = temp_root("grok-incremental");
+        let grok = root.join("grok").join("session");
+        fs::create_dir_all(&grok).unwrap();
+        let file = grok.join("updates.jsonl");
+        let first_event = grok_event(
+            serde_json::json!("2026-07-19T01:00:00Z"),
+            "_x.ai/session/update",
+            serde_json::json!({"input_tokens": 4, "output_tokens": 6}),
+        );
+        let second_event = grok_event(
+            serde_json::json!("2026-07-19T02:00:00Z"),
+            "_x.ai/session/update",
+            serde_json::json!({
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "cache_read_input_tokens": 4,
+                "cache_creation_input_tokens": 5
+            }),
+        );
+        let split = second_event.len() / 2;
+        fs::write(&file, format!("{first_event}\n{}", &second_event[..split])).unwrap();
+        let index = root.join("index.json");
+
+        let first = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(first.days[0].grok_tokens, 10);
+        assert!(first.partial);
+        assert!(first.backfill_pending);
+
+        let unchanged = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(unchanged.days[0].grok_tokens, 10);
+
+        let mut output = OpenOptions::new().append(true).open(&file).unwrap();
+        output
+            .write_all(format!("{}\n", &second_event[split..]).as_bytes())
+            .unwrap();
+        drop(output);
+        let appended = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(appended.days[0].grok_tokens, 24);
+        assert!(!appended.backfill_pending);
+
+        let repeated = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(repeated.days[0].grok_tokens, 24);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn grok_scans_only_updates_jsonl() {
+        let root = temp_root("grok-updates-only");
+        let grok = root.join("grok").join("session");
+        fs::create_dir_all(&grok).unwrap();
+        let event = grok_event(
+            serde_json::json!("2026-07-19T01:00:00Z"),
+            "_x.ai/session/update",
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3}),
+        ) + "\n";
+        fs::write(grok.join("updates.jsonl"), &event).unwrap();
+        fs::write(grok.join("chat_history.jsonl"), &event).unwrap();
+        fs::write(grok.join("other.jsonl"), &event).unwrap();
+
+        let snapshot = refresh_at(
+            &root.join("index.json"),
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.days[0].grok_tokens, 10);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn grok_deduplicates_forked_responses_by_persisted_event_id() {
+        let root = temp_root("grok-fork-dedupe");
+        let original = root.join("grok").join("original");
+        let fork = root.join("grok").join("fork");
+        fs::create_dir_all(&original).unwrap();
+        fs::create_dir_all(&fork).unwrap();
+        let event = grok_event_with_id(
+            serde_json::json!("2026-07-19T01:00:00Z"),
+            "_x.ai/session/update",
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3}),
+            Some("original-session-42"),
+        ) + "\n";
+        fs::write(original.join("updates.jsonl"), &event).unwrap();
+        fs::write(fork.join("updates.jsonl"), &event).unwrap();
+
+        let snapshot = refresh_at(
+            &root.join("index.json"),
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.days[0].grok_tokens, 10);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn grok_keeps_idless_legacy_responses_from_different_files() {
+        let root = temp_root("grok-idless-files");
+        let first = root.join("grok").join("first");
+        let second = root.join("grok").join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let event = grok_event(
+            serde_json::json!("2026-07-19T01:00:00Z"),
+            "_x.ai/session/update",
+            serde_json::json!({"input_tokens": 7, "output_tokens": 3}),
+        ) + "\n";
+        fs::write(first.join("updates.jsonl"), &event).unwrap();
+        fs::write(second.join("updates.jsonl"), &event).unwrap();
+
+        let snapshot = refresh_at(
+            &root.join("index.json"),
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.days[0].grok_tokens, 20);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn candidate_order_round_robins_three_tools_and_keeps_each_newest_first() {
         let ordered = fair_candidate_order(vec![
             candidate(ActivityTool::Codex, "codex-old", 10),
             candidate(ActivityTool::Claude, "claude-old", 20),
             candidate(ActivityTool::Codex, "codex-new", 40),
             candidate(ActivityTool::Claude, "claude-new", 30),
+            candidate(ActivityTool::Grok, "grok-old", 5),
+            candidate(ActivityTool::Grok, "grok-new", 50),
         ]);
         let keys = ordered
             .iter()
@@ -1106,7 +1581,14 @@ mod tests {
 
         assert_eq!(
             keys,
-            vec!["claude-new", "codex-new", "claude-old", "codex-old"]
+            vec![
+                "claude-new",
+                "codex-new",
+                "grok-new",
+                "claude-old",
+                "codex-old",
+                "grok-old"
+            ]
         );
     }
 
@@ -1124,8 +1606,17 @@ mod tests {
         let index = root.join("index.json");
         fs::write(&index, "{broken").unwrap();
 
-        let snapshot =
-            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let snapshot = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
 
         assert_eq!(snapshot.days[0].claude_tokens, 20);
         assert_eq!(fs::read_to_string(&source).unwrap(), contents);
@@ -1135,31 +1626,39 @@ mod tests {
     }
 
     #[test]
-    fn stale_schema_index_is_rebuilt_from_source_logs() {
+    fn v2_schema_index_is_rebuilt_from_source_logs() {
         let root = temp_root("stale-schema");
         let claude = root.join("claude");
         fs::create_dir_all(&claude).unwrap();
-        fs::write(
-            claude.join("session.jsonl"),
-            concat!(
-                r#"{"timestamp":"2026-07-19T01:00:00Z","message":{"id":"m1","usage":{"input_tokens":12,"output_tokens":8}}}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
+        let source = claude.join("session.jsonl");
+        let contents = concat!(
+            r#"{"timestamp":"2026-07-19T01:00:00Z","message":{"id":"m1","usage":{"input_tokens":12,"output_tokens":8}}}"#,
+            "\n"
+        );
+        fs::write(&source, contents).unwrap();
         let index = root.join("index.json");
         let mut stale = ActivityIndex::new(9 * 60);
-        stale.schema_version = "usage_activity.v1".into();
+        stale.schema_version = "usage_activity.v2".into();
         let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
         checkpoint.days.insert("2026-07-19".into(), 999_999);
         stale.files.insert("stale-file".into(), checkpoint);
         fs::write(&index, serde_json::to_vec(&stale).unwrap()).unwrap();
 
-        let snapshot =
-            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let snapshot = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         let saved: Value = serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
 
         assert_eq!(snapshot.days[0].claude_tokens, 20);
+        assert_eq!(fs::read_to_string(&source).unwrap(), contents);
         assert_eq!(saved["schema_version"], SCHEMA_VERSION);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1178,19 +1677,37 @@ mod tests {
         )
         .unwrap();
         let index = root.join("index.json");
-        let enabled =
-            refresh_at(&index, &roots(&root), true, false, now(), kst(), options()).unwrap();
+        let enabled = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(enabled.days[0].claude_tokens, 10);
 
         fs::write(claude.join("session.jsonl"), "not-json\n").unwrap();
-        let disabled =
-            refresh_at(&index, &roots(&root), false, false, now(), kst(), options()).unwrap();
+        let disabled = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
         assert_eq!(disabled.days[0].claude_tokens, 10);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    #[ignore = "reads locally installed Claude and Codex session logs"]
+    #[ignore = "reads locally installed Claude, Codex, and Grok session logs"]
     fn live_local_logs_complete_within_the_bounded_scanner() {
         let root = temp_root("live-local");
         let index = root.join("index.json");
@@ -1199,6 +1716,7 @@ mod tests {
         let mut snapshot = refresh_at(
             &index,
             &local_roots(),
+            true,
             true,
             true,
             Utc::now(),
@@ -1216,6 +1734,7 @@ mod tests {
                 &local_roots(),
                 true,
                 true,
+                true,
                 Utc::now(),
                 timezone,
                 ScanOptions::default(),
@@ -1231,6 +1750,10 @@ mod tests {
             .days
             .iter()
             .fold(0u64, |total, day| total.saturating_add(day.codex_tokens));
+        let grok = snapshot
+            .days
+            .iter()
+            .fold(0u64, |total, day| total.saturating_add(day.grok_tokens));
 
         assert_eq!(snapshot.schema_version, SCHEMA_VERSION);
         assert!(index.is_file());
@@ -1239,12 +1762,13 @@ mod tests {
             .windows(2)
             .all(|days| days[0].date < days[1].date));
         eprintln!(
-            "activity live scan: elapsed={:?}, passes={}, days={}, claude_tokens={}, codex_tokens={}, partial={}, backfill_pending={}",
+            "activity live scan: elapsed={:?}, passes={}, days={}, claude_tokens={}, codex_tokens={}, grok_tokens={}, partial={}, backfill_pending={}",
             started.elapsed(),
             passes,
             snapshot.days.len(),
             claude,
             codex,
+            grok,
             snapshot.partial,
             snapshot.backfill_pending
         );

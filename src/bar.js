@@ -21,7 +21,7 @@ let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
 let contentWidthSyncTimer = null;
 let lastRequestedContentWidth = "";
-const TOOLS = ["claude", "codex"];
+const TOOLS = ["claude", "codex", "grok"];
 
 function currentWindowTool() {
   const search = window.location?.search ?? globalThis.location?.search ?? "";
@@ -246,6 +246,7 @@ function setText(scope, selector, value) {
 }
 
 function orderedLimits(vm, limitOrder) {
+  if (!vm.secondary.visible) return [vm.primary, vm.secondary];
   return limitOrder === "secondary_first" ? [vm.secondary, vm.primary] : [vm.primary, vm.secondary];
 }
 
@@ -293,6 +294,24 @@ function renderTool(vm, limitOrder) {
   item.hidden = false;
   item.dataset.state = vm.state;
   item.dataset.severity = vm.severity;
+  item.dataset.limitCount = vm.secondary.visible ? "2" : "1";
+  const singleLimit = !vm.secondary.visible;
+  for (const selector of [
+    ".inner-track",
+    ".inner-effect",
+    ".inner-arc",
+    ".quad-secondary",
+    ".secondary-limit",
+  ]) {
+    const elements = typeof item.querySelectorAll === "function"
+      ? item.querySelectorAll(selector)
+      : [item.querySelector(selector)].filter(Boolean);
+    for (const element of elements) {
+      element.hidden = singleLimit;
+    }
+  }
+  const secondaryLine = item.querySelector(".secondary-text")?.closest?.(".bar-line");
+  if (secondaryLine) secondaryLine.hidden = singleLimit;
   item.removeAttribute?.("title");
   item.setAttribute?.("aria-label", vm.ariaLabel);
   item.style?.setProperty("--tool-brand", vm.brandColor);
@@ -387,6 +406,7 @@ function renderBar() {
   root.dataset.indicatorTrackColor = vm.indicatorTrackColorAuto ? "theme" : "custom";
   root.dataset.claudeTextColor = vm.claudeTextColorOn ? "custom" : "auto";
   root.dataset.codexTextColor = vm.codexTextColorOn ? "custom" : "auto";
+  root.dataset.grokTextColor = vm.grokTextColorOn ? "custom" : "auto";
   root.dataset.infoTextColor = vm.infoTextColorOn ? "custom" : "auto";
   root.dataset.ringTextColor = vm.ringTextColorOn ? "custom" : "auto";
   root.dataset.ring = vm.ringOn ? "on" : "off";
@@ -403,6 +423,7 @@ function renderBar() {
   );
   root.style?.setProperty("--claude-text-color", vm.claudeTextColor);
   root.style?.setProperty("--codex-text-color", vm.codexTextColor);
+  root.style?.setProperty("--grok-text-color", vm.grokTextColor);
   root.style?.setProperty("--info-text-color", vm.infoTextColor);
   root.style?.setProperty("--ring-text-color", vm.ringTextColor);
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);

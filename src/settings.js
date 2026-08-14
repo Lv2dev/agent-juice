@@ -428,8 +428,10 @@ function fillForm(settings) {
   setField("font_mode", state.fontMode);
   setField("claude_taskbar_offset_ratio", state.claudeTaskbarOffsetRatio);
   setField("codex_taskbar_offset_ratio", state.codexTaskbarOffsetRatio);
+  setField("grok_taskbar_offset_ratio", state.grokTaskbarOffsetRatio);
   setField("show_claude", state.showClaude);
   setField("show_codex", state.showCodex);
+  setField("show_grok", state.showGrok);
   setField("claude_account_auto_collect_on", state.claudeAccountAutoCollectOn);
   setField("mono_color", state.monoColor);
   setField("custom_safe", state.customSafe);
@@ -439,6 +441,8 @@ function fillForm(settings) {
   setField("claude_secondary_color", state.claudeSecondaryColor);
   setField("codex_primary_color", state.codexPrimaryColor);
   setField("codex_secondary_color", state.codexSecondaryColor);
+  setField("grok_primary_color", state.grokPrimaryColor);
+  setField("grok_secondary_color", state.grokSecondaryColor);
   setField("tool_warning_color", state.toolWarningColor);
   setField("tool_danger_color", state.toolDangerColor);
   setField("tool_warning_color_on", state.toolWarningColorOn);
@@ -447,6 +451,8 @@ function fillForm(settings) {
   setField("claude_text_color_on", state.claudeTextColorOn);
   setField("codex_text_color", state.codexTextColor);
   setField("codex_text_color_on", state.codexTextColorOn);
+  setField("grok_text_color", state.grokTextColor);
+  setField("grok_text_color_on", state.grokTextColorOn);
   setField("info_text_color", state.infoTextColor);
   setField("info_text_color_on", state.infoTextColorOn);
   setField("ring_text_color", state.ringTextColor);

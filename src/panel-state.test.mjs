@@ -221,3 +221,23 @@ test("viewModelForTool explains empty Claude state in the selected language", ()
   });
   assert.equal(autoCollect.emptyHint, "Claude 계정 사용량을 수집 중입니다. 채팅을 보낼 필요가 없습니다.");
 });
+
+test("viewModelForTool exposes Grok's dynamic period and distinct tool color", () => {
+  const vm = viewModelForTool(
+    [{
+      tool: "grok",
+      captured_at: "2026-08-13T00:00:00Z",
+      primary: { label: "month", used_percent: 25, resets_at: null },
+      secondary: null,
+      session: { active: true },
+    }],
+    "grok",
+    { ...settings, language: "en" },
+  );
+
+  assert.equal(vm.brandColor, "#d9578b");
+  assert.equal(vm.primary.label, "Monthly");
+  assert.equal(vm.primary.value, "75%");
+  assert.equal(vm.primary.color, "#8a6fd1");
+  assert.equal(vm.secondary.visible, false);
+});

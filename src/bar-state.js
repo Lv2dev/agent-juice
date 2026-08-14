@@ -11,10 +11,11 @@ import { formatDuration, resolveLanguage, t } from "./i18n.js";
 const TOOL_LABELS = {
   claude: "Claude",
   codex: "Codex",
+  grok: "Grok",
 };
 
 const MODES = new Set(["full", "compact", "dual", "quad"]);
-const TOOLS = ["claude", "codex"];
+const TOOLS = ["claude", "codex", "grok"];
 const INDICATOR_STYLES = new Set(["ring", "bar"]);
 const INDICATOR_EFFECT_STYLES = new Set(["flat", "soft", "depth", "glow", "breathe"]);
 const LIMIT_ORDERS = new Set(["primary_first", "secondary_first"]);
@@ -26,6 +27,7 @@ function finiteNumber(value) {
 function toolEnabled(settings, tool) {
   if (tool === "claude") return settings.show_claude !== false;
   if (tool === "codex") return settings.show_codex !== false;
+  if (tool === "grok") return settings.show_grok === true;
   return true;
 }
 
@@ -153,14 +155,28 @@ function limitModel(labelKey, limit, settings, now, language, tool, secondary = 
   const used = finiteNumber(limit?.used_percent);
   const displayed = displayPercentFromUsed(used, settings);
   return {
-    text: `${t(labelKey, language)} ${percentText(displayed)}`,
+    text: labelKey ? `${t(labelKey, language)} ${percentText(displayed)}` : "",
     number: numberText(displayed),
     percent: displayed,
     reset: shortReset(limit?.resets_at, now, language),
     color: colorForToolPercent(used, tool, settings, secondary),
     arc: arcText(displayed),
     dash: dashText(displayed),
+    labelKey,
+    visible: labelKey != null,
   };
+}
+
+function grokLimitLabel(limit) {
+  const label = String(limit?.label ?? "").toLowerCase();
+  if (label === "month" || label === "monthly") return "limit.monthly";
+  if (label === "week" || label === "weekly") return "limit.weekly";
+  return "limit.usage";
+}
+
+function limitLabelKeys(tool, status) {
+  if (tool === "grok") return [grokLimitLabel(status?.primary), null];
+  return ["limit.fiveHour", "limit.weekly"];
 }
 
 function rgbSetting(value, fallback) {
@@ -188,15 +204,17 @@ function tooltipResetLine(labelKey, reset, language) {
 }
 
 function toolTooltip(label, primary, secondary, language) {
-  return [
-    label,
-    tooltipResetLine("limit.fiveHour", primary.reset, language),
-    tooltipResetLine("limit.weekly", secondary.reset, language),
-  ].join("\n");
+  return [label, primary, secondary]
+    .filter((limit) => typeof limit === "string" || limit?.visible)
+    .map((limit) => typeof limit === "string"
+      ? limit
+      : tooltipResetLine(limit.labelKey, limit.reset, language))
+    .join("\n");
 }
 
 function toolAriaLabel(label, primary, secondary, state, language) {
-  const parts = [label, primary.text, secondary.text];
+  const parts = [label, primary.text];
+  if (secondary.visible) parts.push(secondary.text);
   if (state === "stale") parts.push(t("state.stale", language));
   return parts.join(", ");
 }
@@ -219,6 +237,8 @@ export function barToolViewModel(
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
+  const [primaryLabel, secondaryLabel] = limitLabelKeys(tool, status);
+  const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
   const base = {
     tool,
     label: TOOL_LABELS[tool] ?? tool,
@@ -227,15 +247,16 @@ export function barToolViewModel(
 
   if (options.startupLoading === true) {
     const primary = limitModel(
-      "limit.fiveHour",
+      primaryLabel,
       status?.primary,
       settings,
       now,
       language,
       tool,
+      primaryUsesSecondaryColor,
     );
     const secondary = limitModel(
-      "limit.weekly",
+      secondaryLabel,
       status?.secondary,
       settings,
       now,
@@ -258,8 +279,16 @@ export function barToolViewModel(
   }
 
   if (!status) {
-    const primary = limitModel("limit.fiveHour", null, settings, now, language, tool);
-    const secondary = limitModel("limit.weekly", null, settings, now, language, tool, true);
+    const primary = limitModel(
+      primaryLabel,
+      null,
+      settings,
+      now,
+      language,
+      tool,
+      primaryUsesSecondaryColor,
+    );
+    const secondary = limitModel(secondaryLabel, null, settings, now, language, tool, true);
     const state = "empty";
     return {
       ...base,
@@ -273,8 +302,16 @@ export function barToolViewModel(
     };
   }
 
-  const primary = limitModel("limit.fiveHour", status.primary, settings, now, language, tool);
-  const secondary = limitModel("limit.weekly", status.secondary, settings, now, language, tool, true);
+  const primary = limitModel(
+    primaryLabel,
+    status.primary,
+    settings,
+    now,
+    language,
+    tool,
+    primaryUsesSecondaryColor,
+  );
+  const secondary = limitModel(secondaryLabel, status.secondary, settings, now, language, tool, true);
   const state = status.session?.active === true ? "live" : "stale";
   return {
     ...base,
@@ -341,6 +378,8 @@ export function barViewModel(
     claudeTextColorOn: taskbarTextColorOn(merged, "claude"),
     codexTextColor: taskbarTextColor(merged, "codex", "#2fac7d"),
     codexTextColorOn: taskbarTextColorOn(merged, "codex"),
+    grokTextColor: taskbarTextColor(merged, "grok", "#d9578b"),
+    grokTextColorOn: taskbarTextColorOn(merged, "grok"),
     infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
     infoTextColorOn: taskbarTextColorOn(merged, "info"),
     ringTextColor: taskbarTextColor(merged, "ring", "#6b7280"),

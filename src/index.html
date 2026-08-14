@@ -124,6 +124,37 @@
         <p class="meta"></p>
       </section>
 
+      <section class="tool-card" data-tool="grok" data-state="empty" hidden>
+        <header class="tool-head">
+          <div class="tool-title">
+            <span class="tool-dot grok-dot"></span>
+            <h2>Grok</h2>
+          </div>
+          <span class="pc"></span>
+        </header>
+
+        <div class="metric p5h">
+          <div class="metric-row">
+            <span data-i18n="limit.usage">사용량</span>
+            <strong class="val">-</strong>
+          </div>
+          <div class="track"><span class="fill"></span></div>
+          <p class="reset"></p>
+        </div>
+
+        <div class="metric pweek" hidden>
+          <div class="metric-row">
+            <span></span>
+            <strong class="val">-</strong>
+          </div>
+          <div class="track"><span class="fill"></span></div>
+          <p class="reset"></p>
+        </div>
+
+        <p class="empty-hint"></p>
+        <p class="meta"></p>
+      </section>
+
       <section id="activity-card" class="activity-card" data-state="loading" data-filter="all">
         <header class="activity-head">
           <div class="activity-title">
@@ -133,6 +164,7 @@
             <button type="button" data-activity-filter="all" aria-pressed="true" data-i18n="activity.filterAll">전체</button>
             <button type="button" data-activity-filter="claude" aria-pressed="false" data-i18n="activity.filterClaude">Claude</button>
             <button type="button" data-activity-filter="codex" aria-pressed="false" data-i18n="activity.filterCodex">Codex</button>
+            <button type="button" data-activity-filter="grok" aria-pressed="false" data-i18n="activity.filterGrok" hidden>Grok</button>
           </div>
         </header>
 
@@ -325,6 +357,14 @@
                     <span data-i18n="field.codexSecondaryColor">Codex 주간</span>
                     <input type="color" name="codex_secondary_color" value="#4d86d6" />
                   </label>
+                  <label>
+                    <span data-i18n="field.grokPrimaryColor">Grok 주간</span>
+                    <input type="color" name="grok_primary_color" value="#d9578b" />
+                  </label>
+                  <label>
+                    <span data-i18n="field.grokSecondaryColor">Grok 월간</span>
+                    <input type="color" name="grok_secondary_color" value="#8a6fd1" />
+                  </label>
                 </div>
                 <div class="tool-threshold-grid">
                   <label class="tool-threshold-color">
@@ -369,10 +409,20 @@
                       <input type="color" name="codex_text_color" value="#2fac7d" />
                     </label>
                   </div>
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="grok">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="grok_text_color_on" />
+                      <span data-i18n="field.grokTextColor">Grok 이름</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="grok_text_color" value="#d9578b" />
+                    </label>
+                  </div>
                   <div class="taskbar-text-color-item" data-taskbar-text-color="info">
                     <label class="toggle-row taskbar-text-color-toggle">
                       <input type="checkbox" name="info_text_color_on" />
-                      <span data-i18n="field.infoTextColor">5h·주간 정보</span>
+                      <span data-i18n="field.infoTextColor">한도 정보</span>
                     </label>
                     <label class="taskbar-text-color-picker">
                       <span data-i18n="field.textColorValue">색상</span>
@@ -622,7 +672,7 @@
                 <input type="checkbox" name="taskbar_layout_memory_on" checked />
                 <span class="toggle-copy">
                   <span class="toggle-title" data-i18n="field.taskbarLayoutMemory">모니터 조합별 위치 기억</span>
-                  <small class="field-help" data-i18n="help.taskbarLayoutMemory">연결된 모니터 조합마다 Claude·Codex의 작업표시줄 위치를 따로 복원합니다.</small>
+                  <small class="field-help" data-i18n="help.taskbarLayoutMemory">연결된 모니터 조합마다 도구별 작업표시줄 위치를 따로 복원합니다.</small>
                 </span>
               </label>
 
@@ -657,6 +707,14 @@
                 <span class="toggle-copy">
                   <span class="toggle-title" data-i18n="field.showCodex">Codex 활성화</span>
                   <small class="field-help" data-i18n="help.showCodex">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
+                </span>
+              </label>
+
+              <label class="toggle-row">
+                <input type="checkbox" name="show_grok" />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.showGrok">Grok 활성화</span>
+                  <small class="field-help" data-i18n="help.showGrok">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
                 </span>
               </label>
             </div>
@@ -943,6 +1001,7 @@
 
           <input type="hidden" name="claude_taskbar_offset_ratio" value="0" />
           <input type="hidden" name="codex_taskbar_offset_ratio" value="0" />
+          <input type="hidden" name="grok_taskbar_offset_ratio" value="0" />
           </div>
         </details>
 
@@ -981,7 +1040,7 @@
             <strong>Juice</strong>
             <span><span data-i18n="about.version">버전</span> <b data-app-version>–</b></span>
           </div>
-          <p data-i18n="about.description">Claude Code와 Codex의 5시간·주간 사용량을 Windows 작업표시줄에서 확인하는 로컬 모니터입니다.</p>
+          <p data-i18n="about.description">Claude Code, Codex, Grok Build의 사용량을 Windows 작업표시줄에서 확인하는 로컬 모니터입니다.</p>
           <p data-i18n="about.privacy">Juice는 사용량이나 로그인 정보를 별도 Juice 서버에 저장하지 않습니다.</p>
         </div>
       </section>

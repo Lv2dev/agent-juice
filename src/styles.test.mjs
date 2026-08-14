@@ -132,9 +132,10 @@ test("usage cards share the same surface tint regardless of tool", () => {
   const cardTint = cssBlock(".tool-card::before");
   const hover = cssBlock(".tool-card:hover");
   const dot = cssBlock(".tool-dot");
-  const dotFill = cssBlock(".claude-dot,\n.codex-dot");
+  const dotFill = cssBlock(".claude-dot,\n.codex-dot,\n.grok-dot");
   const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
   const codexCard = cssBlock('.tool-card[data-tool="codex"]');
+  const grokCard = cssBlock('.tool-card[data-tool="grok"]');
 
   assert.match(cardTint, /display: none/);
   assert.doesNotMatch(cardTint, /var\(--tool-glow\)/);
@@ -145,8 +146,10 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.match(dotFill, /background: var\(--tool-brand\)/);
   assert.match(claudeCard, /--tool-brand: #d79a32/);
   assert.match(codexCard, /--tool-brand: #2fac7d/);
+  assert.match(grokCard, /--tool-brand: #d9578b/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
+  assert.doesNotMatch(grokCard, /--tool-glow/);
 });
 
 test("styles default to system theme and allow explicit light or dark overrides", () => {
@@ -226,17 +229,18 @@ test("styles keep the AppBar contract stable", () => {
   assert.match(tool, /min-width: 0/);
   assert.deepEqual(
     barWindows.map((item) => item.label).sort(),
-    ["bar-claude", "bar-codex"],
+    ["bar-claude", "bar-codex", "bar-grok"],
   );
   for (const barWindowConfig of barWindows) {
     assert.equal(barWindowConfig?.title, "Juice Bar");
     assert.equal(barWindowConfig?.transparent, true);
     assert.equal(barWindowConfig?.shadow, false);
-    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex)/);
+    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex|grok)/);
   }
   const capabilityWindows = capabilities.flatMap((item) => item.windows ?? []);
   assert.ok(capabilityWindows.includes("bar-claude"));
   assert.ok(capabilityWindows.includes("bar-codex"));
+  assert.ok(capabilityWindows.includes("bar-grok"));
   assert.ok(!capabilityWindows.includes("bar"));
 });
 
@@ -534,7 +538,7 @@ test("taskbar overlay cannot synchronously couple the Juice event loop to Explor
   assert.doesNotMatch(dockApply, /get_webview_window|\.hwnd\(\)/);
   assert.match(
     rustLib,
-    /let positions = actions[\s\S]*resolve_taskbar_position_pair[\s\S]*let _layout_guard = try_taskbar_layout_gate/,
+    /let mut positions = actions[\s\S]*resolve_taskbar_overlaps[\s\S]*let _layout_guard = try_taskbar_layout_gate/,
   );
   assert.match(
     rustLib,
@@ -1226,7 +1230,7 @@ test("about and update sections keep product copy separate from guarded update c
   const update = markupSection("update");
 
   assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="install-update"/);
-  assert.match(about, /Claude Code와 Codex의 5시간·주간 사용량/);
+  assert.match(about, /Claude Code, Codex, Grok Build의 사용량/);
   assert.match(about, /별도 Juice 서버에 저장하지 않습니다/);
   assert.match(update, /name="update_check_on" checked/);
   assert.match(update, /data-action="check-updates"/);
@@ -1530,7 +1534,7 @@ test("statusline bridge verifier uses an isolated data directory", (t) => {
 test("taskbar bar initial paint hides tool sections and placeholder values", () => {
   const hiddenTools = barMarkup.match(/<section class="bar-tool"[^>]*hidden/g) ?? [];
 
-  assert.equal(hiddenTools.length, 2);
+  assert.equal(hiddenTools.length, 3);
   assert.doesNotMatch(barMarkup, /<strong class="bar-worst">[–-]<\/strong>/);
   assert.doesNotMatch(barMarkup, /5h\s*[–-]/);
   assert.doesNotMatch(barMarkup, /주간\s*[–-]/);
@@ -1555,7 +1559,7 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
   assert.ok(panelCapability);
   assert.ok(barCapability);
   assert.deepEqual(panelCapability.windows, ["panel"]);
-  assert.deepEqual(barCapability.windows.sort(), ["bar-claude", "bar-codex"]);
+  assert.deepEqual(barCapability.windows.sort(), ["bar-claude", "bar-codex", "bar-grok"]);
   assert.ok(barCapability.permissions.includes("core:default"));
   assert.notEqual(panelCapability.identifier, barCapability.identifier);
   assert.match(rustLib, /ensure_panel_command/);
@@ -1661,7 +1665,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.11"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.12"]));
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

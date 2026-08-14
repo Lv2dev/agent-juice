@@ -424,6 +424,10 @@ h1::before {
   --tool-brand: #2fac7d;
 }
 
+.tool-card[data-tool="grok"] {
+  --tool-brand: #d9578b;
+}
+
 .tool-card[data-state="stale"],
 .tool-card[data-state="empty"] {
   opacity: 0.64;
@@ -467,7 +471,8 @@ h2 {
 }
 
 .claude-dot,
-.codex-dot {
+.codex-dot,
+.grok-dot {
   background: var(--tool-brand);
 }
 
@@ -574,6 +579,7 @@ h2 {
   --activity-color: var(--accent);
   --activity-color-claude: #d79a32;
   --activity-color-codex: #2fac7d;
+  --activity-color-grok: #d9578b;
   --activity-cell-size: 9px;
   --activity-chart-width: 570px;
   position: relative;
@@ -595,6 +601,10 @@ h2 {
 
 .activity-card[data-filter="codex"] {
   --activity-color: var(--activity-color-codex);
+}
+
+.activity-card[data-filter="grok"] {
+  --activity-color: var(--activity-color-grok);
 }
 
 .activity-head,
@@ -877,6 +887,7 @@ h2 {
   --indicator-track-opacity: 11%;
   --claude-text-color: #d79a32;
   --codex-text-color: #2fac7d;
+  --grok-text-color: #d9578b;
   --info-text-color: #6b7280;
   --ring-text-color: #6b7280;
   --bar-text-font-size: 11px;
@@ -973,6 +984,10 @@ html[data-panel-visible="false"] * {
 
 .bar-tool[data-tool="codex"] {
   --tool-brand: #2fac7d;
+}
+
+.bar-tool[data-tool="grok"] {
+  --tool-brand: #d9578b;
 }
 
 .bar-tool[data-state="stale"],
@@ -1411,6 +1426,10 @@ html[data-panel-visible="false"] * {
   color: var(--codex-text-color);
 }
 
+.bar-shell[data-grok-text-color="custom"] .bar-tool[data-tool="grok"] .bar-tool-name {
+  color: var(--grok-text-color);
+}
+
 .bar-shell[data-info-text-color="custom"] .bar-line,
 .bar-shell[data-info-text-color="custom"] .primary-reset,
 .bar-shell[data-info-text-color="custom"] .secondary-reset {
@@ -1451,6 +1470,10 @@ html[data-panel-visible="false"] * {
 
 .bar-shell[data-codex-text-color="custom"] .bar-tool[data-tool="codex"][data-state="stale"] .bar-tool-name {
   color: color-mix(in srgb, var(--codex-text-color) 62%, var(--text-muted));
+}
+
+.bar-shell[data-grok-text-color="custom"] .bar-tool[data-tool="grok"][data-state="stale"] .bar-tool-name {
+  color: color-mix(in srgb, var(--grok-text-color) 62%, var(--text-muted));
 }
 
 .bar-shell[data-info-text-color="custom"] .bar-tool[data-state="stale"] .bar-line,

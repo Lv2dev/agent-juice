@@ -118,6 +118,55 @@
           </span>
         </div>
       </section>
+
+      <section class="bar-tool" data-tool="grok" data-state="empty" hidden>
+        <div class="bar-ring">
+          <svg class="ring-svg" viewBox="0 0 100 100" aria-hidden="true">
+            <circle class="ring-track outer-track" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-effect ring-effect-shadow outer-effect" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-effect ring-effect-highlight outer-effect" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-arc outer-arc" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-track inner-track" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-effect ring-effect-shadow inner-effect" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-effect ring-effect-highlight inner-effect" cx="50" cy="50" pathLength="100"></circle>
+            <circle class="ring-arc inner-arc" cx="50" cy="50" pathLength="100"></circle>
+          </svg>
+          <strong class="bar-worst"></strong>
+        </div>
+        <div class="bar-quad" aria-hidden="true">
+          <span class="quad-ring quad-primary">
+            <svg class="quad-svg" viewBox="0 0 100 100" aria-hidden="true">
+              <circle class="ring-track quad-track" cx="50" cy="50" pathLength="100"></circle>
+              <circle class="ring-effect ring-effect-shadow quad-effect" cx="50" cy="50" pathLength="100"></circle>
+              <circle class="ring-effect ring-effect-highlight quad-effect" cx="50" cy="50" pathLength="100"></circle>
+              <circle class="ring-arc quad-arc" cx="50" cy="50" pathLength="100"></circle>
+            </svg>
+            <span class="quad-number quad-primary-number"></span>
+          </span>
+          <span class="quad-ring quad-secondary" hidden>
+            <svg class="quad-svg" viewBox="0 0 100 100" aria-hidden="true">
+              <circle class="ring-track quad-track" cx="50" cy="50" pathLength="100"></circle>
+              <circle class="ring-arc quad-arc" cx="50" cy="50" pathLength="100"></circle>
+            </svg>
+            <span class="quad-number quad-secondary-number"></span>
+          </span>
+        </div>
+        <div class="bar-bars" aria-hidden="true">
+          <span class="limit-bar primary-limit"></span>
+          <span class="limit-bar secondary-limit" hidden></span>
+        </div>
+        <div class="bar-copy">
+          <strong class="bar-tool-name">Grok</strong>
+          <span class="bar-line">
+            <span class="primary-text"></span>
+            <span class="primary-reset"></span>
+          </span>
+          <span class="bar-line" hidden>
+            <span class="secondary-text"></span>
+            <span class="secondary-reset"></span>
+          </span>
+        </div>
+      </section>
       <div id="bar-menu" class="bar-context-menu" hidden>
         <button type="button" data-bar-action="refresh" data-i18n="action.refresh">새로고침</button>
       </div>

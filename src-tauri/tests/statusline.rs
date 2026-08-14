@@ -1,7 +1,5 @@
 use agent_juice::{config::Settings, statusline};
 use serde_json::Value;
-#[cfg(windows)]
-use std::time::{Duration, Instant};
 use std::{
     fs,
     io::Write,
@@ -18,52 +16,6 @@ fn unique_temp_dir() -> std::path::PathBuf {
         "agent-juice-statusline-test-{}-{suffix}",
         std::process::id()
     ))
-}
-
-#[cfg(windows)]
-#[repr(C)]
-#[derive(Default)]
-struct ThreadEntry32 {
-    size: u32,
-    usage: u32,
-    thread_id: u32,
-    owner_process_id: u32,
-    base_priority: i32,
-    priority_delta: i32,
-    flags: u32,
-}
-
-#[cfg(windows)]
-fn current_process_thread_count() -> usize {
-    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> isize;
-        fn Thread32First(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
-        fn Thread32Next(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
-        fn CloseHandle(handle: isize) -> i32;
-    }
-
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-    assert_ne!(snapshot, -1, "thread snapshot creation failed");
-    let mut entry = ThreadEntry32 {
-        size: std::mem::size_of::<ThreadEntry32>() as u32,
-        ..ThreadEntry32::default()
-    };
-    let mut count = 0;
-    if unsafe { Thread32First(snapshot, &mut entry) } != 0 {
-        loop {
-            if entry.owner_process_id == std::process::id() {
-                count += 1;
-            }
-            if unsafe { Thread32Next(snapshot, &mut entry) } == 0 {
-                break;
-            }
-        }
-    }
-    let _ = unsafe { CloseHandle(snapshot) };
-    count
 }
 
 #[test]
@@ -88,16 +40,32 @@ fn forwards_subset_to_session_file_and_falls_back_to_context_line() {
 }
 
 #[test]
-fn runs_original_cat_wrap_when_available() {
+fn ignores_original_wrap_without_starting_a_child_process() {
     let dir = unique_temp_dir();
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("wrap.json"), "cat").unwrap();
+    let marker = dir.join("original-ran.txt");
+    let original = if cfg!(windows) {
+        format!("echo original>{}", marker.display())
+    } else {
+        format!("echo original > {}", marker.display())
+    };
+    fs::write(dir.join("wrap.json"), &original).unwrap();
+    fs::write(
+        dir.join("wrap-meta.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "managed_command": "fixture-managed",
+            "original_command": original,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let input = r#"{"session_id":"t","context_window":{"used_percentage":63}}"#;
 
     let output = statusline::run_with_dir(input, &dir);
 
-    assert_eq!(String::from_utf8(output).unwrap(), input);
+    assert_eq!(String::from_utf8(output).unwrap(), "ctx 63%\n");
     assert!(dir.join("claude_last.t.json").exists());
+    assert!(!marker.exists());
 
     fs::remove_dir_all(dir).unwrap();
 }
@@ -274,180 +242,18 @@ fn restore_owned_statusline_cli_uses_exit_status_without_stdout() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(windows)]
 #[test]
-fn original_command_timeout_returns_fallback_and_terminates_process_tree() {
-    let dir = unique_temp_dir();
-    fs::create_dir_all(&dir).unwrap();
-    let command_path = dir.join("slow-tree.cmd");
-    let marker_path = dir.join("leaked-child.txt");
-    let command = format!(
-        "@echo off\r\nstart \"\" /b cmd.exe /D /C \"ping.exe 127.0.0.1 -n 5 >nul & echo leaked>{}\"\r\nping.exe 127.0.0.1 -n 30 >nul\r\n",
-        marker_path.display()
-    );
-    fs::write(&command_path, command).unwrap();
-    let original = command_path.to_string_lossy().to_string();
-    fs::write(dir.join("wrap.json"), &original).unwrap();
-    fs::write(
-        dir.join("wrap-meta.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "managed_command": "fixture-managed",
-            "original_command": original,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let input = r#"{"session_id":"timeout","context_window":{"used_percentage":63}}"#;
-
-    let started = Instant::now();
-    let output = statusline::run_with_dir(input, &dir);
-    let elapsed = started.elapsed();
-
-    assert_eq!(String::from_utf8(output).unwrap(), "ctx 63%\n");
-    assert!(elapsed >= Duration::from_millis(1_700));
-    assert!(elapsed < Duration::from_secs(5));
-
-    let recovered = "echo recovered";
-    fs::write(dir.join("wrap.json"), recovered).unwrap();
-    fs::write(
-        dir.join("wrap-meta.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "managed_command": "fixture-managed",
-            "original_command": recovered,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let next_started = Instant::now();
-    let next = statusline::run_with_dir(input, &dir);
-    assert!(next_started.elapsed() < Duration::from_secs(1));
-    assert_eq!(String::from_utf8(next).unwrap().trim(), "recovered");
-
-    std::thread::sleep(Duration::from_secs(4));
-    assert!(!marker_path.exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-fn repeated_immediate_descendant_timeouts_leave_no_processes_or_reader_threads() {
-    const ISOLATED_RUN: &str = "AGENT_JUICE_STATUSLINE_TIMEOUT_ISOLATED";
-    if std::env::var_os(ISOLATED_RUN).is_none() {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "repeated_immediate_descendant_timeouts_leave_no_processes_or_reader_threads",
-                "--nocapture",
-            ])
-            .env(ISOLATED_RUN, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "isolated timeout regression failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
-
-    let dir = unique_temp_dir();
-    fs::create_dir_all(&dir).unwrap();
-    let baseline_threads = current_process_thread_count();
-    let input = r#"{"session_id":"repeated-timeout","context_window":{"used_percentage":63}}"#;
-    let mut markers = Vec::new();
-
-    for attempt in 0..3 {
-        let command_path = dir.join(format!("immediate-tree-{attempt}.cmd"));
-        let marker_path = dir.join(format!("leaked-child-{attempt}.txt"));
-        let command = format!(
-            "@echo off\r\nstart \"\" /b cmd.exe /D /C \"ping.exe 127.0.0.1 -n 6 >nul & echo leaked>{}\"\r\nping.exe 127.0.0.1 -n 30 >nul\r\n",
-            marker_path.display()
-        );
-        fs::write(&command_path, command).unwrap();
-        let original = command_path.to_string_lossy().to_string();
-        fs::write(dir.join("wrap.json"), &original).unwrap();
-        fs::write(
-            dir.join("wrap-meta.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "managed_command": "fixture-managed",
-                "original_command": original,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let started = Instant::now();
-        let output = statusline::run_with_dir(input, &dir);
-        assert_eq!(String::from_utf8(output).unwrap(), "ctx 63%\n");
-        assert!(started.elapsed() >= Duration::from_millis(1_700));
-        assert!(started.elapsed() < Duration::from_secs(3));
-
-        let thread_deadline = Instant::now() + Duration::from_millis(500);
-        while current_process_thread_count() > baseline_threads && Instant::now() < thread_deadline
-        {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            current_process_thread_count() <= baseline_threads,
-            "statusLine stdout reader thread accumulated after timeout attempt {attempt}"
-        );
-        markers.push(marker_path);
-    }
-
-    std::thread::sleep(Duration::from_secs(4));
-    assert!(
-        markers.iter().all(|marker| !marker.exists()),
-        "a statusLine descendant survived its timeout"
-    );
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-fn original_command_timeout_includes_a_blocked_large_stdin_write() {
-    let dir = unique_temp_dir();
-    fs::create_dir_all(&dir).unwrap();
-    let command_path = dir.join("no-stdin.cmd");
-    fs::write(
-        &command_path,
-        "@echo off\r\nping.exe 127.0.0.1 -n 30 >nul\r\n",
-    )
-    .unwrap();
-    let original = command_path.to_string_lossy().to_string();
-    fs::write(dir.join("wrap.json"), &original).unwrap();
-    fs::write(
-        dir.join("wrap-meta.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "managed_command": "fixture-managed",
-            "original_command": original,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let input = "x".repeat(512 * 1024);
-    let started = Instant::now();
-    let output = statusline::run_with_dir(&input, &dir);
-    assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(String::from_utf8(output).unwrap(), "agent-juice\n");
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn statusline_uses_single_original_command_runner() {
+fn statusline_source_cannot_spawn_original_commands() {
     let source = fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/statusline.rs"),
     )
     .unwrap();
 
-    assert!(source.contains("(\"cmd\", &[\"/C\"])") || source.contains("(\"sh\", &[\"-c\"])"));
-    assert!(!source.contains("\"powershell\""));
-    assert!(!source.contains("\"pwsh\""));
-    assert!(!source.contains("\"bash\""));
+    assert!(!source.contains("std::process::Command"));
+    assert!(!source.contains("Command::new"));
+    assert!(!source.contains("run_original"));
+    assert!(!source.contains("wrap.json"));
+    assert!(!source.contains("wrap-meta.json"));
 }
 
 #[test]

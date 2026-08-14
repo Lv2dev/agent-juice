@@ -279,13 +279,15 @@ fn latest_per_tool_picks_newest_status_for_each_tool() {
     let older_claude = status(Tool::Claude, "old", "2026-07-07T00:00:00Z");
     let newer_claude = status(Tool::Claude, "new", "2026-07-07T00:03:00Z");
     let codex = status(Tool::Codex, "codex", "2026-07-07T00:01:00Z");
+    let grok = status(Tool::Grok, "grok", "2026-07-07T00:02:00Z");
 
-    let mut reps = latest_per_tool(&[older_claude, newer_claude, codex]);
+    let mut reps = latest_per_tool(&[older_claude, newer_claude, codex, grok]);
     reps.sort_by(|a, b| format!("{:?}", a.tool).cmp(&format!("{:?}", b.tool)));
 
-    assert_eq!(reps.len(), 2);
+    assert_eq!(reps.len(), 3);
     assert!(reps.iter().any(|status| status.session_id == "new"));
     assert!(reps.iter().any(|status| status.session_id == "codex"));
+    assert!(reps.iter().any(|status| status.session_id == "grok"));
 }
 
 #[test]

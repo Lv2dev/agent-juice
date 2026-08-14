@@ -1325,6 +1325,70 @@ pub fn resolve_taskbar_pair_overlap(
     (rects[0], rects[1])
 }
 
+pub fn resolve_taskbar_overlaps(taskbar: DockRect, rects: &mut [DockRect]) {
+    if rects.len() < 2 || taskbar.width <= 0 || taskbar.height <= 0 {
+        return;
+    }
+
+    let horizontal = is_horizontal_taskbar(taskbar.width, taskbar.height);
+    let task_start = if horizontal { taskbar.x } else { taskbar.y };
+    let task_length = if horizontal {
+        taskbar.width
+    } else {
+        taskbar.height
+    };
+    let Some(task_end) = task_start.checked_add(task_length) else {
+        return;
+    };
+    let lengths = rects
+        .iter()
+        .map(|rect| if horizontal { rect.width } else { rect.height })
+        .collect::<Vec<_>>();
+    if lengths.iter().any(|length| *length <= 0)
+        || lengths.iter().map(|length| i64::from(*length)).sum::<i64>() > i64::from(task_length)
+    {
+        return;
+    }
+
+    let mut order = (0..rects.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| {
+        let start = if horizontal {
+            rects[*index].x
+        } else {
+            rects[*index].y
+        };
+        (start, *index)
+    });
+
+    let mut starts = vec![0; rects.len()];
+    let mut cursor = task_start;
+    for index in order.iter().copied() {
+        let original = if horizontal {
+            rects[index].x
+        } else {
+            rects[index].y
+        };
+        let max_start = task_end.saturating_sub(lengths[index]);
+        starts[index] = original.clamp(task_start, max_start).max(cursor);
+        cursor = starts[index].saturating_add(lengths[index]);
+    }
+
+    cursor = task_end;
+    for index in order.iter().rev().copied() {
+        let max_start = cursor.saturating_sub(lengths[index]);
+        starts[index] = starts[index].min(max_start).max(task_start);
+        cursor = starts[index];
+    }
+
+    for (index, rect) in rects.iter_mut().enumerate() {
+        if horizontal {
+            rect.x = starts[index];
+        } else {
+            rect.y = starts[index];
+        }
+    }
+}
+
 fn offset_ratio_for_axis(
     taskbar_start: i32,
     taskbar_end: i32,
