@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 const CODEX_ACCOUNT_RESPONSE_ID: i64 = 2;
+const GROK_BILLING_RESPONSE_ID: i64 = 2;
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_ERROR_BYTES: usize = 64 * 1024;
@@ -620,8 +621,89 @@ pub fn codex_account_rate_limits_response(timeout: Duration) -> anyhow::Result<S
 }
 
 fn codex_account_rate_limits_response_with_command(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
+) -> anyhow::Result<String> {
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "agent-juice",
+                    "title": "Juice",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": CODEX_ACCOUNT_RESPONSE_ID,
+            "method": "account/rateLimits/read",
+            "params": {}
+        }),
+    ];
+    json_rpc_response_with_command(
+        command,
+        &requests,
+        CODEX_ACCOUNT_RESPONSE_ID,
+        timeout,
+        "codex app-server",
+    )
+}
+
+pub fn grok_billing_response(timeout: Duration) -> anyhow::Result<String> {
+    let command = grok_agent_command()?;
+    grok_billing_response_with_command(command, timeout)
+}
+
+fn grok_billing_response_with_command(
+    command: Command,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {
+                    "name": "agent-juice",
+                    "title": "Juice",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": GROK_BILLING_RESPONSE_ID,
+            "method": "_x.ai/billing",
+            "params": {}
+        }),
+    ];
+    json_rpc_response_with_command(
+        command,
+        &requests,
+        GROK_BILLING_RESPONSE_ID,
+        timeout,
+        "Grok ACP",
+    )
+}
+
+fn json_rpc_response_with_command(
+    mut command: Command,
+    requests: &[Value],
+    response_id: i64,
+    timeout: Duration,
+    label: &str,
 ) -> anyhow::Result<String> {
     let deadline = Instant::now() + timeout;
     let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
@@ -635,15 +717,15 @@ fn codex_account_rate_limits_response_with_command(
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow::anyhow!("codex app-server stdout unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("{label} stdout unavailable"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| anyhow::anyhow!("codex app-server stderr unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("{label} stderr unavailable"))?;
         let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow::anyhow!("codex app-server stdin unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("{label} stdin unavailable"))?;
 
         let (tx, rx) = mpsc::sync_channel(16);
         let (stdout_done_tx, stdout_done_rx) = mpsc::sync_channel(1);
@@ -672,36 +754,11 @@ fn codex_account_rate_limits_response_with_command(
             let result = read_bounded_to_end(
                 BufReader::new(stderr),
                 MAX_COMMAND_ERROR_BYTES,
-                "codex app-server stderr",
+                "JSON-RPC stderr",
             );
             let _ = stderr_tx.send(result);
         });
 
-        let requests = [
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "agent-juice",
-                        "title": "Juice",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }
-            }),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "initialized",
-                "params": {}
-            }),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": CODEX_ACCOUNT_RESPONSE_ID,
-                "method": "account/rateLimits/read",
-                "params": {}
-            }),
-        ];
         for request in requests {
             writeln!(stdin, "{}", request)?;
         }
@@ -716,11 +773,11 @@ fn codex_account_rate_limits_response_with_command(
                     let Ok(value) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
-                    if value.get("id").and_then(Value::as_i64) != Some(CODEX_ACCOUNT_RESPONSE_ID) {
+                    if value.get("id").and_then(Value::as_i64) != Some(response_id) {
                         continue;
                     }
                     outcome = Some(if value.get("error").is_some() {
-                        Err(anyhow::anyhow!("codex account API returned an error"))
+                        Err(anyhow::anyhow!("{label} returned an error"))
                     } else {
                         Ok(line)
                     });
@@ -741,12 +798,12 @@ fn codex_account_rate_limits_response_with_command(
         let remaining = hard_deadline.saturating_duration_since(Instant::now());
         stdout_done_rx
             .recv_timeout(remaining)
-            .map_err(|_| anyhow::anyhow!("codex app-server stdout did not close"))?;
+            .map_err(|_| anyhow::anyhow!("{label} stdout did not close"))?;
         let remaining = hard_deadline.saturating_duration_since(Instant::now());
         stderr_rx
             .recv_timeout(remaining)
-            .map_err(|_| anyhow::anyhow!("codex app-server stderr did not close"))??;
-        outcome.unwrap_or_else(|| Err(anyhow::anyhow!("codex account API timed out")))
+            .map_err(|_| anyhow::anyhow!("{label} stderr did not close"))??;
+        outcome.unwrap_or_else(|| Err(anyhow::anyhow!("{label} timed out")))
     })();
     terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
     result
@@ -956,6 +1013,38 @@ fn codex_app_server_command() -> Command {
         command.args(["app-server", "--listen", "stdio://"]);
         command
     }
+}
+
+fn grok_agent_command() -> anyhow::Result<Command> {
+    let executable = find_grok_executable(
+        std::env::var_os("PATH").as_deref(),
+        dirs::home_dir().as_deref(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("Grok Build executable unavailable"))?;
+    let mut command = Command::new(executable);
+    command.args(["agent", "stdio"]);
+    Ok(command)
+}
+
+fn find_grok_executable(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(windows)]
+    const NAMES: [&str; 2] = ["grok.exe", "grok"];
+    #[cfg(not(windows))]
+    const NAMES: [&str; 1] = ["grok"];
+
+    if let Some(path) = path {
+        for directory in std::env::split_paths(path) {
+            for name in NAMES {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let fallback = home?.join(".grok").join("bin").join(NAMES[0]);
+    fallback.is_file().then_some(fallback)
 }
 
 fn claude_usage_command() -> Command {
@@ -1338,6 +1427,98 @@ mod tests {
     }
 
     #[test]
+    fn fake_grok_agent_child() {
+        if std::env::var_os("AGENT_JUICE_FAKE_GROK_AGENT").is_none() {
+            return;
+        }
+
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        let mut methods = Vec::new();
+        for _ in 0..2 {
+            let mut request = String::new();
+            assert!(reader.read_line(&mut request).unwrap() > 0);
+            let value: Value = serde_json::from_str(&request).unwrap();
+            methods.push(
+                value
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(methods, ["initialize", "_x.ai/billing"]);
+        println!(
+            "{}",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": GROK_BILLING_RESPONSE_ID,
+                "result": {
+                    "config": {
+                        "creditUsagePercent": 12,
+                        "currentPeriod": {
+                            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                            "start": "2026-08-10T00:00:00Z",
+                            "end": "2026-08-17T00:00:00Z"
+                        }
+                    }
+                }
+            })
+        );
+        std::io::stdout().flush().unwrap();
+    }
+
+    #[test]
+    fn grok_agent_uses_bounded_acp_round_trip() {
+        let mut command = test_process("collector::tests::fake_grok_agent_child");
+        command.env("AGENT_JUICE_FAKE_GROK_AGENT", "1");
+
+        let response = grok_billing_response_with_command(command, Duration::from_secs(2)).unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(value.get("id").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            value
+                .pointer("/result/config/creditUsagePercent")
+                .and_then(Value::as_i64),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn grok_executable_prefers_path_then_official_home_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-grok-path-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let path_dir = root.join("path");
+        let home = root.join("home");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(home.join(".grok").join("bin")).unwrap();
+        #[cfg(windows)]
+        let name = "grok.exe";
+        #[cfg(not(windows))]
+        let name = "grok";
+        let path_executable = path_dir.join(name);
+        let fallback = home.join(".grok").join("bin").join(name);
+        std::fs::write(&path_executable, b"fixture").unwrap();
+        std::fs::write(&fallback, b"fixture").unwrap();
+        let path = std::env::join_paths([&path_dir]).unwrap();
+
+        assert_eq!(
+            find_grok_executable(Some(path.as_os_str()), Some(&home)),
+            Some(path_executable.clone())
+        );
+        std::fs::remove_file(path_executable).unwrap();
+        assert_eq!(
+            find_grok_executable(Some(path.as_os_str()), Some(&home)),
+            Some(fallback)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn command_output_rejects_oversized_stdout_and_stderr() {
         for variable in [
             "AGENT_JUICE_FAKE_OVERSIZED_STDOUT",
@@ -1391,6 +1572,22 @@ mod tests {
         assert_eq!(value.get("id").and_then(Value::as_i64), Some(2));
         assert!(value.pointer("/result/rateLimits").is_some());
         assert!(status.primary.is_some() || status.secondary.is_some());
+    }
+
+    #[test]
+    #[ignore = "requires a locally installed and logged-in Grok Build CLI"]
+    fn live_grok_billing_round_trip() {
+        let response = grok_billing_response(Duration::from_secs(8)).unwrap();
+        let status = crate::adapters::grok::parse_billing_response(
+            &response,
+            "LIVE",
+            "2026-08-13T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(status.tool, crate::model::Tool::Grok);
+        assert!(status.primary.is_some());
+        assert!(status.secondary.is_none());
     }
 
     #[cfg(windows)]

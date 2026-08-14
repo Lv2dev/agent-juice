@@ -9,6 +9,8 @@ const DEFAULT_TOOL_COLORS = {
   claudeSecondary: "#d36b86",
   codexPrimary: "#2fac7d",
   codexSecondary: "#4d86d6",
+  grokPrimary: "#d9578b",
+  grokSecondary: "#8a6fd1",
   warning: "#f59e0b",
   danger: "#ef4444",
 };
@@ -16,6 +18,7 @@ const DEFAULT_TOOL_COLORS = {
 const DEFAULT_TASKBAR_TEXT_COLORS = {
   claude: "#d79a32",
   codex: "#2fac7d",
+  grok: "#d9578b",
   info: "#6b7280",
   ring: "#6b7280",
 };
@@ -169,6 +172,8 @@ function toolColorState(toolColors) {
     claudeSecondaryColor: rgbToHex(colors.claude_secondary, DEFAULT_TOOL_COLORS.claudeSecondary),
     codexPrimaryColor: rgbToHex(colors.codex_primary, DEFAULT_TOOL_COLORS.codexPrimary),
     codexSecondaryColor: rgbToHex(colors.codex_secondary, DEFAULT_TOOL_COLORS.codexSecondary),
+    grokPrimaryColor: rgbToHex(colors.grok_primary, DEFAULT_TOOL_COLORS.grokPrimary),
+    grokSecondaryColor: rgbToHex(colors.grok_secondary, DEFAULT_TOOL_COLORS.grokSecondary),
     toolWarningColor: rgbToHex(colors.warning, DEFAULT_TOOL_COLORS.warning),
     toolDangerColor: rgbToHex(colors.danger, DEFAULT_TOOL_COLORS.danger),
     toolWarningColorOn: boolOr(colors.warning_on, true),
@@ -185,6 +190,8 @@ function taskbarTextColorState(taskbarTextColors) {
     claudeTextColorOn: boolOr(colors.claude_on, false),
     codexTextColor: rgbToHex(colors.codex, DEFAULT_TASKBAR_TEXT_COLORS.codex),
     codexTextColorOn: boolOr(colors.codex_on, false),
+    grokTextColor: rgbToHex(colors.grok, DEFAULT_TASKBAR_TEXT_COLORS.grok),
+    grokTextColorOn: boolOr(colors.grok_on, false),
     infoTextColor: rgbToHex(colors.info, DEFAULT_TASKBAR_TEXT_COLORS.info),
     infoTextColorOn: boolOr(colors.info_on, false),
     ringTextColor: rgbToHex(colors.ring, DEFAULT_TASKBAR_TEXT_COLORS.ring),
@@ -280,8 +287,10 @@ export function formStateFromSettings(settings = {}) {
       settings.codex_taskbar_offset_ratio,
       legacyOffset,
     ),
+    grokTaskbarOffsetRatio: ratioOr(settings.grok_taskbar_offset_ratio, legacyOffset),
     showClaude: settings.show_claude !== false,
     showCodex: settings.show_codex !== false,
+    showGrok: settings.show_grok === true,
     claudeAccountAutoCollectOn: boolOr(
       settings.claude_account_auto_collect_on ?? settings.claude_usage_auto_refresh_lab_on,
       true,
@@ -396,8 +405,10 @@ export function payloadFromEntries(entries) {
       source.get("codex_taskbar_offset_ratio"),
       0,
     ),
+    grok_taskbar_offset_ratio: ratioOr(source.get("grok_taskbar_offset_ratio"), 0),
     show_claude: isChecked(source.get("show_claude")),
     show_codex: isChecked(source.get("show_codex")),
+    show_grok: isChecked(source.get("show_grok")),
     claude_account_auto_collect_on: isChecked(
       source.get("claude_account_auto_collect_on"),
     ),
@@ -409,6 +420,8 @@ export function payloadFromEntries(entries) {
     claude_secondary_color: String(source.get("claude_secondary_color") || DEFAULT_TOOL_COLORS.claudeSecondary),
     codex_primary_color: String(source.get("codex_primary_color") || DEFAULT_TOOL_COLORS.codexPrimary),
     codex_secondary_color: String(source.get("codex_secondary_color") || DEFAULT_TOOL_COLORS.codexSecondary),
+    grok_primary_color: String(source.get("grok_primary_color") || DEFAULT_TOOL_COLORS.grokPrimary),
+    grok_secondary_color: String(source.get("grok_secondary_color") || DEFAULT_TOOL_COLORS.grokSecondary),
     tool_warning_color: String(source.get("tool_warning_color") || DEFAULT_TOOL_COLORS.warning),
     tool_danger_color: String(source.get("tool_danger_color") || DEFAULT_TOOL_COLORS.danger),
     tool_warning_color_on: isChecked(source.get("tool_warning_color_on")),
@@ -421,6 +434,10 @@ export function payloadFromEntries(entries) {
       source.get("codex_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.codex,
     ),
     codex_text_color_on: isChecked(source.get("codex_text_color_on")),
+    grok_text_color: String(
+      source.get("grok_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.grok,
+    ),
+    grok_text_color_on: isChecked(source.get("grok_text_color_on")),
     info_text_color: String(
       source.get("info_text_color") || DEFAULT_TASKBAR_TEXT_COLORS.info,
     ),

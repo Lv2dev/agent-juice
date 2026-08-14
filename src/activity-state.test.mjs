@@ -86,6 +86,29 @@ test("filters respect disabled tools while preserving raw tooltip totals", () =>
   assert.equal(source.codexTokens, 300);
 });
 
+test("activity totals and filters include Grok only when it is enabled", () => {
+  const snapshot = {
+    days: [{
+      date: "2026-07-18",
+      claude_tokens: 100,
+      codex_tokens: 300,
+      grok_tokens: 500,
+    }],
+  };
+  const enabled = buildActivityView(
+    snapshot,
+    { activity_weeks: 4, show_grok: true },
+    "grok",
+    NOW,
+  );
+  assert.equal(enabled.filter, "grok");
+  assert.equal(enabled.totalTokens, 500);
+  assert.equal(enabled.cells.find((cell) => cell.key === "2026-07-18").grokTokens, 500);
+
+  const disabled = buildActivityView(snapshot, { activity_weeks: 4 }, "all", NOW);
+  assert.equal(disabled.totalTokens, 400);
+});
+
 test("activity formatters return localized compact and exact labels", () => {
   assert.match(formatActivityTokens(1_250_000, "en", true), /1\.3M/);
   assert.equal(formatActivityTokens(1250, "en"), "1,250");

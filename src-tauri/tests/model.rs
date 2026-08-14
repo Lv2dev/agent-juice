@@ -22,3 +22,20 @@ fn agent_status_roundtrips_and_nullsafe() {
     let l: AgentStatus = serde_json::from_str(legacy).unwrap();
     assert_eq!(l.session_id, "");
 }
+
+#[test]
+fn grok_status_roundtrips_with_a_single_dynamic_period() {
+    let json = r#"{"schema_version":"agent_status.v1","pc_id":"PC1","tool":"grok",
+      "session_id":"grok-acp-billing","captured_at":"2026-08-13T00:00:00Z",
+      "primary":{"label":"week","used_percent":12.5,"resets_at":"2026-08-17T00:00:00Z"},
+      "secondary":null,"session":{"active":true,"context_used_percent":null},
+      "cost_estimate_usd":null,"approx":false}"#;
+
+    let status: AgentStatus = serde_json::from_str(json).unwrap();
+    assert_eq!(status.tool, Tool::Grok);
+    assert_eq!(status.primary.as_ref().unwrap().label, "week");
+    assert!(status.secondary.is_none());
+    assert!(serde_json::to_string(&status)
+        .unwrap()
+        .contains("\"tool\":\"grok\""));
+}

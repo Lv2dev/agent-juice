@@ -22,6 +22,8 @@ pub struct ToolColors {
     pub claude_secondary: [u8; 3],
     pub codex_primary: [u8; 3],
     pub codex_secondary: [u8; 3],
+    pub grok_primary: [u8; 3],
+    pub grok_secondary: [u8; 3],
     pub warning: [u8; 3],
     pub danger: [u8; 3],
     pub warning_on: bool,
@@ -33,6 +35,8 @@ const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     claude_secondary: [0xa6, 0x5f, 0x72],
     codex_primary: [0x4f, 0x8a, 0x73],
     codex_secondary: [0x4f, 0x76, 0xa6],
+    grok_primary: [0xd9, 0x57, 0x8b],
+    grok_secondary: [0x8a, 0x6f, 0xd1],
     warning: [0xf5, 0x9e, 0x0b],
     danger: [0xef, 0x44, 0x44],
     warning_on: true,
@@ -46,6 +50,8 @@ impl Default for ToolColors {
             claude_secondary: [0xd3, 0x6b, 0x86],
             codex_primary: [0x2f, 0xac, 0x7d],
             codex_secondary: [0x4d, 0x86, 0xd6],
+            grok_primary: [0xd9, 0x57, 0x8b],
+            grok_secondary: [0x8a, 0x6f, 0xd1],
             warning: [0xf5, 0x9e, 0x0b],
             danger: [0xef, 0x44, 0x44],
             warning_on: true,
@@ -61,6 +67,8 @@ pub struct TaskbarTextColors {
     pub claude_on: bool,
     pub codex: [u8; 3],
     pub codex_on: bool,
+    pub grok: [u8; 3],
+    pub grok_on: bool,
     pub info: [u8; 3],
     pub info_on: bool,
     pub ring: [u8; 3],
@@ -74,6 +82,8 @@ impl Default for TaskbarTextColors {
             claude_on: false,
             codex: [0x2f, 0xac, 0x7d],
             codex_on: false,
+            grok: [0xd9, 0x57, 0x8b],
+            grok_on: false,
             info: [0x6b, 0x72, 0x80],
             info_on: false,
             ring: [0x6b, 0x72, 0x80],
@@ -101,6 +111,8 @@ pub struct TaskbarLayoutProfile {
     pub claude: Option<TaskbarPlacement>,
     #[serde(default)]
     pub codex: Option<TaskbarPlacement>,
+    #[serde(default)]
+    pub grok: Option<TaskbarPlacement>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -139,6 +151,8 @@ pub struct Settings {
     pub maximized_hide_on: bool,
     #[serde(default = "default_taskbar_avoid_overlap_on")]
     pub taskbar_avoid_overlap_on: bool,
+    #[serde(default)]
+    pub taskbar_bars_paused: bool,
     #[serde(default = "default_taskbar_layout_memory_on")]
     pub taskbar_layout_memory_on: bool,
     #[serde(default)]
@@ -197,18 +211,26 @@ pub struct Settings {
     pub claude_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub codex_taskbar_offset_ratio: f32,
+    #[serde(default = "default_taskbar_offset_ratio")]
+    pub grok_taskbar_offset_ratio: f32,
     #[serde(default)]
     pub claude_taskbar_monitor_key: String,
     #[serde(default)]
     pub codex_taskbar_monitor_key: String,
     #[serde(default)]
+    pub grok_taskbar_monitor_key: String,
+    #[serde(default)]
     pub claude_taskbar_target_initialized: bool,
     #[serde(default)]
     pub codex_taskbar_target_initialized: bool,
+    #[serde(default)]
+    pub grok_taskbar_target_initialized: bool,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
+    #[serde(default)]
+    pub show_grok: bool,
     #[serde(
         default = "default_claude_account_auto_collect_on",
         alias = "claude_usage_auto_refresh_lab_on"
@@ -302,14 +324,20 @@ pub struct SettingsInput {
     pub claude_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub codex_taskbar_offset_ratio: f32,
+    #[serde(default = "default_taskbar_offset_ratio")]
+    pub grok_taskbar_offset_ratio: f32,
     #[serde(default)]
     pub claude_taskbar_monitor_key: String,
     #[serde(default)]
     pub codex_taskbar_monitor_key: String,
+    #[serde(default)]
+    pub grok_taskbar_monitor_key: String,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
     pub show_codex: bool,
+    #[serde(default)]
+    pub show_grok: bool,
     #[serde(
         default = "default_claude_account_auto_collect_on",
         alias = "claude_usage_auto_refresh_lab_on"
@@ -332,6 +360,10 @@ pub struct SettingsInput {
     #[serde(default)]
     pub codex_secondary_color: Option<String>,
     #[serde(default)]
+    pub grok_primary_color: Option<String>,
+    #[serde(default)]
+    pub grok_secondary_color: Option<String>,
+    #[serde(default)]
     pub tool_warning_color: Option<String>,
     #[serde(default)]
     pub tool_danger_color: Option<String>,
@@ -347,6 +379,10 @@ pub struct SettingsInput {
     pub codex_text_color: Option<String>,
     #[serde(default)]
     pub codex_text_color_on: bool,
+    #[serde(default)]
+    pub grok_text_color: Option<String>,
+    #[serde(default)]
+    pub grok_text_color_on: bool,
     #[serde(default)]
     pub info_text_color: Option<String>,
     #[serde(default)]
@@ -612,7 +648,9 @@ fn normalize_taskbar_layout_profile(
     };
     profile.claude = normalize_placement(profile.claude);
     profile.codex = normalize_placement(profile.codex);
-    (profile.claude.is_some() || profile.codex.is_some()).then_some(profile)
+    profile.grok = normalize_placement(profile.grok);
+    (profile.claude.is_some() || profile.codex.is_some() || profile.grok.is_some())
+        .then_some(profile)
 }
 
 pub fn canonical_taskbar_monitor_keys(mut monitor_keys: Vec<String>) -> Vec<String> {
@@ -643,6 +681,7 @@ impl Default for Settings {
             fullscreen_hide_on: default_fullscreen_hide_on(),
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
+            taskbar_bars_paused: false,
             taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
             taskbar_layout_profiles: Vec::new(),
             taskbar_layout_memory_initialized: false,
@@ -672,12 +711,16 @@ impl Default for Settings {
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
+            grok_taskbar_monitor_key: String::new(),
             claude_taskbar_target_initialized: false,
             codex_taskbar_target_initialized: false,
+            grok_taskbar_target_initialized: false,
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            show_grok: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
         }
     }
@@ -728,10 +771,13 @@ impl Default for SettingsInput {
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
+            grok_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            show_grok: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
             mono_color: None,
             custom_safe: None,
@@ -741,6 +787,8 @@ impl Default for SettingsInput {
             claude_secondary_color: None,
             codex_primary_color: None,
             codex_secondary_color: None,
+            grok_primary_color: None,
+            grok_secondary_color: None,
             tool_warning_color: None,
             tool_danger_color: None,
             tool_warning_color_on: default_tool_threshold_color_on(),
@@ -749,6 +797,8 @@ impl Default for SettingsInput {
             claude_text_color_on: false,
             codex_text_color: None,
             codex_text_color_on: false,
+            grok_text_color: None,
+            grok_text_color_on: false,
             info_text_color: None,
             info_text_color_on: false,
             ring_text_color: None,
@@ -969,10 +1019,13 @@ impl Settings {
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
+            grok_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
+            show_grok: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
             mono_color: None,
             custom_safe: None,
@@ -982,6 +1035,8 @@ impl Settings {
             claude_secondary_color: None,
             codex_primary_color: None,
             codex_secondary_color: None,
+            grok_primary_color: None,
+            grok_secondary_color: None,
             tool_warning_color: None,
             tool_danger_color: None,
             tool_warning_color_on: default_tool_threshold_color_on(),
@@ -990,6 +1045,8 @@ impl Settings {
             claude_text_color_on: false,
             codex_text_color: None,
             codex_text_color_on: false,
+            grok_text_color: None,
+            grok_text_color_on: false,
             info_text_color: None,
             info_text_color_on: false,
             ring_text_color: None,
@@ -1018,6 +1075,7 @@ impl Settings {
             fullscreen_hide_on: input.fullscreen_hide_on,
             maximized_hide_on: input.maximized_hide_on,
             taskbar_avoid_overlap_on: input.taskbar_avoid_overlap_on,
+            taskbar_bars_paused: false,
             taskbar_layout_memory_on: input.taskbar_layout_memory_on,
             taskbar_layout_profiles: Vec::new(),
             taskbar_layout_memory_initialized: false,
@@ -1071,12 +1129,16 @@ impl Settings {
             taskbar_offset_ratio: clamp_ratio(input.taskbar_offset_ratio),
             claude_taskbar_offset_ratio: clamp_ratio(input.claude_taskbar_offset_ratio),
             codex_taskbar_offset_ratio: clamp_ratio(input.codex_taskbar_offset_ratio),
+            grok_taskbar_offset_ratio: clamp_ratio(input.grok_taskbar_offset_ratio),
             claude_taskbar_monitor_key: input.claude_taskbar_monitor_key,
             codex_taskbar_monitor_key: input.codex_taskbar_monitor_key,
+            grok_taskbar_monitor_key: input.grok_taskbar_monitor_key,
             claude_taskbar_target_initialized: false,
             codex_taskbar_target_initialized: false,
+            grok_taskbar_target_initialized: false,
             show_claude: input.show_claude,
             show_codex: input.show_codex,
+            show_grok: input.show_grok,
             claude_account_auto_collect_on: input.claude_account_auto_collect_on,
         }
     }
@@ -1095,6 +1157,9 @@ impl Settings {
         if !json_has_field(value, "codex_taskbar_offset_ratio") {
             self.codex_taskbar_offset_ratio = legacy;
         }
+        if !json_has_field(value, "grok_taskbar_offset_ratio") {
+            self.grok_taskbar_offset_ratio = legacy;
+        }
     }
 
     fn apply_legacy_taskbar_target_state(&mut self, value: Option<&serde_json::Value>) {
@@ -1106,6 +1171,9 @@ impl Settings {
         }
         if !json_has_field(value, "codex_taskbar_target_initialized") {
             self.codex_taskbar_target_initialized = true;
+        }
+        if !json_has_field(value, "grok_taskbar_target_initialized") {
+            self.grok_taskbar_target_initialized = false;
         }
     }
 
@@ -1154,6 +1222,7 @@ impl Settings {
         self.taskbar_offset_ratio = clamp_ratio(self.taskbar_offset_ratio);
         self.claude_taskbar_offset_ratio = clamp_ratio(self.claude_taskbar_offset_ratio);
         self.codex_taskbar_offset_ratio = clamp_ratio(self.codex_taskbar_offset_ratio);
+        self.grok_taskbar_offset_ratio = clamp_ratio(self.grok_taskbar_offset_ratio);
     }
 
     fn normalize_taskbar_layout_profiles(&mut self) {
@@ -1172,6 +1241,9 @@ impl Settings {
                 }
                 if profile.codex.is_none() {
                     profile.codex = previous.codex;
+                }
+                if profile.grok.is_none() {
+                    profile.grok = previous.grok;
                 }
             }
             normalized.push(profile);
@@ -1246,6 +1318,7 @@ impl Settings {
         let before = (
             self.claude_taskbar_monitor_key.clone(),
             self.codex_taskbar_monitor_key.clone(),
+            self.grok_taskbar_monitor_key.clone(),
             self.taskbar_layout_profiles.clone(),
         );
 
@@ -1254,6 +1327,9 @@ impl Settings {
         }
         if self.codex_taskbar_target_initialized || !self.codex_taskbar_monitor_key.is_empty() {
             replace_key(&mut self.codex_taskbar_monitor_key, replacements);
+        }
+        if self.grok_taskbar_target_initialized || !self.grok_taskbar_monitor_key.is_empty() {
+            replace_key(&mut self.grok_taskbar_monitor_key, replacements);
         }
         for profile in &mut self.taskbar_layout_profiles {
             for key in &mut profile.monitor_keys {
@@ -1271,6 +1347,11 @@ impl Settings {
                     replace_key(&mut placement.monitor_key, replacements);
                 }
             }
+            if let Some(placement) = &mut profile.grok {
+                if !placement.monitor_key.is_empty() {
+                    replace_key(&mut placement.monitor_key, replacements);
+                }
+            }
         }
         self.normalize_taskbar_layout_profiles();
 
@@ -1278,6 +1359,7 @@ impl Settings {
             != (
                 self.claude_taskbar_monitor_key.clone(),
                 self.codex_taskbar_monitor_key.clone(),
+                self.grok_taskbar_monitor_key.clone(),
                 self.taskbar_layout_profiles.clone(),
             )
     }
@@ -1766,6 +1848,10 @@ fn tool_colors_from_input(input: &SettingsInput) -> ToolColors {
             .unwrap_or(defaults.codex_primary),
         codex_secondary: parse_hex_rgb(input.codex_secondary_color.as_deref())
             .unwrap_or(defaults.codex_secondary),
+        grok_primary: parse_hex_rgb(input.grok_primary_color.as_deref())
+            .unwrap_or(defaults.grok_primary),
+        grok_secondary: parse_hex_rgb(input.grok_secondary_color.as_deref())
+            .unwrap_or(defaults.grok_secondary),
         warning: parse_hex_rgb(input.tool_warning_color.as_deref()).unwrap_or(defaults.warning),
         danger: parse_hex_rgb(input.tool_danger_color.as_deref()).unwrap_or(defaults.danger),
         warning_on: input.tool_warning_color_on,
@@ -1780,6 +1866,8 @@ fn taskbar_text_colors_from_input(input: &SettingsInput) -> TaskbarTextColors {
         claude_on: input.claude_text_color_on,
         codex: parse_hex_rgb(input.codex_text_color.as_deref()).unwrap_or(defaults.codex),
         codex_on: input.codex_text_color_on,
+        grok: parse_hex_rgb(input.grok_text_color.as_deref()).unwrap_or(defaults.grok),
+        grok_on: input.grok_text_color_on,
         info: parse_hex_rgb(input.info_text_color.as_deref()).unwrap_or(defaults.info),
         info_on: input.info_text_color_on,
         ring: parse_hex_rgb(input.ring_text_color.as_deref()).unwrap_or(defaults.ring),
@@ -1905,6 +1993,58 @@ mod parser_tests {
     }
 
     #[test]
+    fn taskbar_pause_defaults_to_resumed_and_round_trips() {
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.taskbar_bars_paused);
+
+        let paused = Settings {
+            taskbar_bars_paused: true,
+            ..Settings::default()
+        };
+        let serialized = serde_json::to_string(&paused).unwrap();
+        let restored: Settings = serde_json::from_str(&serialized).unwrap();
+
+        assert!(restored.taskbar_bars_paused);
+    }
+
+    #[test]
+    fn grok_collection_is_opt_in_and_round_trips_through_ui_input() {
+        assert!(!Settings::default().show_grok);
+        let legacy_input: SettingsInput = serde_json::from_str("{}").unwrap();
+        assert!(!legacy_input.show_grok);
+
+        let settings = Settings::from_input(SettingsInput {
+            show_grok: true,
+            ..SettingsInput::default()
+        });
+        assert!(settings.show_grok);
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.show_grok);
+    }
+
+    #[test]
+    fn grok_ui_settings_persist_colors_text_and_taskbar_target_input() {
+        let settings = Settings::from_input(SettingsInput {
+            grok_primary_color: Some("#d15288".into()),
+            grok_secondary_color: Some("#8269c8".into()),
+            grok_text_color: Some("#f070a0".into()),
+            grok_text_color_on: true,
+            grok_taskbar_offset_ratio: 0.65,
+            grok_taskbar_monitor_key: "monitor:grok".into(),
+            ..SettingsInput::default()
+        });
+
+        assert_eq!(settings.tool_colors.grok_primary, [0xd1, 0x52, 0x88]);
+        assert_eq!(settings.tool_colors.grok_secondary, [0x82, 0x69, 0xc8]);
+        assert_eq!(settings.taskbar_text_colors.grok, [0xf0, 0x70, 0xa0]);
+        assert!(settings.taskbar_text_colors.grok_on);
+        assert_eq!(settings.grok_taskbar_offset_ratio, 0.65);
+        assert_eq!(settings.grok_taskbar_monitor_key, "monitor:grok");
+        assert!(!settings.grok_taskbar_target_initialized);
+    }
+
+    #[test]
     fn taskbar_layout_profiles_are_canonical_bounded_and_latest_wins() {
         let root = temp_root("taskbar-layout-normalization");
         let path = root.join("settings.json");
@@ -1944,6 +2084,7 @@ mod parser_tests {
                         offset_ratio: 0.5,
                     }),
                     codex: None,
+                    grok: None,
                 })
             );
         }
@@ -1977,6 +2118,7 @@ mod parser_tests {
                         offset_ratio: 0.2,
                     }),
                     codex: None,
+                    grok: None,
                 },
                 TaskbarLayoutProfile {
                     monitor_keys: vec!["monitor-path:primary".into()],
@@ -1985,6 +2127,7 @@ mod parser_tests {
                         monitor_key: "monitor-path:primary".into(),
                         offset_ratio: 0.8,
                     }),
+                    grok: None,
                 },
             ],
             ..Settings::default()

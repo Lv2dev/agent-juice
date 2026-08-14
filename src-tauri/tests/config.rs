@@ -192,6 +192,8 @@ fn settings_roundtrip_and_legacy_defaults() {
             claude_secondary: [0x44, 0x55, 0x66],
             codex_primary: [0x77, 0x88, 0x99],
             codex_secondary: [0xaa, 0xbb, 0xcc],
+            grok_primary: [0xd1, 0x52, 0x88],
+            grok_secondary: [0x82, 0x69, 0xc8],
             warning: [0xde, 0xad, 0x01],
             danger: [0xbe, 0xef, 0x02],
             warning_on: false,
@@ -202,6 +204,8 @@ fn settings_roundtrip_and_legacy_defaults() {
             claude_on: true,
             codex: [0x23, 0x45, 0x67],
             codex_on: false,
+            grok: [0xd1, 0x52, 0x88],
+            grok_on: true,
             info: [0x34, 0x56, 0x78],
             info_on: true,
             ring: [0x45, 0x67, 0x89],
@@ -221,6 +225,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         fullscreen_hide_on: false,
         maximized_hide_on: true,
         taskbar_avoid_overlap_on: false,
+        taskbar_bars_paused: true,
         taskbar_layout_memory_on: false,
         taskbar_layout_profiles: Vec::new(),
         taskbar_layout_memory_initialized: true,
@@ -250,12 +255,16 @@ fn settings_roundtrip_and_legacy_defaults() {
         taskbar_offset_ratio: 0.25,
         claude_taskbar_offset_ratio: 0.15,
         codex_taskbar_offset_ratio: 0.85,
+        grok_taskbar_offset_ratio: 0.65,
         claude_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
         codex_taskbar_monitor_key: "monitor:1920,0,2560,1440".into(),
+        grok_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
         claude_taskbar_target_initialized: true,
         codex_taskbar_target_initialized: true,
+        grok_taskbar_target_initialized: true,
         show_claude: false,
         show_codex: true,
+        show_grok: true,
         claude_account_auto_collect_on: true,
     };
 
@@ -279,6 +288,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(!loaded.fullscreen_hide_on);
     assert!(loaded.maximized_hide_on);
     assert!(!loaded.taskbar_avoid_overlap_on);
+    assert!(loaded.taskbar_bars_paused);
     assert!(!loaded.taskbar_layout_memory_on);
     assert!(loaded.taskbar_layout_memory_initialized);
     assert_eq!(loaded.indicator_style, "bar");
@@ -313,6 +323,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(loaded.codex_taskbar_target_initialized);
     assert!(!loaded.show_claude);
     assert!(loaded.show_codex);
+    assert!(loaded.show_grok);
     assert!(loaded.claude_account_auto_collect_on);
 
     fs::write(
@@ -335,6 +346,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(legacy.fullscreen_hide_on);
     assert!(!legacy.maximized_hide_on);
     assert!(legacy.taskbar_avoid_overlap_on);
+    assert!(!legacy.taskbar_bars_paused);
     assert_eq!(legacy.indicator_style, "ring");
     assert_eq!(legacy.indicator_effect_style, "flat");
     assert!(legacy.ring_on);
@@ -816,10 +828,13 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         taskbar_offset_ratio: 1.25,
         claude_taskbar_offset_ratio: -0.25,
         codex_taskbar_offset_ratio: 1.25,
+        grok_taskbar_offset_ratio: 0.65,
         claude_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
         codex_taskbar_monitor_key: "monitor:1920,0,2560,1440".into(),
+        grok_taskbar_monitor_key: "monitor:0,0,1920,1080".into(),
         show_claude: false,
         show_codex: true,
+        show_grok: true,
         claude_account_auto_collect_on: true,
         mono_color: Some("#345678".into()),
         custom_safe: Some("#112233".into()),
@@ -829,6 +844,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         claude_secondary_color: Some("#405060".into()),
         codex_primary_color: Some("#708090".into()),
         codex_secondary_color: Some("#a0b0c0".into()),
+        grok_primary_color: Some("#d15288".into()),
+        grok_secondary_color: Some("#8269c8".into()),
         tool_warning_color: Some("#b0c0d0".into()),
         tool_danger_color: Some("#d0c0b0".into()),
         tool_warning_color_on: false,
@@ -837,6 +854,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         claude_text_color_on: true,
         codex_text_color: Some("#335577".into()),
         codex_text_color_on: false,
+        grok_text_color: Some("#d15288".into()),
+        grok_text_color_on: true,
         info_text_color: Some("#446688".into()),
         info_text_color_on: true,
         ring_text_color: Some("#557799".into()),
@@ -856,6 +875,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
             claude_secondary: [0x40, 0x50, 0x60],
             codex_primary: [0x70, 0x80, 0x90],
             codex_secondary: [0xa0, 0xb0, 0xc0],
+            grok_primary: [0xd1, 0x52, 0x88],
+            grok_secondary: [0x82, 0x69, 0xc8],
             warning: [0xb0, 0xc0, 0xd0],
             danger: [0xd0, 0xc0, 0xb0],
             warning_on: false,
@@ -869,6 +890,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
             claude_on: true,
             codex: [0x33, 0x55, 0x77],
             codex_on: false,
+            grok: [0xd1, 0x52, 0x88],
+            grok_on: true,
             info: [0x44, 0x66, 0x88],
             info_on: true,
             ring: [0x55, 0x77, 0x99],
@@ -915,6 +938,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert_eq!(settings.taskbar_offset_ratio, 1.0);
     assert_eq!(settings.claude_taskbar_offset_ratio, 0.0);
     assert_eq!(settings.codex_taskbar_offset_ratio, 1.0);
+    assert_eq!(settings.grok_taskbar_offset_ratio, 0.65);
     assert_eq!(settings.claude_taskbar_monitor_key, "monitor:0,0,1920,1080");
     assert_eq!(
         settings.codex_taskbar_monitor_key,
@@ -922,6 +946,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     );
     assert!(!settings.show_claude);
     assert!(settings.show_codex);
+    assert!(settings.show_grok);
     assert!(settings.claude_account_auto_collect_on);
 }
 

@@ -12,6 +12,8 @@ export const DEFAULT_SETTINGS = {
     claude_on: false,
     codex: [0x2f, 0xac, 0x7d],
     codex_on: false,
+    grok: [0xd9, 0x57, 0x8b],
+    grok_on: false,
     info: [0x6b, 0x72, 0x80],
     info_on: false,
     ring: [0x6b, 0x72, 0x80],
@@ -23,8 +25,10 @@ export const DEFAULT_SETTINGS = {
   taskbar_offset_ratio: 0,
   claude_taskbar_offset_ratio: 0,
   codex_taskbar_offset_ratio: 0,
+  grok_taskbar_offset_ratio: 0,
   show_claude: true,
   show_codex: true,
+  show_grok: false,
   claude_account_auto_collect_on: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
@@ -71,6 +75,7 @@ const UNKNOWN_COLOR = "#9ca3af";
 const TOOL_SAFE = {
   claude: ["#d79a32", "#d36b86"],
   codex: ["#2fac7d", "#4d86d6"],
+  grok: ["#d9578b", "#8a6fd1"],
 };
 
 function rgbColor(value, fallback) {
@@ -252,7 +257,7 @@ function formatReset(iso, now, language) {
   return `${t("reset.prefix", language)} ${formatDuration(minutes, language)} (${formatLocalDateTime(resetAt, language)})`;
 }
 
-function limitModel(limit, settings, now, language, tool, secondary = false) {
+function limitModel(limit, settings, now, language, tool, secondary = false, labelKey = null) {
   const used = finiteNumber(limit?.used_percent);
   const displayed = displayPercentFromUsed(used, settings);
 
@@ -261,7 +266,21 @@ function limitModel(limit, settings, now, language, tool, secondary = false) {
     width: `${displayed ?? 0}%`,
     color: colorForToolPercent(used, tool, settings, secondary),
     reset: formatReset(limit?.resets_at, now, language),
+    label: labelKey ? t(labelKey, language) : "",
+    visible: labelKey != null,
   };
+}
+
+function grokLimitLabel(limit) {
+  const label = String(limit?.label ?? "").toLowerCase();
+  if (label === "month" || label === "monthly") return "limit.monthly";
+  if (label === "week" || label === "weekly") return "limit.weekly";
+  return "limit.usage";
+}
+
+function limitLabels(tool, status) {
+  if (tool === "grok") return [grokLimitLabel(status?.primary), null];
+  return ["limit.fiveHour", "limit.weekly"];
 }
 
 function emptyHintForTool(tool, settings, language) {
@@ -272,6 +291,7 @@ function emptyHintForTool(tool, settings, language) {
   ) {
     return t("empty.claudeCollect", language);
   }
+  if (tool === "grok") return t("empty.grok", language);
   return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
 }
 
@@ -283,14 +303,24 @@ export function viewModelForTool(
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
+  const [primaryLabel, secondaryLabel] = limitLabels(tool, status);
+  const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
 
   if (!status) {
     return {
       active: false,
       exists: false,
       brandColor: toolBrandColor(tool, settings),
-      primary: limitModel(null, settings, now, language, tool),
-      secondary: limitModel(null, settings, now, language, tool, true),
+      primary: limitModel(
+        null,
+        settings,
+        now,
+        language,
+        tool,
+        primaryUsesSecondaryColor,
+        primaryLabel,
+      ),
+      secondary: limitModel(null, settings, now, language, tool, true, secondaryLabel),
       context: `${t("context.label", language)} –`,
       pcId: "",
       meta: "",
@@ -306,8 +336,16 @@ export function viewModelForTool(
     active,
     exists: true,
     brandColor: toolBrandColor(tool, settings),
-    primary: limitModel(status.primary, settings, now, language, tool),
-    secondary: limitModel(status.secondary, settings, now, language, tool, true),
+    primary: limitModel(
+      status.primary,
+      settings,
+      now,
+      language,
+      tool,
+      primaryUsesSecondaryColor,
+      primaryLabel,
+    ),
+    secondary: limitModel(status.secondary, settings, now, language, tool, true, secondaryLabel),
     context: `${t("context.label", language)} ${context}${active ? "" : ` · ${t("state.stale", language)}`}`,
     pcId: status.pc_id ?? "",
     meta,

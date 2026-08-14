@@ -42,18 +42,21 @@ const TASKBAR_DRAG_THRESHOLD_PX: i32 = 3;
 const TASKBAR_TOOLTIP_DELAY_MS: u64 = 450;
 const TASKBAR_TOPOLOGY_STABLE_OBSERVATIONS: u8 = 3;
 const MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS: usize = 32;
-const TASKBAR_TOOLS: [&str; 2] = ["claude", "codex"];
+const TASKBAR_TOOLS: [&str; 3] = ["claude", "codex", "grok"];
 const CODEX_REPRESENTATIVE_CANDIDATES: usize = 32;
 const CODEX_ACCOUNT_CACHE_MIN_SECS: i64 = 30;
 const CODEX_ACCOUNT_API_TIMEOUT_SECS: u64 = 5;
 const CODEX_ROLLOUT_CACHE_MAX_AGE_SECS: u64 = 60;
 const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 60;
 const CLAUDE_USAGE_TIMEOUT_SECS: u64 = 10;
+const GROK_BILLING_CACHE_MIN_SECS: i64 = 60;
+const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
 const ACTIVITY_BACKFILL_MAX_PASSES: usize = 16;
 const ACTIVITY_BACKFILL_MAX_SECS: u64 = 30;
 const CLAUDE_FALLBACK_RESERVE_SECS: u64 = 2;
 const CLAUDE_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
+const GROK_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
 const TRAY_ID: &str = "juice";
 const TRAY_ICON_IDS: [&str; 1] = [TRAY_ID];
 const UPDATE_START_DELAY_SECS: u64 = 15;
@@ -62,6 +65,7 @@ const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
 static UPDATE_OPERATION_GATE: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
+static TASKBAR_PAUSE_WRITE_GATE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, serde::Serialize)]
 struct TaskbarDraggingPayload {
@@ -90,6 +94,7 @@ struct TaskbarPauseState(AtomicBool);
 struct TaskbarMenuState {
     claude: Mutex<TaskbarMenuLayout>,
     codex: Mutex<TaskbarMenuLayout>,
+    grok: Mutex<TaskbarMenuLayout>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -134,12 +139,14 @@ struct TaskbarContentLayout {
 struct TaskbarContentLayoutState {
     claude: Mutex<Option<TaskbarContentLayout>>,
     codex: Mutex<Option<TaskbarContentLayout>>,
+    grok: Mutex<Option<TaskbarContentLayout>>,
 }
 
 #[derive(Default)]
 struct TaskbarWindowState {
     claude: Mutex<Option<TaskbarWindowHandle>>,
     codex: Mutex<Option<TaskbarWindowHandle>>,
+    grok: Mutex<Option<TaskbarWindowHandle>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +326,8 @@ static COLLECTION_COORDINATOR: Lazy<CollectionCoordinator> =
 static CODEX_ACCOUNT_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static CLAUDE_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
+    Lazy::new(|| Mutex::new(None));
+static GROK_BILLING_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static CODEX_ROLLOUT_CACHE: Lazy<Mutex<collector::RolloutCache>> =
     Lazy::new(|| Mutex::new(collector::RolloutCache::default()));
@@ -574,18 +583,22 @@ pub fn collect_all_from(
 }
 
 pub fn collect_representatives(settings: &Settings) -> Vec<AgentStatus> {
-    collect_representatives_with_options(settings, false, false)
+    collect_representatives_with_options(settings, false, false, false)
 }
 
 async fn collect_representatives_off_thread(settings: Settings, force: bool) -> Vec<AgentStatus> {
-    collect_representatives_off_thread_with_options(settings, force, force).await
+    collect_representatives_off_thread_with_options(settings, force, force, force).await
 }
 
 async fn collect_activity_off_thread(
     settings: Settings,
 ) -> Result<activity::ActivitySnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        activity::refresh(settings.show_claude, settings.show_codex)
+        activity::refresh(
+            settings.show_claude,
+            settings.show_codex,
+            settings.show_grok,
+        )
     })
     .await
     .map_err(|err| format!("activity collection task failed: {err}"))?
@@ -627,9 +640,15 @@ async fn collect_representatives_off_thread_with_options(
     settings: Settings,
     force_codex_account: bool,
     force_claude_usage: bool,
+    force_grok_billing: bool,
 ) -> Vec<AgentStatus> {
     match tauri::async_runtime::spawn_blocking(move || {
-        collect_representatives_with_options(&settings, force_codex_account, force_claude_usage)
+        collect_representatives_with_options(
+            &settings,
+            force_codex_account,
+            force_claude_usage,
+            force_grok_billing,
+        )
     })
     .await
     {
@@ -655,8 +674,9 @@ fn collect_representatives_with_options(
     settings: &Settings,
     force_codex_account: bool,
     force_claude_usage: bool,
+    force_grok_billing: bool,
 ) -> Vec<AgentStatus> {
-    if !settings.show_claude && !settings.show_codex {
+    if !settings.show_claude && !settings.show_codex && !settings.show_grok {
         return Vec::new();
     }
     let data_dir = paths::data_dir();
@@ -664,7 +684,8 @@ fn collect_representatives_with_options(
     let now = Utc::now();
 
     let force = (settings.show_codex && force_codex_account)
-        || (settings.show_claude && force_claude_usage);
+        || (settings.show_claude && force_claude_usage)
+        || (settings.show_grok && force_grok_billing);
     let statuses = COLLECTION_COORDINATOR.run(force, || {
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_secs(COLLECTION_REFRESH_DEADLINE_SECS);
@@ -673,8 +694,11 @@ fn collect_representatives_with_options(
             data_dir.as_deref(),
             codex_sessions_dir.as_deref(),
             now,
-            force_codex_account,
-            force_claude_usage,
+            CollectionForces {
+                codex_account: force_codex_account,
+                claude_usage: force_claude_usage,
+                grok_billing: force_grok_billing,
+            },
             deadline,
         )
     });
@@ -686,22 +710,27 @@ struct CollectionPlan {
     claude_status: bool,
     claude_account: bool,
     codex: bool,
+    grok: bool,
     force_claude_account: bool,
     force_codex_account: bool,
+    force_grok_billing: bool,
 }
 
 fn collection_plan(
     settings: &Settings,
     force_codex_account: bool,
     force_claude_usage: bool,
+    force_grok_billing: bool,
 ) -> CollectionPlan {
     CollectionPlan {
         claude_status: settings.show_claude,
         claude_account: settings.show_claude
             && (force_claude_usage || settings.claude_account_auto_collect_on),
         codex: settings.show_codex,
+        grok: settings.show_grok,
         force_claude_account: settings.show_claude && force_claude_usage,
         force_codex_account: settings.show_codex && force_codex_account,
+        force_grok_billing: settings.show_grok && force_grok_billing,
     }
 }
 
@@ -712,8 +741,46 @@ fn filter_enabled_statuses(
     statuses.retain(|status| match status.tool {
         Tool::Claude => settings.show_claude,
         Tool::Codex => settings.show_codex,
+        Tool::Grok => settings.show_grok,
     });
     statuses
+}
+
+#[derive(Clone, Copy)]
+struct CollectionForces {
+    codex_account: bool,
+    claude_usage: bool,
+    grok_billing: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CollectionDeadlines {
+    rollout: std::time::Instant,
+    codex_reserve: std::time::Duration,
+    claude: std::time::Instant,
+}
+
+fn collection_deadlines(plan: CollectionPlan, deadline: std::time::Instant) -> CollectionDeadlines {
+    let claude_reserve = if plan.claude_account {
+        std::time::Duration::from_secs(CLAUDE_COLLECTION_MIN_BUDGET_SECS)
+    } else {
+        std::time::Duration::ZERO
+    };
+    let grok_reserve = if plan.grok {
+        std::time::Duration::from_secs(GROK_COLLECTION_MIN_BUDGET_SECS)
+    } else {
+        std::time::Duration::ZERO
+    };
+    CollectionDeadlines {
+        rollout: deadline_with_reserve(
+            deadline,
+            std::time::Duration::from_secs(CODEX_ACCOUNT_API_TIMEOUT_SECS)
+                + claude_reserve
+                + grok_reserve,
+        ),
+        codex_reserve: claude_reserve + grok_reserve,
+        claude: deadline_with_reserve(deadline, grok_reserve),
+    }
 }
 
 fn collect_representatives_runtime(
@@ -721,22 +788,18 @@ fn collect_representatives_runtime(
     data_dir: Option<&std::path::Path>,
     codex_sessions_dir: Option<&std::path::Path>,
     now: DateTime<Utc>,
-    force_codex_account: bool,
-    force_claude_usage: bool,
+    forces: CollectionForces,
     deadline: std::time::Instant,
 ) -> Vec<AgentStatus> {
     let pc_id = gethostname::gethostname().to_string_lossy().to_string();
     let mut statuses = Vec::new();
-    let plan = collection_plan(settings, force_codex_account, force_claude_usage);
-    let claude_reserve = if plan.claude_account {
-        std::time::Duration::from_secs(CLAUDE_COLLECTION_MIN_BUDGET_SECS)
-    } else {
-        std::time::Duration::ZERO
-    };
-    let rollout_deadline = deadline_with_reserve(
-        deadline,
-        std::time::Duration::from_secs(CODEX_ACCOUNT_API_TIMEOUT_SECS) + claude_reserve,
+    let plan = collection_plan(
+        settings,
+        forces.codex_account,
+        forces.claude_usage,
+        forces.grok_billing,
     );
+    let deadlines = collection_deadlines(plan, deadline);
 
     let claude_status = plan
         .claude_status
@@ -758,7 +821,7 @@ fn collect_representatives_runtime(
                     &pc_id,
                     now,
                     plan.force_codex_account,
-                    rollout_deadline,
+                    deadlines.rollout,
                 )
             })
         })
@@ -770,13 +833,19 @@ fn collect_representatives_runtime(
             now,
             plan.force_codex_account,
             deadline,
-            claude_reserve,
+            deadlines.codex_reserve,
         )
     } else {
         None
     };
     let claude_usage = if plan.claude_account {
-        collect_claude_usage_status(settings, &pc_id, now, plan.force_claude_account, deadline)
+        collect_claude_usage_status(
+            settings,
+            &pc_id,
+            now,
+            plan.force_claude_account,
+            deadlines.claude,
+        )
     } else {
         None
     };
@@ -786,6 +855,14 @@ fn collect_representatives_runtime(
 
     if let Some(status) = merge_codex_account_status(codex_rollout, codex_account) {
         statuses.push(status);
+    }
+
+    if plan.grok {
+        if let Some(status) =
+            collect_grok_billing_status(settings, &pc_id, now, plan.force_grok_billing, deadline)
+        {
+            statuses.push(status);
+        }
     }
 
     latest_per_tool(&statuses)
@@ -1094,6 +1171,33 @@ fn collect_claude_usage_status(
     Some(status)
 }
 
+fn collect_grok_billing_status(
+    settings: &Settings,
+    pc_id: &str,
+    now: DateTime<Utc>,
+    force: bool,
+    deadline: std::time::Instant,
+) -> Option<AgentStatus> {
+    let mut status = cached_status_attempt(
+        &GROK_BILLING_CACHE,
+        now,
+        GROK_BILLING_CACHE_MIN_SECS,
+        force,
+        || {
+            let timeout = remaining_refresh_budget(
+                deadline,
+                std::time::Duration::from_secs(GROK_BILLING_TIMEOUT_SECS),
+            )?;
+            let raw = collector::grok_billing_response(timeout)
+                .map_err(|_| CollectionErrorKind::Transport)?;
+            adapters::grok::parse_billing_response(&raw, pc_id, &now.to_rfc3339())
+                .map_err(|_| CollectionErrorKind::Parse)
+        },
+    )?;
+    derive_active(&mut status, settings.stale_after_secs, now);
+    Some(status)
+}
+
 fn merge_claude_usage_status(
     statusline: Option<AgentStatus>,
     usage: Option<AgentStatus>,
@@ -1203,11 +1307,13 @@ fn merge_missing_limit(
 pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
     let mut claude: Option<&AgentStatus> = None;
     let mut codex: Option<&AgentStatus> = None;
+    let mut grok: Option<&AgentStatus> = None;
 
     for status in all {
         let slot = match &status.tool {
             Tool::Claude => &mut claude,
             Tool::Codex => &mut codex,
+            Tool::Grok => &mut grok,
         };
 
         if slot
@@ -1218,7 +1324,11 @@ pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
         }
     }
 
-    [claude, codex].into_iter().flatten().cloned().collect()
+    [claude, codex, grok]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect()
 }
 
 fn captured_is_newer(next: &AgentStatus, current: &AgentStatus) -> bool {
@@ -1297,7 +1407,14 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
                     }
                 });
             }
-            id if id == tray_pause_bar_menu_id() => pause_taskbar_bars_for_manager(app),
+            id if id == tray_pause_bar_menu_id() => {
+                let app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(err) = pause_taskbar_bars_for_manager(&app) {
+                        eprintln!("[taskbar] pause bars failed: {err}");
+                    }
+                });
+            }
             id if id == tray_resume_bar_menu_id() => {
                 let app = app.clone();
                 tauri::async_runtime::spawn_blocking(move || {
@@ -1443,6 +1560,7 @@ fn normalize_taskbar_tool(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("claude"),
         "codex" => Some("codex"),
+        "grok" => Some("grok"),
         _ => None,
     }
 }
@@ -1460,6 +1578,7 @@ fn taskbar_bar_label(tool: &str) -> Option<&'static str> {
     match normalize_taskbar_tool(tool)? {
         "claude" => Some("bar-claude"),
         "codex" => Some("bar-codex"),
+        "grok" => Some("bar-grok"),
         _ => None,
     }
 }
@@ -1471,6 +1590,7 @@ fn taskbar_window_slot<'a>(
     match normalize_taskbar_tool(tool)? {
         "claude" => Some(&state.claude),
         "codex" => Some(&state.codex),
+        "grok" => Some(&state.grok),
         _ => None,
     }
 }
@@ -1698,6 +1818,7 @@ fn taskbar_offset_ratio(settings: &Settings, tool: &str) -> f32 {
     match normalize_taskbar_tool(tool) {
         Some("claude") => settings.claude_taskbar_offset_ratio,
         Some("codex") => settings.codex_taskbar_offset_ratio,
+        Some("grok") => settings.grok_taskbar_offset_ratio,
         _ => settings.taskbar_offset_ratio,
     }
 }
@@ -1707,6 +1828,7 @@ fn set_taskbar_offset_ratio(settings: &mut Settings, tool: &str, ratio: f32) {
     match normalize_taskbar_tool(tool) {
         Some("claude") => settings.claude_taskbar_offset_ratio = ratio,
         Some("codex") => settings.codex_taskbar_offset_ratio = ratio,
+        Some("grok") => settings.grok_taskbar_offset_ratio = ratio,
         _ => settings.taskbar_offset_ratio = ratio,
     }
 }
@@ -1715,6 +1837,7 @@ fn taskbar_monitor_key<'a>(settings: &'a Settings, tool: &str) -> &'a str {
     match normalize_taskbar_tool(tool) {
         Some("claude") => &settings.claude_taskbar_monitor_key,
         Some("codex") => &settings.codex_taskbar_monitor_key,
+        Some("grok") => &settings.grok_taskbar_monitor_key,
         _ => "",
     }
 }
@@ -1723,6 +1846,7 @@ fn taskbar_target_initialized(settings: &Settings, tool: &str) -> bool {
     match normalize_taskbar_tool(tool) {
         Some("claude") => settings.claude_taskbar_target_initialized,
         Some("codex") => settings.codex_taskbar_target_initialized,
+        Some("grok") => settings.grok_taskbar_target_initialized,
         _ => true,
     }
 }
@@ -1731,6 +1855,7 @@ fn set_taskbar_target_initialized(settings: &mut Settings, tool: &str, initializ
     match normalize_taskbar_tool(tool) {
         Some("claude") => settings.claude_taskbar_target_initialized = initialized,
         Some("codex") => settings.codex_taskbar_target_initialized = initialized,
+        Some("grok") => settings.grok_taskbar_target_initialized = initialized,
         _ => {}
     }
 }
@@ -1746,6 +1871,7 @@ fn set_taskbar_target(settings: &mut Settings, tool: &str, monitor_key: &str, ra
     match normalize_taskbar_tool(tool) {
         Some("claude") => settings.claude_taskbar_monitor_key = monitor_key.to_string(),
         Some("codex") => settings.codex_taskbar_monitor_key = monitor_key.to_string(),
+        Some("grok") => settings.grok_taskbar_monitor_key = monitor_key.to_string(),
         _ => {}
     }
     set_taskbar_target_initialized(settings, tool, true);
@@ -1776,8 +1902,10 @@ fn taskbar_layout_profile_from_current(
         monitor_keys: monitor_keys.to_vec(),
         claude: taskbar_profile_placement(settings, "claude", monitor_keys),
         codex: taskbar_profile_placement(settings, "codex", monitor_keys),
+        grok: taskbar_profile_placement(settings, "grok", monitor_keys),
     };
-    (profile.claude.is_some() || profile.codex.is_some()).then_some(profile)
+    (profile.claude.is_some() || profile.codex.is_some() || profile.grok.is_some())
+        .then_some(profile)
 }
 
 fn apply_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[String]) -> bool {
@@ -1797,6 +1925,14 @@ fn apply_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[String]
         set_taskbar_target(
             settings,
             "codex",
+            &placement.monitor_key,
+            placement.offset_ratio,
+        );
+    }
+    if let Some(placement) = profile.grok {
+        set_taskbar_target(
+            settings,
+            "grok",
             &placement.monitor_key,
             placement.offset_ratio,
         );
@@ -1831,6 +1967,10 @@ fn complete_taskbar_layout_profile(settings: &mut Settings, monitor_keys: &[Stri
         profile.codex = current.codex;
         changed = true;
     }
+    if profile.grok.is_none() && current.grok.is_some() {
+        profile.grok = current.grok;
+        changed = true;
+    }
     changed && settings.upsert_taskbar_layout_profile(profile)
 }
 
@@ -1850,6 +1990,7 @@ fn apply_pending_taskbar_profile_placements(
             monitor_keys: monitor_keys.to_vec(),
             claude: None,
             codex: None,
+            grok: None,
         });
     let mut has_matching_placement = false;
     for item in pending {
@@ -1861,6 +2002,7 @@ fn apply_pending_taskbar_profile_placements(
         match item.tool {
             "claude" => profile.claude = Some(item.placement.clone()),
             "codex" => profile.codex = Some(item.placement.clone()),
+            "grok" => profile.grok = Some(item.placement.clone()),
             _ => {}
         }
     }
@@ -1917,8 +2059,8 @@ impl TaskbarTopologyStability {
 fn pending_taskbar_target_ratios(
     settings: &Settings,
     taskbar_rect: taskbar::DockRect,
-    tool_lengths: [Option<i32>; 2],
-) -> Option<[Option<f32>; 2]> {
+    tool_lengths: [Option<i32>; 3],
+) -> Option<[Option<f32>; 3]> {
     if taskbar_rect.width <= 0 || taskbar_rect.height <= 0 {
         return None;
     }
@@ -1934,10 +2076,12 @@ fn pending_taskbar_target_ratios(
     let initialized = [
         settings.claude_taskbar_target_initialized,
         settings.codex_taskbar_target_initialized,
+        settings.grok_taskbar_target_initialized,
     ];
     let existing_ratios = [
         settings.claude_taskbar_offset_ratio,
         settings.codex_taskbar_offset_ratio,
+        settings.grok_taskbar_offset_ratio,
     ];
     let mut occupied = Vec::new();
 
@@ -1962,7 +2106,7 @@ fn pending_taskbar_target_ratios(
         occupied.push((start, start.saturating_add(length)));
     }
 
-    let mut ratios = [None; 2];
+    let mut ratios = [None; 3];
 
     for (index, length) in tool_lengths.into_iter().enumerate() {
         let Some(length) = length.filter(|_| !initialized[index]) else {
@@ -2025,7 +2169,7 @@ fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
         width: taskbar.right - taskbar.left,
         height: taskbar.bottom - taskbar.top,
     };
-    let mut tool_lengths = [None; 2];
+    let mut tool_lengths = [None; 3];
     for (index, tool) in TASKBAR_TOOLS.into_iter().enumerate() {
         tool_lengths[index] = taskbar_dock_width_for_manager(manager, settings, tool)
             .map(|length| taskbar_physical_length_for_window(length, taskbar.hwnd));
@@ -2110,6 +2254,7 @@ fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
     let enabled = match normalize_taskbar_tool(tool)? {
         "claude" => settings.show_claude,
         "codex" => settings.show_codex,
+        "grok" => settings.show_grok,
         _ => false,
     };
     if !enabled {
@@ -2130,6 +2275,7 @@ fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
         "quad" if settings.indicator_style == "bar" => {
             ring_size + TASKBAR_INDICATOR_HORIZONTAL_PADDING
         }
+        "quad" if tool == "grok" => ring_size + TASKBAR_INDICATOR_HORIZONTAL_PADDING,
         "quad" => ring_size * 2.0 + TASKBAR_QUAD_GAP + TASKBAR_INDICATOR_HORIZONTAL_PADDING,
         _ => {
             let text_budget = if settings.full_reset_time_on {
@@ -2163,6 +2309,7 @@ fn taskbar_content_layout_slot<'a>(
     match normalize_taskbar_tool(tool)? {
         "claude" => Some(&state.claude),
         "codex" => Some(&state.codex),
+        "grok" => Some(&state.grok),
         _ => None,
     }
 }
@@ -2474,6 +2621,7 @@ fn taskbar_menu_is_open<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, too
             let target = match normalize_taskbar_tool(tool) {
                 Some("claude") => Some(&state.claude),
                 Some("codex") => Some(&state.codex),
+                Some("grok") => Some(&state.grok),
                 _ => None,
             }?;
             Some(target.lock().unwrap_or_else(|err| err.into_inner()).open)
@@ -2501,6 +2649,7 @@ fn set_taskbar_menu_layout<R: tauri::Runtime>(
     let target = match normalize_taskbar_tool(tool) {
         Some("claude") => Some(&state.claude),
         Some("codex") => Some(&state.codex),
+        Some("grok") => Some(&state.grok),
         _ => None,
     };
     if let Some(target) = target {
@@ -2520,6 +2669,7 @@ fn taskbar_layout_ratio<R: tauri::Runtime>(
         let target = match normalize_taskbar_tool(tool) {
             Some("claude") => Some(&state.claude),
             Some("codex") => Some(&state.codex),
+            Some("grok") => Some(&state.grok),
             _ => None,
         }?;
         let layout = *target.lock().unwrap_or_else(|err| err.into_inner());
@@ -2530,17 +2680,27 @@ fn taskbar_layout_ratio<R: tauri::Runtime>(
         .unwrap_or_else(|| taskbar_offset_ratio(settings, tool))
 }
 
-fn pause_taskbar_bars_for_manager<R: tauri::Runtime>(manager: &impl tauri::Manager<R>) {
-    set_taskbar_bars_paused(manager, true);
+fn pause_taskbar_bars_for_manager<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+) -> anyhow::Result<()> {
+    let _pause_guard = TASKBAR_PAUSE_WRITE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let snapshot = update_taskbar_settings(|settings| settings.taskbar_bars_paused = true)?;
+    set_taskbar_bars_paused(manager, snapshot.settings.taskbar_bars_paused);
     hide_all_taskbar_bars(manager);
+    Ok(())
 }
 
 fn resume_taskbar_bars_for_manager<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
 ) -> anyhow::Result<()> {
-    set_taskbar_bars_paused(manager, false);
-    let (settings, generation) = load_settings_with_generation()?;
-    apply_taskbar_dock_for_generation(manager, &settings, generation)
+    let _pause_guard = TASKBAR_PAUSE_WRITE_GATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let snapshot = update_taskbar_settings(|settings| settings.taskbar_bars_paused = false)?;
+    set_taskbar_bars_paused(manager, snapshot.settings.taskbar_bars_paused);
+    apply_taskbar_dock_for_generation(manager, &snapshot.settings, snapshot.generation)
 }
 
 #[cfg(windows)]
@@ -3296,10 +3456,13 @@ fn autostart_setting_changed(current: &Settings, requested: &Settings) -> bool {
 fn taskbar_targets_match(left: &Settings, right: &Settings) -> bool {
     left.claude_taskbar_offset_ratio == right.claude_taskbar_offset_ratio
         && left.codex_taskbar_offset_ratio == right.codex_taskbar_offset_ratio
+        && left.grok_taskbar_offset_ratio == right.grok_taskbar_offset_ratio
         && left.claude_taskbar_monitor_key == right.claude_taskbar_monitor_key
         && left.codex_taskbar_monitor_key == right.codex_taskbar_monitor_key
+        && left.grok_taskbar_monitor_key == right.grok_taskbar_monitor_key
         && left.claude_taskbar_target_initialized == right.claude_taskbar_target_initialized
         && left.codex_taskbar_target_initialized == right.codex_taskbar_target_initialized
+        && left.grok_taskbar_target_initialized == right.grok_taskbar_target_initialized
 }
 
 fn preserve_taskbar_targets(current: &Settings, requested: &mut Settings) {
@@ -3310,10 +3473,13 @@ fn preserve_taskbar_targets(current: &Settings, requested: &mut Settings) {
 fn preserve_taskbar_positions(current: &Settings, requested: &mut Settings) {
     requested.claude_taskbar_offset_ratio = current.claude_taskbar_offset_ratio;
     requested.codex_taskbar_offset_ratio = current.codex_taskbar_offset_ratio;
+    requested.grok_taskbar_offset_ratio = current.grok_taskbar_offset_ratio;
     requested.claude_taskbar_monitor_key = current.claude_taskbar_monitor_key.clone();
     requested.codex_taskbar_monitor_key = current.codex_taskbar_monitor_key.clone();
+    requested.grok_taskbar_monitor_key = current.grok_taskbar_monitor_key.clone();
     requested.claude_taskbar_target_initialized = current.claude_taskbar_target_initialized;
     requested.codex_taskbar_target_initialized = current.codex_taskbar_target_initialized;
+    requested.grok_taskbar_target_initialized = current.grok_taskbar_target_initialized;
 }
 
 fn preserve_taskbar_layout_memory(current: &Settings, requested: &mut Settings) {
@@ -3327,6 +3493,7 @@ fn preserve_concurrent_taskbar_state(
     requested: &mut Settings,
     drag_active: bool,
 ) {
+    requested.taskbar_bars_paused = current.taskbar_bars_paused;
     preserve_taskbar_layout_memory(current, requested);
     if drag_active || !taskbar_targets_match(current, baseline) {
         preserve_taskbar_positions(current, requested);
@@ -3472,8 +3639,10 @@ async fn save_settings(
         (baseline.show_claude != requested.show_claude).then_some(requested.show_claude);
     let claude_enabled_now = !baseline.show_claude && requested.show_claude;
     let codex_enabled_now = !baseline.show_codex && requested.show_codex;
+    let grok_enabled_now = !baseline.show_grok && requested.show_grok;
     let tool_collection_changed = baseline.show_claude != requested.show_claude
-        || baseline.show_codex != requested.show_codex;
+        || baseline.show_codex != requested.show_codex
+        || baseline.show_grok != requested.show_grok;
     if let Some(enabled) = claude_collection_transition {
         reconcile_claude_statusline_off_thread(enabled).await?;
     }
@@ -3545,7 +3714,7 @@ async fn save_settings(
     if tool_collection_changed {
         let visible = filter_enabled_statuses(COLLECTION_COORDINATOR.last_result(), &settings);
         let _ = app.emit("status-updated", &visible);
-        if claude_enabled_now || codex_enabled_now {
+        if claude_enabled_now || codex_enabled_now || grok_enabled_now {
             let refresh_app = app.clone();
             let refresh_settings = settings.clone();
             tauri::async_runtime::spawn(async move {
@@ -3555,6 +3724,7 @@ async fn save_settings(
                     refresh_settings,
                     codex_enabled_now,
                     force_claude,
+                    grok_enabled_now,
                 )
                 .await;
                 let _ = refresh_app.emit("status-updated", &statuses);
@@ -3664,10 +3834,13 @@ fn move_taskbar_bar(
 }
 
 #[tauri::command]
-fn pause_taskbar_bars(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
+async fn pause_taskbar_bars(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
     ensure_taskbar_bar_command(window.label())?;
-    pause_taskbar_bars_for_manager(&app);
-    Ok(())
+    drop(window);
+    tauri::async_runtime::spawn_blocking(move || pause_taskbar_bars_for_manager(&app))
+        .await
+        .map_err(|err| format!("taskbar pause task failed: {err}"))?
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -3744,6 +3917,7 @@ fn ensure_matching_bar_command(label: &str, tool: &str) -> Result<(), String> {
     match normalize_taskbar_tool(tool) {
         Some("claude") if label == "bar-claude" => Ok(()),
         Some("codex") if label == "bar-codex" => Ok(()),
+        Some("grok") if label == "bar-grok" => Ok(()),
         Some(_) => Err("command is restricted to its taskbar bar window".into()),
         None => Err("unknown taskbar tool".into()),
     }
@@ -3955,7 +4129,7 @@ fn apply_taskbar_dock_for_generation<R: tauri::Runtime>(
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn resolve_taskbar_position_pair(
     enabled: bool,
     first_taskbar: isize,
@@ -4059,7 +4233,7 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         });
     }
 
-    let positions = actions
+    let mut positions = actions
         .iter()
         .enumerate()
         .filter_map(|(index, action)| match action {
@@ -4072,20 +4246,37 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
             Action::Hide(_, _) => None,
         })
         .collect::<Vec<_>>();
-    if let [first, second] = positions.as_slice() {
-        let (first_rect, second_rect) = resolve_taskbar_position_pair(
-            settings.taskbar_avoid_overlap_on,
-            first.1,
-            first.2,
-            first.3,
-            second.1,
-            second.3,
-        );
-        if let Action::Position { rect, .. } = &mut actions[first.0] {
-            *rect = first_rect;
+    if settings.taskbar_avoid_overlap_on {
+        let taskbars = positions
+            .iter()
+            .map(|position| position.1)
+            .collect::<std::collections::BTreeSet<_>>();
+        for taskbar_hwnd in taskbars {
+            let indices = positions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, position)| (position.1 == taskbar_hwnd).then_some(index))
+                .collect::<Vec<_>>();
+            if indices.len() < 2 {
+                continue;
+            }
+            let taskbar_rect = positions[indices[0]].2;
+            let mut rects = indices
+                .iter()
+                .map(|index| positions[*index].3)
+                .collect::<Vec<_>>();
+            taskbar::resolve_taskbar_overlaps(taskbar_rect, &mut rects);
+            for (position_index, rect) in indices.into_iter().zip(rects) {
+                positions[position_index].3 = rect;
+            }
         }
-        if let Action::Position { rect, .. } = &mut actions[second.0] {
-            *rect = second_rect;
+        for (action_index, _, _, rect) in positions {
+            if let Action::Position {
+                rect: action_rect, ..
+            } = &mut actions[action_index]
+            {
+                *action_rect = rect;
+            }
         }
     }
 
@@ -5149,6 +5340,7 @@ pub fn run() {
                 }
             };
             if let Some(settings) = settings.as_ref() {
+                set_taskbar_bars_paused(app, settings.taskbar_bars_paused);
                 let taskbar_retry = match try_setup_taskbar_dock(app, settings) {
                     Ok(()) => false,
                     Err(err) => {
@@ -5269,6 +5461,7 @@ mod tests {
         let mut settings = Settings::default();
         super::set_taskbar_target(&mut settings, "claude", "monitor-office", 0.9);
         super::set_taskbar_target(&mut settings, "codex", "monitor-laptop", 0.7);
+        super::set_taskbar_target(&mut settings, "grok", "monitor-office", 0.5);
         assert!(
             settings.upsert_taskbar_layout_profile(TaskbarLayoutProfile {
                 monitor_keys: topology.clone(),
@@ -5277,6 +5470,7 @@ mod tests {
                     offset_ratio: 0.2,
                 }),
                 codex: None,
+                grok: None,
             })
         );
 
@@ -5287,6 +5481,7 @@ mod tests {
         let profile = settings.taskbar_layout_profile(&topology).unwrap();
         assert_eq!(profile.claude.as_ref().unwrap().offset_ratio, 0.2);
         assert_eq!(profile.codex.as_ref().unwrap().offset_ratio, 0.7);
+        assert_eq!(profile.grok.as_ref().unwrap().offset_ratio, 0.5);
 
         assert!(super::apply_taskbar_layout_profile(
             &mut settings,
@@ -5294,6 +5489,7 @@ mod tests {
         ));
         assert_eq!(settings.claude_taskbar_offset_ratio, 0.2);
         assert_eq!(settings.codex_taskbar_offset_ratio, 0.7);
+        assert_eq!(settings.grok_taskbar_offset_ratio, 0.5);
     }
 
     #[test]
@@ -5312,6 +5508,7 @@ mod tests {
                     monitor_key: "monitor-laptop".into(),
                     offset_ratio: 0.7,
                 }),
+                grok: None,
             })
         );
         let pending = vec![super::PendingTaskbarProfilePlacement {
@@ -5552,13 +5749,15 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            super::collection_plan(&settings, true, true),
+            super::collection_plan(&settings, true, true, true),
             super::CollectionPlan {
                 claude_status: false,
                 claude_account: false,
                 codex: false,
+                grok: false,
                 force_claude_account: false,
                 force_codex_account: false,
+                force_grok_billing: false,
             }
         );
 
@@ -5569,16 +5768,52 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            super::collection_plan(&settings, false, false),
+            super::collection_plan(&settings, false, false, false),
             super::CollectionPlan {
                 claude_status: true,
                 claude_account: false,
                 codex: false,
+                grok: false,
                 force_claude_account: false,
                 force_codex_account: false,
+                force_grok_billing: false,
             }
         );
-        assert!(super::collection_plan(&settings, false, true).claude_account);
+        assert!(super::collection_plan(&settings, false, true, false).claude_account);
+
+        let grok = Settings {
+            show_claude: false,
+            show_codex: false,
+            show_grok: true,
+            ..Settings::default()
+        };
+        let plan = super::collection_plan(&grok, false, false, true);
+        assert!(plan.grok);
+        assert!(plan.force_grok_billing);
+    }
+
+    #[test]
+    fn three_tool_collection_reserves_a_final_grok_budget() {
+        let settings = Settings {
+            show_claude: true,
+            show_codex: true,
+            show_grok: true,
+            claude_account_auto_collect_on: true,
+            ..Settings::default()
+        };
+        let plan = super::collection_plan(&settings, false, false, false);
+        let final_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadlines = super::collection_deadlines(plan, final_deadline);
+
+        assert_eq!(deadlines.codex_reserve, std::time::Duration::from_secs(4));
+        assert!(
+            final_deadline.saturating_duration_since(deadlines.claude)
+                >= std::time::Duration::from_secs(2)
+        );
+        assert!(
+            final_deadline.saturating_duration_since(deadlines.rollout)
+                >= std::time::Duration::from_secs(9)
+        );
     }
 
     #[test]
@@ -5616,8 +5851,10 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(super::taskbar_bar_label("claude"), Some("bar-claude"));
         assert_eq!(super::taskbar_bar_label("codex"), Some("bar-codex"));
+        assert_eq!(super::taskbar_bar_label("grok"), Some("bar-grok"));
         assert!(super::should_show_taskbar_bar(&settings, "claude"));
         assert!(super::should_show_taskbar_bar(&settings, "codex"));
+        assert!(!super::should_show_taskbar_bar(&settings, "grok"));
         assert!(super::should_show_taskbar_bar_with_fullscreen(
             &settings, "claude", true
         ));
@@ -5631,9 +5868,15 @@ mod tests {
         assert!(super::should_show_taskbar_bar_with_window_state(
             &settings, "codex", false, true
         ));
+        settings.taskbar_bars_paused = true;
         assert!(!super::should_show_taskbar_bar_with_pause(
-            &settings, "codex", false, false, true
+            &settings,
+            "codex",
+            false,
+            false,
+            settings.taskbar_bars_paused,
         ));
+        settings.taskbar_bars_paused = false;
         assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(320));
         assert_eq!(super::taskbar_dock_width(&settings, "codex"), Some(320));
 
@@ -5653,6 +5896,8 @@ mod tests {
         settings.indicator_style = "ring".into();
         settings.ring_size_px = 44.0;
         assert_eq!(super::taskbar_dock_width(&settings, "claude"), Some(96));
+        settings.show_grok = true;
+        assert_eq!(super::taskbar_dock_width(&settings, "grok"), Some(45));
         assert_eq!(super::taskbar_width_with_menu(37, true), 96);
         assert_eq!(super::taskbar_width_with_menu(80, true), 96);
         assert_eq!(super::taskbar_width_with_menu(96, true), 96);
@@ -5758,12 +6003,15 @@ mod tests {
 
         assert_eq!(super::taskbar_offset_ratio(&settings, "claude"), 0.0);
         assert_eq!(super::taskbar_offset_ratio(&settings, "codex"), 0.0);
+        assert_eq!(super::taskbar_offset_ratio(&settings, "grok"), 0.0);
 
         super::set_taskbar_offset_ratio(&mut settings, "claude", 0.2);
         super::set_taskbar_offset_ratio(&mut settings, "codex", 0.8);
+        super::set_taskbar_offset_ratio(&mut settings, "grok", 0.6);
 
         assert_eq!(settings.claude_taskbar_offset_ratio, 0.2);
         assert_eq!(settings.codex_taskbar_offset_ratio, 0.8);
+        assert_eq!(settings.grok_taskbar_offset_ratio, 0.6);
     }
 
     #[test]
@@ -5775,9 +6023,12 @@ mod tests {
             width: 1920,
             height: 40,
         };
-        let ratios =
-            super::pending_taskbar_target_ratios(&settings, horizontal, [Some(320), Some(280)])
-                .unwrap();
+        let ratios = super::pending_taskbar_target_ratios(
+            &settings,
+            horizontal,
+            [Some(320), Some(280), None],
+        )
+        .unwrap();
         let claude =
             taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 320, ratios[0].unwrap())
                 .unwrap();
@@ -5788,9 +6039,12 @@ mod tests {
         assert_eq!(claude.x, 0);
         assert_eq!(codex.x, claude.x + claude.width);
 
-        let scaled =
-            super::pending_taskbar_target_ratios(&settings, horizontal, [Some(480), Some(420)])
-                .unwrap();
+        let scaled = super::pending_taskbar_target_ratios(
+            &settings,
+            horizontal,
+            [Some(480), Some(420), None],
+        )
+        .unwrap();
         let scaled_claude =
             taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 480, scaled[0].unwrap())
                 .unwrap();
@@ -5798,6 +6052,21 @@ mod tests {
             taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 420, scaled[1].unwrap())
                 .unwrap();
         assert_eq!(scaled_codex.x, scaled_claude.x + scaled_claude.width);
+
+        let three_settings = Settings {
+            show_grok: true,
+            ..Settings::default()
+        };
+        let three = super::pending_taskbar_target_ratios(
+            &three_settings,
+            horizontal,
+            [Some(320), Some(280), Some(240)],
+        )
+        .unwrap();
+        let grok =
+            taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 240, three[2].unwrap())
+                .unwrap();
+        assert_eq!(grok.x, 600);
     }
 
     #[cfg(windows)]
@@ -5833,6 +6102,35 @@ mod tests {
         let (_, resolved_codex) =
             super::resolve_taskbar_position_pair(true, 1, taskbar_rect, claude, 1, codex);
         assert_eq!(resolved_codex.x, 350);
+
+        let mut three = [
+            claude,
+            codex,
+            taskbar::DockRect {
+                x: 420,
+                y: 1040,
+                width: 180,
+                height: 40,
+            },
+        ];
+        taskbar::resolve_taskbar_overlaps(taskbar_rect, &mut three);
+        assert_eq!(three[1].x, three[0].x + three[0].width);
+        assert_eq!(three[2].x, three[1].x + three[1].width);
+
+        let mut trailing = [
+            taskbar::DockRect { x: 700, ..claude },
+            taskbar::DockRect { x: 750, ..codex },
+            taskbar::DockRect {
+                x: 800,
+                y: 1040,
+                width: 180,
+                height: 40,
+            },
+        ];
+        taskbar::resolve_taskbar_overlaps(taskbar_rect, &mut trailing);
+        assert_eq!(trailing[0].x, 370);
+        assert_eq!(trailing[1].x, 620);
+        assert_eq!(trailing[2].x, 820);
     }
 
     #[test]
@@ -5845,7 +6143,7 @@ mod tests {
             height: 1080,
         };
         let stacked =
-            super::pending_taskbar_target_ratios(&settings, vertical, [Some(220), Some(180)])
+            super::pending_taskbar_target_ratios(&settings, vertical, [Some(220), Some(180), None])
                 .unwrap();
         let claude =
             taskbar::dock_rect_for_taskbar_at_offset(0, 0, 48, 1080, 220, stacked[0].unwrap())
@@ -5854,7 +6152,8 @@ mod tests {
             taskbar::dock_rect_for_taskbar_at_offset(0, 0, 48, 1080, 180, stacked[1].unwrap())
                 .unwrap();
         let codex_only =
-            super::pending_taskbar_target_ratios(&settings, vertical, [None, Some(180)]).unwrap();
+            super::pending_taskbar_target_ratios(&settings, vertical, [None, Some(180), None])
+                .unwrap();
 
         assert_eq!(claude.y, 0);
         assert_eq!(codex.y, claude.y + claude.height);
@@ -5878,7 +6177,7 @@ mod tests {
                 width: 1920,
                 height: 40,
             },
-            [Some(320), Some(280)],
+            [Some(320), Some(280), None],
         )
         .is_none());
     }
@@ -5896,7 +6195,7 @@ mod tests {
             ..Settings::default()
         };
         let codex_only =
-            super::pending_taskbar_target_ratios(&settings, taskbar_rect, [None, Some(280)])
+            super::pending_taskbar_target_ratios(&settings, taskbar_rect, [None, Some(280), None])
                 .unwrap();
         super::set_taskbar_target(
             &mut settings,
@@ -5908,9 +6207,12 @@ mod tests {
         assert!(settings.codex_taskbar_target_initialized);
 
         settings.show_claude = true;
-        let enabled =
-            super::pending_taskbar_target_ratios(&settings, taskbar_rect, [Some(320), Some(280)])
-                .unwrap();
+        let enabled = super::pending_taskbar_target_ratios(
+            &settings,
+            taskbar_rect,
+            [Some(320), Some(280), None],
+        )
+        .unwrap();
         let claude =
             taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 320, enabled[0].unwrap())
                 .unwrap();
@@ -6945,6 +7247,35 @@ mod tests {
         super::set_taskbar_target(&mut current, "claude", "monitor-office", 0.8);
         super::preserve_concurrent_taskbar_state(&current, &baseline, &mut requested, false);
         assert_eq!(requested.claude_taskbar_offset_ratio, 0.8);
+    }
+
+    #[test]
+    fn panel_save_preserves_the_latest_backend_taskbar_pause_state() {
+        let baseline = Settings {
+            taskbar_bars_paused: true,
+            ..Settings::default()
+        };
+
+        let current = baseline.clone();
+        let mut stale_panel_request = Settings::default();
+        super::preserve_concurrent_taskbar_state(
+            &current,
+            &baseline,
+            &mut stale_panel_request,
+            false,
+        );
+        assert!(stale_panel_request.taskbar_bars_paused);
+
+        let mut resumed = baseline.clone();
+        resumed.taskbar_bars_paused = false;
+        let mut stale_paused_request = baseline.clone();
+        super::preserve_concurrent_taskbar_state(
+            &resumed,
+            &baseline,
+            &mut stale_paused_request,
+            false,
+        );
+        assert!(!stale_paused_request.taskbar_bars_paused);
     }
 
     #[test]

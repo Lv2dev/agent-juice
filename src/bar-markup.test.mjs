@@ -22,9 +22,9 @@ test("bar markup includes quad mode single-ring slots for each tool limit", () =
   const primaryNumbers = markup.match(/class="quad-number quad-primary-number"/g) ?? [];
   const secondaryNumbers = markup.match(/class="quad-number quad-secondary-number"/g) ?? [];
 
-  assert.equal(quadSlots.length, 2);
-  assert.equal(primarySlots.length, 2);
-  assert.equal(secondarySlots.length, 2);
-  assert.equal(primaryNumbers.length, 2);
-  assert.equal(secondaryNumbers.length, 2);
+  assert.equal(quadSlots.length, 3);
+  assert.equal(primarySlots.length, 3);
+  assert.equal(secondarySlots.length, 3);
+  assert.equal(primaryNumbers.length, 3);
+  assert.equal(secondaryNumbers.length, 3);
 });
