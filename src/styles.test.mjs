@@ -1335,8 +1335,10 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.doesNotMatch(signedReleaseWorkflow, /tauri-apps\/tauri-action/);
   assert.doesNotMatch(signedReleaseWorkflow, /\$\w+\s*=\s*"\$\{\{ inputs\./);
   assert.match(signedReleaseWorkflow, /INPUT_VERSION: \$\{\{ inputs\.version \}\}/);
-  assert.match(signedReleaseWorkflow, /\$packageLockVersion = \$packageLock\.version/);
-  assert.match(signedReleaseWorkflow, /\$packageLockRootVersion = \$packageLock\.packages\.""\.version/);
+  assert.doesNotMatch(signedReleaseWorkflow, /Get-Content package-lock\.json -Raw \| ConvertFrom-Json/);
+  assert.match(signedReleaseWorkflow, /node -e "const lock=require\('\.\/package-lock\.json'\)/);
+  assert.match(signedReleaseWorkflow, /\$packageLockVersion = \$packageLockVersions\.top/);
+  assert.match(signedReleaseWorkflow, /\$packageLockRootVersion = \$packageLockVersions\.root/);
   assert.match(signedReleaseWorkflow, /\$cargoLockVersion = \[regex\]::Match\(/);
   assert.match(signedReleaseWorkflow, /name\\s\*=\\s\*"agent-juice"/);
   assert.match(signedReleaseWorkflow, /ref: \$\{\{ github\.sha \}\}/);

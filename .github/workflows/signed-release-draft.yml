@@ -81,9 +81,11 @@ jobs:
           $expected = $env:INPUT_VERSION.Trim()
           if ($expected -notmatch '^\d+\.\d+\.\d+$') { throw "invalid release version: $expected" }
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json
-          $packageLockVersion = $packageLock.version
-          $packageLockRootVersion = $packageLock.packages."".version
+          $packageLockVersionsJson = node -e "const lock=require('./package-lock.json'); process.stdout.write(JSON.stringify({top:lock.version,root:lock.packages[''].version}))"
+          if ($LASTEXITCODE -ne 0) { throw "failed to parse package-lock.json" }
+          $packageLockVersions = $packageLockVersionsJson | ConvertFrom-Json
+          $packageLockVersion = $packageLockVersions.top
+          $packageLockRootVersion = $packageLockVersions.root
           $tauriVersion = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
           $cargo = Get-Content src-tauri\Cargo.toml -Raw
           $cargoVersion = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
