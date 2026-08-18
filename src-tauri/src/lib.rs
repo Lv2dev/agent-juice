@@ -211,6 +211,24 @@ enum CollectionErrorKind {
     Deadline,
     Transport,
     Parse,
+    LoginRequired,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CollectionHealth {
+    Ready,
+    LoginRequired,
+    Unavailable,
+    TransientError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct CollectionHealthSnapshot {
+    claude: CollectionHealth,
+    codex: CollectionHealth,
+    grok: CollectionHealth,
 }
 
 #[derive(Clone)]
@@ -1066,6 +1084,63 @@ fn cached_status_attempt(
     last_good
 }
 
+fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
+    if collector::error_requires_login(error) {
+        return CollectionErrorKind::LoginRequired;
+    }
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if [
+        "executable was not found",
+        "executable unavailable",
+        "command unavailable",
+        "program not found",
+        "os error 2",
+        "cannot find the file",
+        "지정된 파일을 찾을 수 없습니다",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+    {
+        CollectionErrorKind::Unavailable
+    } else {
+        CollectionErrorKind::Transport
+    }
+}
+
+fn cached_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> CollectionHealth {
+    let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
+        Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
+        Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(
+            CollectionErrorKind::Deadline
+            | CollectionErrorKind::Transport
+            | CollectionErrorKind::Parse,
+        ) => CollectionHealth::TransientError,
+        None if cache
+            .as_ref()
+            .and_then(|attempt| attempt.last_good.as_ref())
+            .is_some() =>
+        {
+            CollectionHealth::Ready
+        }
+        None => CollectionHealth::Unavailable,
+    }
+}
+
+fn collection_health_snapshot() -> CollectionHealthSnapshot {
+    CollectionHealthSnapshot {
+        claude: cached_collection_health(&CLAUDE_USAGE_CACHE),
+        codex: cached_collection_health(&CODEX_ACCOUNT_CACHE),
+        grok: cached_collection_health(&GROK_BILLING_CACHE),
+    }
+}
+
+fn emit_collection_snapshot(app: &tauri::AppHandle, statuses: &[AgentStatus]) {
+    let _ = app.emit("collection-health-updated", collection_health_snapshot());
+    let _ = app.emit("status-updated", statuses);
+}
+
 fn remaining_refresh_budget(
     deadline: std::time::Instant,
     subprocess_limit: std::time::Duration,
@@ -1120,7 +1195,7 @@ fn collect_codex_account_status(
                 reserve,
             )?;
             let raw = collector::codex_account_rate_limits_response(timeout)
-                .map_err(|_| CollectionErrorKind::Transport)?;
+                .map_err(|error| classify_collection_error(&error))?;
             adapters::codex::parse_account_rate_limits_response(&raw, pc_id, &now.to_rfc3339())
                 .map_err(|_| CollectionErrorKind::Parse)
         },
@@ -1150,11 +1225,18 @@ fn collect_claude_usage_status(
             );
             let mut oauth_error = CollectionErrorKind::Transport;
             if let Ok(oauth_timeout) = oauth_timeout {
-                if let Ok(raw) = collector::claude_oauth_usage_response(oauth_timeout) {
-                    match adapters::claude::parse_oauth_usage_response(&raw, pc_id, &captured_at) {
-                        Ok(status) => return Ok(status),
-                        Err(_) => oauth_error = CollectionErrorKind::Parse,
+                match collector::claude_oauth_usage_response(oauth_timeout) {
+                    Ok(raw) => {
+                        match adapters::claude::parse_oauth_usage_response(
+                            &raw,
+                            pc_id,
+                            &captured_at,
+                        ) {
+                            Ok(status) => return Ok(status),
+                            Err(_) => oauth_error = CollectionErrorKind::Parse,
+                        }
                     }
+                    Err(error) => oauth_error = classify_collection_error(&error),
                 }
             }
 
@@ -1162,13 +1244,34 @@ fn collect_claude_usage_status(
                 deadline,
                 std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
             )?;
-            let raw = collector::claude_usage_output(legacy_timeout).map_err(|_| oauth_error)?;
-            adapters::claude::parse_usage_output(&raw, pc_id, &captured_at)
-                .map_err(|_| CollectionErrorKind::Parse)
+            let raw = collector::claude_usage_output(legacy_timeout).map_err(|error| {
+                let fallback_error = classify_collection_error(&error);
+                if matches!(
+                    fallback_error,
+                    CollectionErrorKind::LoginRequired | CollectionErrorKind::Unavailable
+                ) {
+                    fallback_error
+                } else {
+                    oauth_error.clone()
+                }
+            })?;
+            if collector::text_requires_login(&raw) {
+                return Err(CollectionErrorKind::LoginRequired);
+            }
+            parse_claude_fallback_usage(&raw, pc_id, &captured_at, oauth_error)
         },
     )?;
     derive_active(&mut status, settings.stale_after_secs, now);
     Some(status)
+}
+
+fn parse_claude_fallback_usage(
+    raw: &str,
+    pc_id: &str,
+    captured_at: &str,
+    oauth_error: CollectionErrorKind,
+) -> Result<AgentStatus, CollectionErrorKind> {
+    adapters::claude::parse_usage_output(raw, pc_id, captured_at).map_err(|_| oauth_error)
 }
 
 fn collect_grok_billing_status(
@@ -1189,7 +1292,7 @@ fn collect_grok_billing_status(
                 std::time::Duration::from_secs(GROK_BILLING_TIMEOUT_SECS),
             )?;
             let raw = collector::grok_billing_response(timeout)
-                .map_err(|_| CollectionErrorKind::Transport)?;
+                .map_err(|error| classify_collection_error(&error))?;
             adapters::grok::parse_billing_response(&raw, pc_id, &now.to_rfc3339())
                 .map_err(|_| CollectionErrorKind::Parse)
         },
@@ -1403,7 +1506,7 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
                     };
                     let (statuses, collected) = collect_force_refresh_off_thread(settings).await;
                     if collected {
-                        let _ = app.emit("status-updated", &statuses);
+                        emit_collection_snapshot(&app, &statuses);
                     }
                 });
             }
@@ -1538,7 +1641,7 @@ fn spawn_status_loop(
             let representatives = collect_representatives_off_thread(settings, false).await;
 
             if !system_activity.publish_if_current(started, || {
-                let _ = handle.emit("status-updated", &representatives);
+                emit_collection_snapshot(&handle, &representatives);
             }) {
                 continue;
             }
@@ -2294,9 +2397,6 @@ fn taskbar_content_width_for_mode(
     mode: &str,
     layout: Option<&TaskbarContentLayout>,
 ) -> Option<i32> {
-    if !matches!(mode, "full" | "compact") {
-        return None;
-    }
     layout
         .filter(|layout| layout.mode == mode)
         .map(|layout| layout.width)
@@ -3074,6 +3174,11 @@ async fn get_status() -> Result<Vec<AgentStatus>, String> {
 }
 
 #[tauri::command]
+fn get_collection_health() -> CollectionHealthSnapshot {
+    collection_health_snapshot()
+}
+
+#[tauri::command]
 async fn get_activity(
     window: tauri::Window,
     app: tauri::AppHandle,
@@ -3098,7 +3203,7 @@ async fn refresh_status(
     let activity_settings = settings.clone();
     let (statuses, collected) = collect_force_refresh_off_thread(settings).await;
     if collected {
-        let _ = app.emit("status-updated", &statuses);
+        emit_collection_snapshot(&app, &statuses);
     }
     spawn_activity_refresh(app, activity_settings);
     Ok(statuses)
@@ -3713,7 +3818,7 @@ async fn save_settings(
     let _ = app.emit("settings-updated", &settings);
     if tool_collection_changed {
         let visible = filter_enabled_statuses(COLLECTION_COORDINATOR.last_result(), &settings);
-        let _ = app.emit("status-updated", &visible);
+        emit_collection_snapshot(&app, &visible);
         if claude_enabled_now || codex_enabled_now || grok_enabled_now {
             let refresh_app = app.clone();
             let refresh_settings = settings.clone();
@@ -3727,7 +3832,7 @@ async fn save_settings(
                     grok_enabled_now,
                 )
                 .await;
-                let _ = refresh_app.emit("status-updated", &statuses);
+                emit_collection_snapshot(&refresh_app, &statuses);
             });
             spawn_activity_refresh(app.clone(), settings.clone());
         }
@@ -3967,9 +4072,6 @@ async fn set_taskbar_content_width(
     let tool = normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
     let (settings, settings_generation) =
         load_settings_with_generation().map_err(|err| err.to_string())?;
-    if !matches!(settings.bar_mode.as_str(), "full" | "compact") {
-        return Ok(false);
-    }
     let width = width.ceil() as i32;
     let previous = taskbar_content_layout(&app, &settings, tool);
     if previous
@@ -5282,6 +5384,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_collection_health,
             get_activity,
             refresh_status,
             get_update_status,
@@ -5944,7 +6047,7 @@ mod tests {
     }
 
     #[test]
-    fn measured_taskbar_content_width_is_scoped_to_its_text_mode() {
+    fn measured_taskbar_content_width_is_scoped_to_its_mode() {
         let layout = super::TaskbarContentLayout {
             mode: "full".into(),
             width: 188,
@@ -5961,6 +6064,15 @@ mod tests {
         assert_eq!(
             super::taskbar_content_width_for_mode("dual", Some(&layout)),
             None
+        );
+        let dual_layout = super::TaskbarContentLayout {
+            mode: "dual".into(),
+            width: 92,
+            ratio: Some(0.42),
+        };
+        assert_eq!(
+            super::taskbar_content_width_for_mode("dual", Some(&dual_layout)),
+            Some(92)
         );
         assert_eq!(super::taskbar_content_width_for_mode("full", None), None);
     }
@@ -6772,6 +6884,109 @@ mod tests {
             Some(super::CollectionErrorKind::Parse)
         );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn collection_health_prioritizes_login_failure_over_last_good_status() {
+        use chrono::{TimeZone, Utc};
+        use std::sync::Mutex;
+
+        let now = Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap();
+        let cache = Mutex::new(Some(super::CachedStatusAttempt {
+            attempted_at: now,
+            last_good: Some(status_for_signature("last-good")),
+            error: Some(super::CollectionErrorKind::LoginRequired),
+            retry_at: now,
+        }));
+
+        assert_eq!(
+            super::cached_collection_health(&cache),
+            super::CollectionHealth::LoginRequired
+        );
+    }
+
+    #[test]
+    fn collection_health_recovers_after_a_successful_retry() {
+        use chrono::{TimeZone, Utc};
+        use std::sync::Mutex;
+
+        let now = Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap();
+        let cache = Mutex::new(Some(super::CachedStatusAttempt {
+            attempted_at: now,
+            last_good: None,
+            error: Some(super::CollectionErrorKind::LoginRequired),
+            retry_at: now,
+        }));
+        let result = super::cached_status_attempt(&cache, now, 30, true, || {
+            Ok(status_for_signature("recovered"))
+        });
+
+        assert_eq!(result.unwrap().session_id, "recovered");
+        assert_eq!(
+            super::cached_collection_health(&cache),
+            super::CollectionHealth::Ready
+        );
+    }
+
+    #[test]
+    fn collection_error_classification_is_symmetric_across_providers() {
+        for message in [
+            "Claude OAuth access token unavailable",
+            "Codex app-server HTTP 401 unauthorized",
+            "Grok ACP invalid_grant RefreshTokenRejected",
+        ] {
+            assert_eq!(
+                super::classify_collection_error(&anyhow::anyhow!(message)),
+                super::CollectionErrorKind::LoginRequired
+            );
+        }
+        assert_eq!(
+            super::classify_collection_error(&anyhow::anyhow!("Grok executable was not found")),
+            super::CollectionErrorKind::Unavailable
+        );
+        assert_eq!(
+            super::classify_collection_error(&anyhow::anyhow!("Grok Build executable unavailable")),
+            super::CollectionErrorKind::Unavailable
+        );
+        assert_eq!(
+            super::classify_collection_error(&anyhow::anyhow!("Codex app-server timed out")),
+            super::CollectionErrorKind::Transport
+        );
+    }
+
+    #[test]
+    fn claude_fallback_preserves_oauth_error_when_usage_output_is_not_supported() {
+        let raw = r#"{"type":"result","result":"Usage: 0 input, 0 output"}"#;
+
+        for error in [
+            super::CollectionErrorKind::LoginRequired,
+            super::CollectionErrorKind::Transport,
+            super::CollectionErrorKind::Parse,
+            super::CollectionErrorKind::Unavailable,
+        ] {
+            let result = super::parse_claude_fallback_usage(
+                raw,
+                "LOCAL",
+                "2026-08-15T00:00:00Z",
+                error.clone(),
+            );
+            assert_eq!(result.unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn claude_fallback_valid_usage_recovers_from_oauth_login_failure() {
+        let status = super::parse_claude_fallback_usage(
+            r#"{"result":"Current session: 12%\nCurrent week (all models): 34%"}"#,
+            "LOCAL",
+            "2026-08-15T00:00:00Z",
+            super::CollectionErrorKind::LoginRequired,
+        )
+        .unwrap();
+
+        assert_eq!(status.session_id, "claude-usage");
+        assert_eq!(status.primary.unwrap().used_percent, Some(12.0));
+        assert_eq!(status.secondary.unwrap().used_percent, Some(34.0));
     }
 
     #[test]

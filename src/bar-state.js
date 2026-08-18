@@ -245,6 +245,24 @@ export function barToolViewModel(
     brandColor: toolBrandColor(tool, settings),
   };
 
+  if (options.collectionHealth?.[tool] === "login_required") {
+    const primary = limitModel(primaryLabel, null, settings, now, language, tool, false);
+    const secondary = limitModel(secondaryLabel, null, settings, now, language, tool, true);
+    secondary.visible = false;
+    const loginText = t("state.loginRequired", language);
+    return {
+      ...base,
+      state: "login_required",
+      severity: "empty",
+      primary,
+      secondary,
+      worst: "-",
+      loginText,
+      tooltip: `${base.label}\n${loginText}`,
+      ariaLabel: `${base.label}, ${loginText}`,
+    };
+  }
+
   if (options.startupLoading === true) {
     const primary = limitModel(
       primaryLabel,

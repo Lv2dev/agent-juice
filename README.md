@@ -31,6 +31,7 @@ Juice는 현재 PC에 로그인된 Claude Code·Codex의 **5시간/주간 한도
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
 | 로컬 우선 수집 | 현재 PC의 Claude Code 로그인/statusline, Codex app-server/rollout, Grok Build 공식 ACP와 세션 로그만 사용합니다. |
+| 로그인 상태 안내 | 명시적인 인증 실패가 확인되면 오래된 값을 현재값처럼 표시하지 않고 해당 카드와 바에 `로그인 필요`를 표시합니다. 네트워크·timeout·형식 오류와는 구분합니다. |
 | 토큰 활동 | Claude·Codex·Grok의 로컬 세션 로그에서 실제 토큰을 일별로 집계해 최근 4~52주 활동을 히트맵으로 표시합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
 | 도구별 색상 | Claude·Codex의 5h/주간과 Grok의 주간/월간 기본색, 경고·위험색을 지정하고 단계별 색상 변경을 각각 켜거나 끕니다. |
@@ -235,6 +236,7 @@ Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않�
 
 ### 문제 해결
 
+- **로그인 필요가 표시됨:** 해당 Claude Code·Codex CLI·Grok Build에 다시 로그인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
 - **Claude가 비어 있음:** 표시줄 탭에서 Claude가 활성화되어 있고 Claude 계정 자동 수집이 켜져 있는지 확인하거나, Juice를 다시 실행한 뒤 Claude Code를 한 번 사용하세요.
 - **Codex가 비어 있음:** 현재 PC의 Codex CLI 로그인을 확인하세요. app-server 조회가 실패한다면 Codex를 한 번 사용해 rollout fallback 데이터를 만드세요.
 - **Grok이 비어 있음:** 표시줄 탭에서 Grok을 활성화하고 현재 PC의 Grok Build 설치·로그인을 확인하세요. Grok은 기본 OFF이며 공식 ACP billing을 사용할 수 있을 때 표시됩니다.
@@ -264,6 +266,7 @@ Juice reads the **5-hour and weekly limits** from Claude Code and Codex plus the
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
 | Local-first collection | Uses the local Claude Code login/statusline, Codex app-server/rollout data, and official Grok Build ACP/session logs. |
+| Sign-in status | When an explicit authentication failure is confirmed, Juice shows `Sign in required` on that card and bar instead of presenting stale values as current. Network, timeout, and format errors remain distinct. |
 | Token activity | Aggregates actual tokens from local Claude, Codex, and Grok session logs by day and shows the latest 4 to 52 weeks as a heatmap. |
 | Live settings | Changes are saved and applied without a Save button. |
 | Per-tool colors | Assign separate base colors to Claude/Codex 5-hour and weekly values plus Grok weekly and monthly values, with customizable warning and danger colors. |
@@ -468,6 +471,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
 ### Troubleshooting
 
+- **Sign in required is shown:** Sign in again to the affected Claude Code, Codex CLI, or Grok Build account, then force a refresh in Juice. The state clears automatically after the next successful collection.
 - **Claude is empty:** Confirm that Claude is enabled in the Taskbar tab and account auto-collection is on, or restart Juice and use Claude Code once.
 - **Codex is empty:** Confirm the local Codex CLI login. If app-server collection fails, use Codex once to create rollout fallback data.
 - **Grok is empty:** Enable Grok in the Taskbar tab and confirm the local Grok Build installation and login. Grok defaults to off and appears when official ACP billing is available.

@@ -12,6 +12,60 @@ const settings = {
   language: "ko",
 };
 
+test("barToolViewModel prioritizes login-required health for every provider", () => {
+  for (const tool of ["claude", "codex", "grok"]) {
+    const status = {
+      tool,
+      captured_at: "2026-08-14T00:00:00Z",
+      primary: { used_percent: 10, resets_at: null },
+      secondary: { used_percent: 20, resets_at: null },
+      session: { active: true },
+    };
+    const vm = barToolViewModel([status], tool, settings, new Date(), {
+      startupLoading: true,
+      collectionHealth: { [tool]: "login_required" },
+    });
+
+    assert.equal(vm.state, "login_required");
+    assert.equal(vm.loginText, "로그인 필요");
+    assert.equal(vm.secondary.visible, false);
+    assert.match(vm.ariaLabel, /로그인 필요/);
+  }
+});
+
+test("barToolViewModel clears login-required copy when collection health recovers", () => {
+  const vm = barToolViewModel([], "codex", settings, new Date(), {
+    collectionHealth: { codex: "ready" },
+  });
+
+  assert.equal(vm.state, "empty");
+  assert.equal(vm.loginText, undefined);
+});
+
+test("barViewModel preserves login-required state across every mode and indicator", () => {
+  for (const bar_mode of ["full", "compact", "dual", "quad"]) {
+    for (const indicator_style of ["ring", "bar"]) {
+      const vm = barViewModel(
+        [],
+        {
+          ...settings,
+          bar_mode,
+          indicator_style,
+          show_claude: true,
+          show_codex: false,
+          show_grok: false,
+        },
+        new Date(),
+        { collectionHealth: { claude: "login_required" } },
+      );
+
+      assert.equal(vm.mode, bar_mode);
+      assert.equal(vm.indicatorStyle, indicator_style);
+      assert.equal(vm.tools[0].state, "login_required");
+    }
+  }
+});
+
 test("barToolViewModel renders remaining account limits, reset text, and lowest remaining ring", () => {
   const status = {
     tool: "claude",

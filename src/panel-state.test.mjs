@@ -16,6 +16,34 @@ const settings = {
   language: "ko",
 };
 
+test("viewModelForTool shows localized login-required state for all providers", () => {
+  for (const tool of ["claude", "codex", "grok"]) {
+    const vm = viewModelForTool(
+      [],
+      tool,
+      { ...settings, language: "en" },
+      new Date(),
+      { [tool]: "login_required" },
+    );
+
+    assert.equal(vm.state, "login_required");
+    assert.equal(vm.emptyHint, "Sign in required");
+  }
+});
+
+test("viewModelForTool keeps transient failures distinct from login-required state", () => {
+  const vm = viewModelForTool(
+    [],
+    "grok",
+    settings,
+    new Date(),
+    { grok: "transient_error" },
+  );
+
+  assert.equal(vm.state, "empty");
+  assert.notEqual(vm.emptyHint, "로그인 필요");
+});
+
 function luminance(hex) {
   const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => Number.parseInt(value, 16) / 255);
   const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);

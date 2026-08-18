@@ -81,10 +81,25 @@ jobs:
           $expected = $env:INPUT_VERSION.Trim()
           if ($expected -notmatch '^\d+\.\d+\.\d+$') { throw "invalid release version: $expected" }
           $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $packageLock = Get-Content package-lock.json -Raw | ConvertFrom-Json
+          $packageLockVersion = $packageLock.version
+          $packageLockRootVersion = $packageLock.packages."".version
           $tauriVersion = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
           $cargo = Get-Content src-tauri\Cargo.toml -Raw
           $cargoVersion = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          foreach ($actual in @($packageVersion, $tauriVersion, $cargoVersion)) {
+          $cargoLock = Get-Content src-tauri\Cargo.lock -Raw
+          $cargoLockVersion = [regex]::Match(
+            $cargoLock,
+            '(?ms)\[\[package\]\]\s*name\s*=\s*"agent-juice"\s*version\s*=\s*"([^"]+)"'
+          ).Groups[1].Value
+          foreach ($actual in @(
+            $packageVersion,
+            $packageLockVersion,
+            $packageLockRootVersion,
+            $tauriVersion,
+            $cargoVersion,
+            $cargoLockVersion
+          )) {
             if ($actual -ne $expected) { throw "version mismatch: expected $expected, got $actual" }
           }
 

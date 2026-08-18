@@ -18,11 +18,13 @@ const WINDOW_ACTION_COMMANDS = {
 };
 let settings = { ...DEFAULT_SETTINGS };
 let lastStatuses = [];
+let collectionHealth = {};
 let activitySnapshot = { days: [], partial: false };
 let activityFilter = "all";
 let activityDataRevision = 0;
 let lastActivityRenderSignature = "";
 let statusEventGeneration = 0;
+let collectionHealthEventGeneration = 0;
 let activityEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
@@ -151,9 +153,9 @@ function renderTool(tool, now) {
   }
   card.hidden = false;
 
-  const vm = viewModelForTool(lastStatuses, tool, settings, now);
+  const vm = viewModelForTool(lastStatuses, tool, settings, now, collectionHealth);
 
-  card.dataset.state = vm.exists ? (vm.active ? "live" : "stale") : "empty";
+  card.dataset.state = vm.state;
   card.style?.setProperty("--tool-brand", vm.brandColor);
   setBar(card, ".p5h", vm.primary);
   setBar(card, ".pweek", vm.secondary);
@@ -372,8 +374,17 @@ async function loadSettings() {
 
 async function loadStatus() {
   const requestGeneration = statusEventGeneration;
+  const healthRequestGeneration = collectionHealthEventGeneration;
   try {
     const statuses = await invoke("get_status");
+    try {
+      const health = await invoke("get_collection_health");
+      if (collectionHealthEventGeneration === healthRequestGeneration) {
+        collectionHealth = health && typeof health === "object" ? health : {};
+      }
+    } catch {
+      // Health is supplemental; keep rendering the last valid usage snapshot.
+    }
     if (statusEventGeneration === requestGeneration) renderStatuses(statuses);
   } catch {
     if (statusEventGeneration === requestGeneration) renderStatuses([]);
@@ -503,6 +514,11 @@ function bindStatusUpdates() {
     void listenWithRetry(listen, "status-updated", (event) => {
       statusEventGeneration += 1;
       renderStatuses(event.payload);
+    });
+    void listenWithRetry(listen, "collection-health-updated", (event) => {
+      collectionHealthEventGeneration += 1;
+      collectionHealth = event.payload && typeof event.payload === "object" ? event.payload : {};
+      renderStatuses(lastStatuses);
     });
     void listenWithRetry(listen, "settings-updated", (event) => {
         if (event.payload && typeof event.payload === "object") {

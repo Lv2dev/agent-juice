@@ -502,6 +502,192 @@ fn install_statusline_wrap_preserves_original_and_is_idempotent() {
 }
 
 #[test]
+fn install_statusline_wrap_adopts_orphaned_juice_hook_and_removes_it_on_restore() {
+    let root = temp_root("install-orphaned-juice-hook");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    let old_bridge = root.join("old").join("agentjuice-statusline.exe");
+    let new_bridge = root.join("new").join("agentjuice-statusline.exe");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(old_bridge.parent().unwrap()).unwrap();
+    fs::create_dir_all(new_bridge.parent().unwrap()).unwrap();
+    fs::write(&old_bridge, b"verified Juice helper").unwrap();
+    fs::write(&new_bridge, b"verified Juice helper").unwrap();
+    let old_command = format!(
+        "\"{}\"",
+        old_bridge.display().to_string().replace('\\', "/")
+    );
+    fs::write(
+        &settings_path,
+        serde_json::to_vec(&serde_json::json!({
+            "statusLine": {"type": "command", "command": old_command},
+            "keep": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    Settings::install_statusline_wrap_at(&home, &data_dir, new_bridge.to_str().unwrap()).unwrap();
+
+    let installed = read_json(&settings_path);
+    assert_eq!(installed["keep"], true);
+    assert_eq!(
+        installed["statusLine"]["command"],
+        format!(
+            "\"{}\"",
+            new_bridge.display().to_string().replace('\\', "/")
+        )
+    );
+    let metadata = read_json(&data_dir.join("wrap-meta.json"));
+    assert_eq!(metadata["original_status_line_present"], false);
+    assert!(metadata.get("original_status_line").is_none());
+    assert!(!data_dir.join("wrap.json").exists());
+
+    Settings::restore_statusline_at(&home, &data_dir).unwrap();
+    let restored = read_json(&settings_path);
+    assert_eq!(restored["keep"], true);
+    assert!(restored.get("statusLine").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_statusline_wrap_rejects_unrelated_same_name_binary_without_metadata() {
+    let root = temp_root("install-unrelated-same-name");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    let unrelated = root.join("user").join("agentjuice-statusline.exe");
+    let bridge = root.join("juice").join("agentjuice-statusline.exe");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    fs::create_dir_all(bridge.parent().unwrap()).unwrap();
+    fs::write(&unrelated, b"unrelated user binary").unwrap();
+    fs::write(&bridge, b"actual Juice helper").unwrap();
+    let original = serde_json::to_vec(&serde_json::json!({
+        "statusLine": {
+            "type": "command",
+            "command": format!("\"{}\"", unrelated.display().to_string().replace('\\', "/")),
+        },
+        "keep": true,
+    }))
+    .unwrap();
+    fs::write(&settings_path, &original).unwrap();
+
+    assert!(
+        Settings::install_statusline_wrap_at(&home, &data_dir, bridge.to_str().unwrap()).is_err()
+    );
+    assert_eq!(fs::read(&settings_path).unwrap(), original);
+    assert!(!data_dir.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_statusline_wrap_preserves_owned_original_across_stale_juice_path() {
+    let root = temp_root("install-stale-juice-path");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        r#"{"statusLine":{"type":"command","command":"claude-hud","padding":2},"keep":true}"#,
+    )
+    .unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Old\agentjuice-statusline.exe")
+        .unwrap();
+
+    let mut stale = read_json(&settings_path);
+    stale["statusLine"]["command"] = serde_json::json!("\"D:/Moved/agentjuice-statusline.exe\"");
+    fs::write(&settings_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+
+    Settings::install_statusline_wrap_at(
+        &home,
+        &data_dir,
+        r"C:\Program Files\Juice\agentjuice-statusline.exe",
+    )
+    .unwrap();
+    Settings::restore_statusline_at(&home, &data_dir).unwrap();
+
+    let restored = read_json(&settings_path);
+    assert_eq!(restored["keep"], true);
+    assert_eq!(restored["statusLine"]["command"], "claude-hud");
+    assert_eq!(restored["statusLine"]["padding"], 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_statusline_wrap_rejects_user_change_after_owned_install() {
+    let root = temp_root("install-owned-user-change");
+    let home = root.join("home");
+    let data_dir = root.join("data");
+    let settings_path = home.join(".claude").join("settings.json");
+    let meta_path = data_dir.join("wrap-meta.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    fs::write(
+        &settings_path,
+        r#"{"statusLine":{"type":"command","command":"original"},"keep":true}"#,
+    )
+    .unwrap();
+    Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Old\agentjuice-statusline.exe")
+        .unwrap();
+
+    let changed = r#"{"statusLine":{"type":"command","command":"user-change"},"keep":true}"#;
+    fs::write(&settings_path, changed).unwrap();
+    let metadata = fs::read(&meta_path).unwrap();
+
+    assert!(Settings::install_statusline_wrap_at(
+        &home,
+        &data_dir,
+        r"C:\Program Files\Juice\agentjuice-statusline.exe"
+    )
+    .is_err());
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), changed);
+    assert_eq!(fs::read(&meta_path).unwrap(), metadata);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn install_statusline_wrap_rejects_ambiguous_orphan_and_invalid_metadata() {
+    for (name, metadata) in [
+        ("ambiguous-orphan", None),
+        (
+            "invalid-metadata",
+            Some(r#"{"version":2,"managed_command":"managed"}"#),
+        ),
+    ] {
+        let root = temp_root(name);
+        let home = root.join("home");
+        let data_dir = root.join("data");
+        let settings_path = home.join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        let settings = r#"{"statusLine":{"type":"command","command":"\"C:/Old/agentjuice-statusline.exe\"","userField":true},"keep":true}"#;
+        fs::write(&settings_path, settings).unwrap();
+        if let Some(metadata) = metadata {
+            fs::create_dir_all(&data_dir).unwrap();
+            fs::write(data_dir.join("wrap-meta.json"), metadata).unwrap();
+        }
+
+        assert!(Settings::install_statusline_wrap_at(
+            &home,
+            &data_dir,
+            r"C:\Program Files\Juice\agentjuice-statusline.exe"
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&settings_path).unwrap(), settings);
+        if let Some(metadata) = metadata {
+            assert_eq!(
+                fs::read_to_string(data_dir.join("wrap-meta.json")).unwrap(),
+                metadata
+            );
+        } else {
+            assert!(!data_dir.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn restore_statusline_restores_entire_original_subtree_or_absence() {
     let root = temp_root("restore");
     let home = root.join("home");

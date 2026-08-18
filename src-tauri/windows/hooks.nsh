@@ -1,3 +1,27 @@
+!macro NSIS_HOOK_PREINSTALL
+  StrCpy $R8 0
+  juice_statusline_quarantine_try:
+    IfFileExists "$INSTDIR\agentjuice-statusline.exe" juice_statusline_quarantine_prepare juice_statusline_quarantine_done
+  juice_statusline_quarantine_prepare:
+    Delete "$INSTDIR\agentjuice-statusline.juice-update-old.exe"
+    IfFileExists "$INSTDIR\agentjuice-statusline.juice-update-old.exe" juice_statusline_quarantine_wait juice_statusline_quarantine_move
+  juice_statusline_quarantine_move:
+    ClearErrors
+    Rename "$INSTDIR\agentjuice-statusline.exe" "$INSTDIR\agentjuice-statusline.juice-update-old.exe"
+    IfErrors juice_statusline_quarantine_wait juice_statusline_quarantine_done
+  juice_statusline_quarantine_wait:
+    Sleep 50
+    IntOp $R8 $R8 + 1
+    IntCmp $R8 200 juice_statusline_quarantine_timeout juice_statusline_quarantine_try juice_statusline_quarantine_timeout
+  juice_statusline_quarantine_timeout:
+    Abort "Juice could not prepare the Claude status line for update. Close active Claude status lines and try again."
+  juice_statusline_quarantine_done:
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  Delete /REBOOTOK "$INSTDIR\agentjuice-statusline.juice-update-old.exe"
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ${If} $UpdateMode <> 1
     IfFileExists "$INSTDIR\agentjuice-statusline.exe" restore_owned_statusline restore_owned_statusline_missing_bridge

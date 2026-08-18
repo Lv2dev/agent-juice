@@ -34,6 +34,14 @@ const UPDATE_APP_START_VERIFY_MS: u64 = 1_500;
 const UPDATE_TEMP_STALE_SECS: u64 = 10 * 60;
 #[cfg(windows)]
 const UPDATE_TEMP_CLEANUP_ENTRY_LIMIT: usize = 256;
+#[cfg(windows)]
+const UPDATE_STATUSLINE_HELPER_NAME: &str = "agentjuice-statusline.exe";
+#[cfg(windows)]
+const UPDATE_STATUSLINE_QUARANTINE_NAME: &str = "agentjuice-statusline.juice-update-old.exe";
+#[cfg(windows)]
+const UPDATE_STATUSLINE_RENAME_ATTEMPTS: usize = 200;
+#[cfg(windows)]
+const UPDATE_STATUSLINE_RENAME_RETRY_MS: u64 = 50;
 
 static UPDATE_STATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static PENDING_NOTIFICATIONS: Lazy<Mutex<HashSet<(PathBuf, String)>>> =
@@ -135,7 +143,7 @@ pub fn prepare_verified_installer(bytes: &[u8], version: &str) -> anyhow::Result
         anyhow::bail!("invalid Windows updater format");
     }
 
-    let directory = std::env::temp_dir().join("Juice-updates");
+    let directory = update_staging_directory();
     std::fs::create_dir_all(&directory)?;
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let stem = format!("Juice_{version}_{}_{}", std::process::id(), sequence);
@@ -162,6 +170,18 @@ pub fn prepare_verified_installer(bytes: &[u8], version: &str) -> anyhow::Result
         anyhow::bail!("updater ProductVersion does not match the manifest");
     }
     Ok(installer)
+}
+
+#[cfg(windows)]
+fn update_staging_directory() -> PathBuf {
+    update_staging_directory_for(paths::data_dir(), &std::env::temp_dir())
+}
+
+#[cfg(windows)]
+fn update_staging_directory_for(data_dir: Option<PathBuf>, temp_dir: &Path) -> PathBuf {
+    data_dir
+        .unwrap_or_else(|| temp_dir.join("Juice"))
+        .join("updates")
 }
 
 #[cfg(windows)]
@@ -360,19 +380,38 @@ fn run_update_helper(args: &UpdateHelperArgs) -> anyhow::Result<()> {
         schedule_file_deletion(&helper_exe);
         return Err(error);
     }
+    let statusline_quarantine = match quarantine_statusline_for_update(&args.app_exe) {
+        Ok(path) => path,
+        Err(error) => {
+            let restart = restart_app_and_confirm(&args.app_exe);
+            let _ = std::fs::remove_file(&args.installer);
+            let _ = std::fs::remove_dir_all(&args.backup_dir);
+            schedule_file_deletion(&helper_exe);
+            return match restart {
+                Ok(()) => Err(error),
+                Err(restart_error) => Err(anyhow::anyhow!(
+                    "could not quarantine the Claude statusline ({error}); restart failed ({restart_error})"
+                )),
+            };
+        }
+    };
     let status = run_installer_and_wait(&args.installer);
     let result = finish_installer_handoff(status, || {
         verify_installed_version(&args.app_exe, &args.expected_version)?;
+        cleanup_statusline_quarantine(&statusline_quarantine);
         restart_app_and_confirm(&args.app_exe)
     });
     let result = match result {
         Ok(()) => Ok(()),
-        Err(install_error) => restore_and_restart(&helper_exe, &args.backup_dir, &args.app_exe)
-            .map_err(|recovery_error| {
-                anyhow::anyhow!(
-                    "update failed ({install_error}); recovery failed ({recovery_error})"
-                )
-            }),
+        Err(install_error) => restore_and_restart(
+            &helper_exe,
+            &args.backup_dir,
+            &args.app_exe,
+            &statusline_quarantine,
+        )
+        .map_err(|recovery_error| {
+            anyhow::anyhow!("update failed ({install_error}); recovery failed ({recovery_error})")
+        }),
     };
     if result.is_ok() {
         let _ = std::fs::remove_file(&args.installer);
@@ -620,23 +659,31 @@ fn create_update_backup(app_exe: &Path, backup_dir: &Path) -> anyhow::Result<()>
 }
 
 #[cfg(windows)]
-fn restore_and_restart(helper_exe: &Path, backup_dir: &Path, app_exe: &Path) -> anyhow::Result<()> {
+fn restore_and_restart(
+    helper_exe: &Path,
+    backup_dir: &Path,
+    app_exe: &Path,
+    statusline_quarantine: &Path,
+) -> anyhow::Result<()> {
     let restore = restore_update_backup(backup_dir, app_exe).and_then(|()| {
+        recover_statusline_quarantine(app_exe)?;
+        cleanup_statusline_quarantine(statusline_quarantine);
         let expected = installer_product_version(helper_exe)?;
         if installer_product_version(app_exe)? != expected {
             anyhow::bail!("recovered Juice version does not match the previous installation");
         }
         Ok(())
     });
-    let restart = restart_app_and_confirm(app_exe);
-    match (restore, restart) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(restore_error), Ok(())) => Err(restore_error),
-        (Ok(()), Err(restart_error)) => Err(restart_error),
-        (Err(restore_error), Err(restart_error)) => anyhow::bail!(
-            "installation restore failed ({restore_error}); restart failed ({restart_error})"
-        ),
-    }
+    restart_after_successful_restore(restore, || restart_app_and_confirm(app_exe))
+}
+
+#[cfg(windows)]
+fn restart_after_successful_restore(
+    restore: anyhow::Result<()>,
+    restart: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    restore?;
+    restart()
 }
 
 #[cfg(windows)]
@@ -718,6 +765,132 @@ fn sync_handoff_file(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+fn statusline_update_paths(app_exe: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let app_dir = app_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("installed Juice has no parent directory"))?;
+    Ok((
+        app_dir.join(UPDATE_STATUSLINE_HELPER_NAME),
+        app_dir.join(UPDATE_STATUSLINE_QUARANTINE_NAME),
+    ))
+}
+
+#[cfg(windows)]
+fn retry_statusline_operation(
+    attempts: usize,
+    mut operation: impl FnMut() -> std::io::Result<()>,
+    mut wait: impl FnMut(),
+) -> std::io::Result<()> {
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt + 1 == attempts => return Err(error),
+            Err(_) => wait(),
+        }
+    }
+    unreachable!("at least one statusline operation attempt is required")
+}
+
+#[cfg(windows)]
+fn recover_statusline_quarantine(app_exe: &Path) -> anyhow::Result<()> {
+    recover_statusline_quarantine_with(app_exe, |statusline, app| {
+        installer_product_version(statusline)
+            .and_then(|statusline_version| {
+                installer_product_version(app).map(|app_version| statusline_version == app_version)
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(windows)]
+fn recover_statusline_quarantine_with(
+    app_exe: &Path,
+    canonical_is_valid: impl FnOnce(&Path, &Path) -> bool,
+) -> anyhow::Result<()> {
+    let (statusline, quarantine) = statusline_update_paths(app_exe)?;
+    if statusline.is_file() && quarantine.is_file() {
+        if canonical_is_valid(&statusline, app_exe) {
+            retry_statusline_operation(
+                UPDATE_STATUSLINE_RENAME_ATTEMPTS,
+                || std::fs::remove_file(&quarantine),
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        UPDATE_STATUSLINE_RENAME_RETRY_MS,
+                    ));
+                },
+            )?;
+        } else {
+            retry_statusline_operation(
+                UPDATE_STATUSLINE_RENAME_ATTEMPTS,
+                || std::fs::remove_file(&statusline),
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        UPDATE_STATUSLINE_RENAME_RETRY_MS,
+                    ));
+                },
+            )?;
+            retry_statusline_operation(
+                UPDATE_STATUSLINE_RENAME_ATTEMPTS,
+                || std::fs::rename(&quarantine, &statusline),
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        UPDATE_STATUSLINE_RENAME_RETRY_MS,
+                    ));
+                },
+            )?;
+        }
+    } else if !statusline.exists() && quarantine.is_file() {
+        retry_statusline_operation(
+            UPDATE_STATUSLINE_RENAME_ATTEMPTS,
+            || std::fs::rename(&quarantine, &statusline),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    UPDATE_STATUSLINE_RENAME_RETRY_MS,
+                ));
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn quarantine_statusline_with(
+    app_exe: &Path,
+    attempts: usize,
+    mut move_file: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    wait: impl FnMut(),
+) -> anyhow::Result<PathBuf> {
+    recover_statusline_quarantine(app_exe)?;
+    let (statusline, quarantine) = statusline_update_paths(app_exe)?;
+    if statusline.is_file() {
+        retry_statusline_operation(attempts, || move_file(&statusline, &quarantine), wait)?;
+    }
+    Ok(quarantine)
+}
+
+#[cfg(windows)]
+fn quarantine_statusline_for_update(app_exe: &Path) -> anyhow::Result<PathBuf> {
+    quarantine_statusline_with(
+        app_exe,
+        UPDATE_STATUSLINE_RENAME_ATTEMPTS,
+        |source, destination| std::fs::rename(source, destination),
+        || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                UPDATE_STATUSLINE_RENAME_RETRY_MS,
+            ));
+        },
+    )
+}
+
+#[cfg(windows)]
+fn cleanup_statusline_quarantine(path: &Path) {
+    if path.exists() && std::fs::remove_file(path).is_err() {
+        schedule_file_deletion(path);
+    }
+}
+
+#[cfg(windows)]
 fn schedule_file_deletion(path: &Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
@@ -741,6 +914,11 @@ fn schedule_file_deletion(path: &Path) {
 
 #[cfg(windows)]
 pub fn start_update_temp_cleanup() {
+    if let Ok(app_exe) = std::env::current_exe() {
+        if let Err(error) = recover_statusline_quarantine(&app_exe) {
+            eprintln!("[update] could not recover statusline quarantine: {error}");
+        }
+    }
     let _ = std::thread::Builder::new()
         .name("juice-update-temp-cleanup".into())
         .stack_size(256 * 1024)
@@ -753,8 +931,11 @@ pub fn start_update_temp_cleanup() {
 
 #[cfg(windows)]
 fn cleanup_stale_update_files_at(now: std::time::SystemTime) {
-    let directory = std::env::temp_dir().join("Juice-updates");
-    cleanup_stale_update_files_in(&directory, now);
+    cleanup_stale_update_files_in(&update_staging_directory(), now);
+    let legacy_directory = std::env::temp_dir().join("Juice-updates");
+    if legacy_directory != update_staging_directory() {
+        cleanup_stale_update_files_in(&legacy_directory, now);
+    }
 }
 
 #[cfg(windows)]
@@ -1225,6 +1406,147 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn statusline_quarantine_retries_then_recovers_original_helper() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-quarantine-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let app_exe = root.join("agent-juice.exe");
+        let statusline = root.join(UPDATE_STATUSLINE_HELPER_NAME);
+        std::fs::write(&app_exe, b"app").unwrap();
+        std::fs::write(&statusline, b"statusline").unwrap();
+        let move_attempts = Cell::new(0);
+        let waits = Cell::new(0);
+
+        let quarantine = quarantine_statusline_with(
+            &app_exe,
+            3,
+            |source, destination| {
+                let attempt = move_attempts.get() + 1;
+                move_attempts.set(attempt);
+                if attempt < 3 {
+                    Err(std::io::Error::from_raw_os_error(32))
+                } else {
+                    std::fs::rename(source, destination)
+                }
+            },
+            || waits.set(waits.get() + 1),
+        )
+        .unwrap();
+
+        assert_eq!(move_attempts.get(), 3);
+        assert_eq!(waits.get(), 2);
+        assert!(!statusline.exists());
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"statusline");
+
+        recover_statusline_quarantine(&app_exe).unwrap();
+        assert_eq!(std::fs::read(&statusline).unwrap(), b"statusline");
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn statusline_quarantine_timeout_leaves_canonical_helper_intact() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-timeout-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let app_exe = root.join("agent-juice.exe");
+        let statusline = root.join(UPDATE_STATUSLINE_HELPER_NAME);
+        let quarantine = root.join(UPDATE_STATUSLINE_QUARANTINE_NAME);
+        std::fs::write(&app_exe, b"app").unwrap();
+        std::fs::write(&statusline, b"statusline").unwrap();
+        let waits = Cell::new(0);
+
+        let result = quarantine_statusline_with(
+            &app_exe,
+            2,
+            |_, _| Err(std::io::Error::from_raw_os_error(32)),
+            || waits.set(waits.get() + 1),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(waits.get(), 1);
+        assert_eq!(std::fs::read(&statusline).unwrap(), b"statusline");
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_recovery_prefers_an_existing_canonical_statusline() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-stale-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let app_exe = root.join("agent-juice.exe");
+        let statusline = root.join(UPDATE_STATUSLINE_HELPER_NAME);
+        let quarantine = root.join(UPDATE_STATUSLINE_QUARANTINE_NAME);
+        std::fs::write(&app_exe, b"app").unwrap();
+        std::fs::write(&statusline, b"current").unwrap();
+        std::fs::write(&quarantine, b"stale").unwrap();
+
+        recover_statusline_quarantine_with(&app_exe, |_, _| true).unwrap();
+
+        assert_eq!(std::fs::read(&statusline).unwrap(), b"current");
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_recovery_restores_quarantine_when_canonical_statusline_is_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-statusline-corrupt-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let app_exe = root.join("agent-juice.exe");
+        let statusline = root.join(UPDATE_STATUSLINE_HELPER_NAME);
+        let quarantine = root.join(UPDATE_STATUSLINE_QUARANTINE_NAME);
+        std::fs::write(&app_exe, b"app").unwrap();
+        std::fs::write(&statusline, b"partial-new-helper").unwrap();
+        std::fs::write(&quarantine, b"known-good-helper").unwrap();
+
+        recover_statusline_quarantine_with(&app_exe, |_, _| false).unwrap();
+
+        assert_eq!(std::fs::read(&statusline).unwrap(), b"known-good-helper");
+        assert!(!quarantine.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_restore_does_not_restart_the_application() {
+        use std::cell::Cell;
+
+        let restarted = Cell::new(false);
+        let result = restart_after_successful_restore(
+            Err(anyhow::anyhow!("main executable restore failed")),
+            || {
+                restarted.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!restarted.get());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn failed_install_restores_every_preexisting_application_file() {
         let root = std::env::temp_dir().join(format!(
             "agent-juice-update-backup-{}-{}",
@@ -1242,14 +1564,17 @@ mod tests {
         std::fs::write(&uninstaller, b"old-uninstaller").unwrap();
 
         create_update_backup(&app_exe, &backup_dir).unwrap();
+        let quarantine = quarantine_statusline_for_update(&app_exe).unwrap();
         std::fs::write(&app_exe, b"partial-new-app").unwrap();
         std::fs::write(&statusline, b"partial-new-statusline").unwrap();
         std::fs::write(&uninstaller, b"partial-new-uninstaller").unwrap();
         restore_update_backup(&backup_dir, &app_exe).unwrap();
+        recover_statusline_quarantine(&app_exe).unwrap();
 
         assert_eq!(std::fs::read(&app_exe).unwrap(), b"old-app");
         assert_eq!(std::fs::read(&statusline).unwrap(), b"old-statusline");
         assert_eq!(std::fs::read(&uninstaller).unwrap(), b"old-uninstaller");
+        assert!(!quarantine.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1280,5 +1605,21 @@ mod tests {
         assert!(unrelated.exists());
         assert!(root.join("Juice_update_backup_1_1").is_dir());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn updater_staging_prefers_the_isolated_juice_data_directory() {
+        let data = PathBuf::from(r"C:\isolated\agent-juice");
+        let temp = Path::new(r"C:\Users\test\AppData\Local\Temp");
+
+        assert_eq!(
+            update_staging_directory_for(Some(data.clone()), temp),
+            data.join("updates")
+        );
+        assert_eq!(
+            update_staging_directory_for(None, temp),
+            temp.join("Juice").join("updates")
+        );
     }
 }

@@ -486,7 +486,8 @@ test("panel bounds pending listeners, cleans late registrations, and preserves n
 
     windowListeners.pagehide?.();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(normalUnlistenCalls, 3);
+    assert.ok(attempts.has("collection-health-updated"));
+    assert.equal(normalUnlistenCalls, 4);
 
     for (const resolve of pendingListenerResolvers.slice(1)) {
       resolve(() => {
