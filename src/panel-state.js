@@ -300,14 +300,31 @@ export function viewModelForTool(
   tool,
   settings = DEFAULT_SETTINGS,
   now = new Date(),
+  collectionHealth = {},
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
   const [primaryLabel, secondaryLabel] = limitLabels(tool, status);
   const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
 
+  if (collectionHealth?.[tool] === "login_required") {
+    return {
+      state: "login_required",
+      active: false,
+      exists: false,
+      brandColor: toolBrandColor(tool, settings),
+      primary: limitModel(null, settings, now, language, tool, false, primaryLabel),
+      secondary: limitModel(null, settings, now, language, tool, true, secondaryLabel),
+      context: `${t("context.label", language)} -`,
+      pcId: "",
+      meta: "",
+      emptyHint: t("state.loginRequired", language),
+    };
+  }
+
   if (!status) {
     return {
+      state: "empty",
       active: false,
       exists: false,
       brandColor: toolBrandColor(tool, settings),
@@ -333,6 +350,7 @@ export function viewModelForTool(
   const meta = status.approx === false ? "" : t("meta.approx", language);
 
   return {
+    state: active ? "live" : "stale",
     active,
     exists: true,
     brandColor: toolBrandColor(tool, settings),

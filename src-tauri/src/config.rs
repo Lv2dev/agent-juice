@@ -1428,23 +1428,53 @@ impl Settings {
 
         let wrap_path = agent_dir.join("wrap.json");
         let meta_path = agent_dir.join("wrap-meta.json");
-        let previous_meta = read_wrap_meta(&meta_path).ok();
-        let (original_status_line_present, original_status_line) = if let Some(meta) = previous_meta
-            .as_ref()
-            .filter(|meta| current_status_line.as_ref() == Some(&meta.managed_status_line()))
-        {
-            meta.original_status_line()
+        let previous_meta = if meta_path.try_exists()? {
+            Some(read_wrap_meta(&meta_path)?)
         } else {
-            let current_command = current_status_line
+            None
+        };
+        let (original_status_line_present, original_status_line) = match previous_meta.as_ref() {
+            Some(meta) => {
+                let managed_status_line = meta.managed_status_line();
+                let (original_present, original_status_line) = meta.original_status_line();
+                let already_restored = current_present == original_present
+                    && current_status_line.as_ref() == original_status_line.as_ref();
+                if current_status_line.as_ref() == Some(&managed_status_line)
+                    || already_restored
+                    || current_status_line
+                        .as_ref()
+                        .is_some_and(is_agentjuice_status_line)
+                {
+                    (original_present, original_status_line)
+                } else {
+                    anyhow::bail!("Claude statusLine ownership metadata does not match");
+                }
+            }
+            None if current_status_line.as_ref().is_some_and(|status_line| {
+                is_verified_agentjuice_status_line(status_line, &bridge)
+            }) =>
+            {
+                (false, None)
+            }
+            None if current_status_line
                 .as_ref()
-                .and_then(|status_line| status_line.get("command"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            if is_agentjuice_command(current_command) {
+                .is_some_and(is_agentjuice_status_line) =>
+            {
                 anyhow::bail!("Claude statusLine ownership metadata does not match");
             }
-            (current_present, current_status_line.clone())
+            None => (current_present, current_status_line.clone()),
         };
+        if previous_meta.is_none()
+            && current_status_line.as_ref().is_some_and(|status_line| {
+                status_line
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_agentjuice_command)
+                    && !is_agentjuice_status_line(status_line)
+            })
+        {
+            anyhow::bail!("Claude statusLine ownership metadata does not match");
+        }
         let original_command = original_status_line
             .as_ref()
             .and_then(|status_line| status_line.get("command"))
@@ -1641,6 +1671,47 @@ fn is_agentjuice_command(command: &str) -> bool {
     let normalized = normalized_command_path(command);
     normalized.ends_with("/agentjuice-statusline.exe")
         || normalized.ends_with("/agentjuice-statusline")
+}
+
+fn is_agentjuice_status_line(status_line: &serde_json::Value) -> bool {
+    let Some(object) = status_line.as_object() else {
+        return false;
+    };
+    object.len() == 2
+        && object.get("type").and_then(serde_json::Value::as_str) == Some("command")
+        && object
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_agentjuice_command)
+}
+
+fn is_verified_agentjuice_status_line(status_line: &serde_json::Value, bridge: &str) -> bool {
+    let Some(command) = status_line
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    if !is_agentjuice_status_line(status_line) {
+        return false;
+    }
+    let current = PathBuf::from(command.trim().trim_matches('"'));
+    let requested = PathBuf::from(bridge);
+    let Ok(current_metadata) = std::fs::metadata(&current) else {
+        return false;
+    };
+    let Ok(requested_metadata) = std::fs::metadata(&requested) else {
+        return false;
+    };
+    if !current_metadata.is_file()
+        || !requested_metadata.is_file()
+        || current_metadata.len() != requested_metadata.len()
+    {
+        return false;
+    }
+    std::fs::read(current)
+        .and_then(|current| std::fs::read(requested).map(|requested| current == requested))
+        .unwrap_or(false)
 }
 
 fn claude_settings_path(home: &Path) -> PathBuf {

@@ -6,8 +6,10 @@ import { applyTheme } from "./theme.js";
 
 let settings = { ...DEFAULT_SETTINGS };
 let statuses = [];
+let collectionHealth = {};
 let startupStatusLoading = true;
 let statusEventGeneration = 0;
+let collectionHealthEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
 let listenerLifecycleGeneration = 0;
@@ -318,7 +320,14 @@ function renderTool(vm, limitOrder) {
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
   setText(item, ".bar-worst", vm.worst);
-  if (vm.state === "loading") {
+  if (vm.state === "login_required") {
+    setText(item, ".quad-primary-number", "-");
+    setText(item, ".quad-secondary-number", "-");
+    setText(item, ".primary-text", vm.loginText);
+    setText(item, ".primary-reset", "");
+    setText(item, ".secondary-text", "");
+    setText(item, ".secondary-reset", "");
+  } else if (vm.state === "loading") {
     setText(item, ".quad-primary-number", "…");
     setText(item, ".quad-secondary-number", "…");
     setText(item, ".primary-text", vm.loadingText);
@@ -348,9 +357,7 @@ function scheduleTaskbarContentWidthSync() {
     !root ||
     !item ||
     item.hidden ||
-    root.dataset.taskbarOrientation !== "horizontal" ||
     refreshMenuState !== MENU_STATES.CLOSED ||
-    !["full", "compact"].includes(mode) ||
     (typeof item.getBoundingClientRect !== "function" && !(Number(item.scrollWidth) > 0))
   ) {
     return;
@@ -361,17 +368,18 @@ function scheduleTaskbarContentWidthSync() {
     contentWidthSyncTimer = null;
     if (
       item.hidden ||
-      root.dataset.taskbarOrientation !== "horizontal" ||
-      refreshMenuState !== MENU_STATES.CLOSED ||
-      !["full", "compact"].includes(mode)
+      refreshMenuState !== MENU_STATES.CLOSED
     ) {
       return;
     }
 
-    const rectWidth = Number(item.getBoundingClientRect?.().width) || 0;
-    const width = Math.ceil(Math.max(rectWidth, Number(item.scrollWidth) || 0));
+    const vertical = root.dataset.taskbarOrientation === "vertical";
+    const rect = item.getBoundingClientRect?.() ?? {};
+    const rectLength = Number(vertical ? rect.height : rect.width) || 0;
+    const scrollLength = Number(vertical ? item.scrollHeight : item.scrollWidth) || 0;
+    const width = Math.ceil(Math.max(rectLength, scrollLength));
     if (!Number.isFinite(width) || width < 1 || width > 1024) return;
-    const requestKey = `${mode}:${width}`;
+    const requestKey = `${vertical ? "vertical" : "horizontal"}:${mode}:${width}`;
     if (requestKey === lastRequestedContentWidth) return;
     lastRequestedContentWidth = requestKey;
     void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width }).catch(() => {
@@ -396,6 +404,7 @@ function renderBar() {
 
   const vm = barViewModel(statuses, settings, new Date(), {
     startupLoading: startupStatusLoading,
+    collectionHealth,
   });
   root.dataset.mode = vm.mode;
   root.dataset.menuState = refreshMenuState;
@@ -612,6 +621,11 @@ function bindEvents() {
       statuses = Array.isArray(event.payload) ? event.payload : [];
       renderBar();
     });
+    void listenWithRetry(listen, "collection-health-updated", (event) => {
+      collectionHealthEventGeneration += 1;
+      collectionHealth = event.payload && typeof event.payload === "object" ? event.payload : {};
+      renderBar();
+    });
     void listenWithRetry(listen, "settings-updated", (event) => {
       if (event.payload && typeof event.payload === "object") {
         settingsEventGeneration += 1;
@@ -637,9 +651,18 @@ function bindEvents() {
 
 async function loadStatus() {
   const requestGeneration = statusEventGeneration;
+  const healthRequestGeneration = collectionHealthEventGeneration;
   try {
     const loaded =
       (await withTimeout(invoke("get_status"), STARTUP_STATUS_TIMEOUT_MS)) || [];
+    try {
+      const health = await invoke("get_collection_health");
+      if (collectionHealthEventGeneration === healthRequestGeneration) {
+        collectionHealth = health && typeof health === "object" ? health : {};
+      }
+    } catch {
+      // Health is supplemental; keep rendering the last valid usage snapshot.
+    }
     if (statusEventGeneration !== requestGeneration) return;
     statuses = loaded;
   } catch {

@@ -23,6 +23,35 @@ const MAX_ROLLOUT_ENTRIES: usize = 65_536;
 pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 
+pub fn text_requires_login(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "invalid_grant",
+        "refreshtokenrejected",
+        "refresh token rejected",
+        "authentication required",
+        "login required",
+        "not authenticated",
+        "not logged in",
+        "please log in",
+        "please login",
+        "sign in required",
+        "no auth credentials",
+        "credentials unavailable",
+        "oauth access token unavailable",
+        "http 401",
+        "status 401",
+        "error: 401",
+        "401 unauthorized",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+pub fn error_requires_login(error: &anyhow::Error) -> bool {
+    text_requires_login(&format!("{error:#}"))
+}
+
 #[cfg(windows)]
 struct ProcessTree {
     job: windows::Win32::Foundation::HANDLE,
@@ -776,8 +805,12 @@ fn json_rpc_response_with_command(
                     if value.get("id").and_then(Value::as_i64) != Some(response_id) {
                         continue;
                     }
-                    outcome = Some(if value.get("error").is_some() {
-                        Err(anyhow::anyhow!("{label} returned an error"))
+                    outcome = Some(if let Some(error) = value.get("error") {
+                        if text_requires_login(&error.to_string()) {
+                            Err(anyhow::anyhow!("{label} authentication required"))
+                        } else {
+                            Err(anyhow::anyhow!("{label} returned an error"))
+                        }
                     } else {
                         Ok(line)
                     });
@@ -800,10 +833,15 @@ fn json_rpc_response_with_command(
             .recv_timeout(remaining)
             .map_err(|_| anyhow::anyhow!("{label} stdout did not close"))?;
         let remaining = hard_deadline.saturating_duration_since(Instant::now());
-        stderr_rx
+        let stderr = stderr_rx
             .recv_timeout(remaining)
             .map_err(|_| anyhow::anyhow!("{label} stderr did not close"))??;
-        outcome.unwrap_or_else(|| Err(anyhow::anyhow!("{label} timed out")))
+        let outcome = outcome.unwrap_or_else(|| Err(anyhow::anyhow!("{label} timed out")));
+        if outcome.is_err() && text_requires_login(&String::from_utf8_lossy(&stderr)) {
+            Err(anyhow::anyhow!("{label} authentication required"))
+        } else {
+            outcome
+        }
     })();
     terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
     result
@@ -819,7 +857,8 @@ pub fn claude_oauth_usage_response(timeout: Duration) -> anyhow::Result<String> 
         .ok_or_else(|| anyhow::anyhow!("no home dir"))?
         .join(".claude")
         .join(".credentials.json");
-    let credentials: Value = serde_json::from_str(&std::fs::read_to_string(credentials_path)?)?;
+    let credentials = read_claude_oauth_credentials(&credentials_path)?;
+    let credentials: Value = serde_json::from_str(&credentials)?;
     let token = credentials
         .pointer("/claudeAiOauth/accessToken")
         .and_then(Value::as_str)
@@ -840,6 +879,16 @@ pub fn claude_oauth_usage_response(timeout: Duration) -> anyhow::Result<String> 
         remaining,
         "Claude OAuth usage",
     )
+}
+
+fn read_claude_oauth_credentials(path: &Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("Claude OAuth credentials unavailable")
+        } else {
+            anyhow::anyhow!("could not read Claude OAuth credentials: {error}")
+        }
+    })
 }
 
 fn remaining_until(deadline: Instant, label: &str) -> anyhow::Result<Duration> {
@@ -1448,6 +1497,19 @@ mod tests {
             );
         }
         assert_eq!(methods, ["initialize", "_x.ai/billing"]);
+        if std::env::var_os("AGENT_JUICE_FAKE_GROK_AUTH_ERROR").is_some() {
+            eprintln!("OIDC token refresh failed: invalid_grant RefreshTokenRejected");
+            println!(
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": GROK_BILLING_RESPONSE_ID,
+                    "error": {"code": -32000, "message": "authentication required"}
+                })
+            );
+            std::io::stdout().flush().unwrap();
+            return;
+        }
         println!(
             "{}",
             serde_json::json!({
@@ -1483,6 +1545,51 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(12)
         );
+    }
+
+    #[test]
+    fn grok_auth_failure_is_classified_without_exposing_stderr() {
+        let mut command = test_process("collector::tests::fake_grok_agent_child");
+        command.env("AGENT_JUICE_FAKE_GROK_AGENT", "1");
+        command.env("AGENT_JUICE_FAKE_GROK_AUTH_ERROR", "1");
+
+        let error =
+            grok_billing_response_with_command(command, Duration::from_secs(2)).unwrap_err();
+
+        assert!(error_requires_login(&error));
+        assert!(!error.to_string().contains("RefreshTokenRejected"));
+    }
+
+    #[test]
+    fn transient_errors_are_not_misclassified_as_login_required() {
+        assert!(!text_requires_login("Grok ACP timed out"));
+        assert!(!text_requires_login("Codex app-server returned an error"));
+        assert!(text_requires_login("HTTP 401: sign in required"));
+        assert!(!text_requires_login(
+            "HTTP 403: organization policy denied access"
+        ));
+        assert!(text_requires_login("HTTP 403: RefreshTokenRejected"));
+    }
+
+    #[test]
+    fn claude_credentials_distinguish_missing_from_other_io_failures() {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-claude-credentials-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing.json");
+        assert!(error_requires_login(
+            &read_claude_oauth_credentials(&missing).unwrap_err()
+        ));
+        assert!(!error_requires_login(
+            &read_claude_oauth_credentials(&root).unwrap_err()
+        ));
+        let credentials = root.join("credentials.json");
+        std::fs::write(&credentials, "{}").unwrap();
+        assert_eq!(read_claude_oauth_credentials(&credentials).unwrap(), "{}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

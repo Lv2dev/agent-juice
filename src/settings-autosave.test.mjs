@@ -34,6 +34,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   let deferSaveResponses = false;
   let deferClearResponse = false;
   let failNextSave = false;
+  let checkForUpdatesCalls = 0;
   let installUpdateCalls = 0;
   let resolveInstallUpdate = null;
   let installEventChannel = null;
@@ -58,14 +59,25 @@ test("settings form auto-saves changed values without a submit button", async ()
   const indicatorTrackColorRow = { dataset: {} };
   const fullResetRow = { hidden: false };
   const updateStatusEl = { textContent: "", dataset: {} };
+  const updateBandListeners = {};
   const updateBand = {
     hidden: true,
     attributes: {},
-    addEventListener() {},
+    addEventListener(name, handler) {
+      updateBandListeners[name] = handler;
+    },
     setAttribute(name, value) {
       this.attributes[name] = value;
     },
   };
+  const actionTarget = (action, ancestor = null) => ({
+    dataset: { action },
+    closest(selector) {
+      if (selector === "[data-action]") return this;
+      if (selector === "[data-settings-tab]") return ancestor;
+      return null;
+    },
+  });
   const updateVersionEl = { textContent: "" };
   const updateInstallButtons = [
     { hidden: true, disabled: false },
@@ -121,7 +133,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       this[name] = next;
     },
     closest(selector) {
-      return selector === "[data-settings-tab]" ? this : null;
+      return selector === '[role="tab"][data-settings-tab]' ? this : null;
     },
     focus() {
       focusedSettingsTab = this;
@@ -274,7 +286,10 @@ test("settings form auto-saves changed values without a submit button", async ()
             persistedSettings = args.input;
             return { settings: args.input, warnings: ["taskbar retry"] };
           }
-          if (command === "check_for_updates") throw new Error("offline");
+          if (command === "check_for_updates") {
+            checkForUpdatesCalls += 1;
+            throw new Error("offline");
+          }
           if (command === "install_update") {
             installUpdateCalls += 1;
             installEventChannel = args.onEvent;
@@ -327,7 +342,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       return null;
     },
     querySelectorAll(selector) {
-      if (selector === "[data-settings-tab]") return settingsTabs;
+      if (selector === '[role="tab"][data-settings-tab]') return settingsTabs;
       if (selector === "[data-settings-tab-panel]") return settingsTabPanels;
       if (selector === '[data-action="install-update"]') return updateInstallButtons;
       if (selector === "[data-update-install-progress]") {
@@ -369,8 +384,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(updateBand.hidden, false);
   assert.ok(updateInstallButtons.every((button) => button.hidden === false));
 
-  listeners.click?.({ target: { dataset: { action: "install-update" } } });
-  listeners.click?.({ target: { dataset: { action: "install-update" } } });
+  listeners.click?.({ target: actionTarget("install-update", form) });
+  updateBandListeners.click?.({ target: actionTarget("install-update") });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(installUpdateCalls, 1, "duplicate update clicks must share one install operation");
   assert.ok(updateInstallButtons.every((button) => button.disabled));
@@ -580,9 +595,16 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(statusHost.hidden, true);
 
-  listeners.click?.({ target: { dataset: { action: "check-updates" } } });
+  listeners.click?.({ target: actionTarget("check-updates", form) });
+  listeners.click?.({ target: actionTarget("check-updates", form) });
+  assert.equal(checkForUpdatesCalls, 1, "duplicate update checks must share one operation");
+  assert.equal(updateStatusEl.dataset.state, "checking");
+  assert.equal(updateCheckButton.disabled, true);
+  assert.equal(form.inert, false, "checking for updates must not lock settings editing");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(updateStatusEl.dataset.state, "error");
+  assert.equal(updateCheckButton.disabled, false);
+  assert.match(toastText.textContent, /업데이트를 확인하지 못했습니다/);
   assert.equal(statusHost.hidden, true, "update errors must not become settings save errors");
 
   const savesBeforeDeferredQueue = savedInputs.length;

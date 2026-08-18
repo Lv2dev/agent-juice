@@ -29,7 +29,7 @@ const updateFallbackButtons = [...(document.querySelectorAll?.("[data-update-fal
 const updateInstallButtons = [...(document.querySelectorAll?.('[data-action="install-update"]') ?? [])];
 const updateActionButtons = [...(document.querySelectorAll?.('[data-action^="install-update"], [data-action="check-updates"]') ?? [])];
 const appVersionEls = document.querySelectorAll?.("[data-app-version]") ?? [];
-const settingsTabs = [...(document.querySelectorAll?.("[data-settings-tab]") ?? [])];
+const settingsTabs = [...(document.querySelectorAll?.('[role="tab"][data-settings-tab]') ?? [])];
 const settingsTabPanels = [...(document.querySelectorAll?.("[data-settings-tab-panel]") ?? [])];
 let autosaveTimer = null;
 let isHydrating = false;
@@ -39,6 +39,9 @@ let savedRevision = 0;
 let saveQueue = Promise.resolve();
 let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
+let updateCheckPromise = null;
+let updateCheckBusy = false;
+let updateInstallBusy = false;
 let updateInstallPromise = null;
 let toastTimer = null;
 let toastHideTimer = null;
@@ -521,13 +524,24 @@ function renderUpdateStatus(result) {
   updateStatusEl.dataset.state = state?.status ?? "unknown";
 }
 
-function setUpdateInstallBusy(busy) {
+function syncUpdateBusyState() {
+  const busy = updateCheckBusy || updateInstallBusy;
   for (const button of updateActionButtons) button.disabled = busy;
   if (updateBand) updateBand.setAttribute?.("aria-busy", String(busy));
   if (form) {
-    form.inert = busy;
-    form.setAttribute?.("aria-disabled", String(busy));
+    form.inert = updateInstallBusy;
+    form.setAttribute?.("aria-disabled", String(updateInstallBusy));
   }
+}
+
+function setUpdateCheckBusy(busy) {
+  updateCheckBusy = busy;
+  syncUpdateBusyState();
+}
+
+function setUpdateInstallBusy(busy) {
+  updateInstallBusy = busy;
+  syncUpdateBusyState();
 }
 
 function setUpdateFallbackVisible(visible) {
@@ -628,6 +642,32 @@ async function loadUpdateStatus() {
     renderUpdateStatus(await invoke("get_update_status"));
   } catch {
     renderUpdateStatus(null);
+  }
+}
+
+async function checkForUpdates() {
+  if (updateCheckPromise) return updateCheckPromise;
+
+  setUpdateCheckBusy(true);
+  if (updateStatusEl) {
+    updateStatusEl.textContent = t("status.updateChecking", currentLanguageSettings());
+    updateStatusEl.dataset.state = "checking";
+  }
+
+  const attempt = (async () => {
+    try {
+      renderUpdateStatus(await invoke("check_for_updates"));
+    } catch {
+      renderUpdateStatus({ status: "error" });
+    }
+    if (updateStatusEl?.textContent) showSettingsToast(updateStatusEl.textContent);
+  })();
+  updateCheckPromise = attempt;
+  try {
+    await attempt;
+  } finally {
+    if (updateCheckPromise === attempt) updateCheckPromise = null;
+    setUpdateCheckBusy(false);
   }
 }
 
@@ -740,15 +780,7 @@ async function runAction(action) {
     return;
   }
   if (action === "check-updates") {
-    if (updateStatusEl) {
-      updateStatusEl.textContent = t("status.updateChecking", currentLanguageSettings());
-      updateStatusEl.dataset.state = "checking";
-    }
-    try {
-      renderUpdateStatus(await invoke("check_for_updates"));
-    } catch {
-      renderUpdateStatus({ status: "error" });
-    }
+    await checkForUpdates();
     return;
   }
   if (action === "install-update") {
@@ -759,6 +791,17 @@ async function runAction(action) {
     await invoke("open_release_page", { url: null });
     return;
   }
+}
+
+function actionFromEvent(event) {
+  return event.target?.closest?.("[data-action]")?.dataset?.action
+    ?? event.target?.dataset?.action
+    ?? null;
+}
+
+function dispatchAction(event) {
+  const action = actionFromEvent(event);
+  if (action) runAction(action).catch((error) => setStatus(String(error), "error"));
 }
 
 function unlistenSafely(unlisten) {
@@ -876,7 +919,7 @@ if (form) {
   form.addEventListener("change", handleSettingsMutation);
   form.addEventListener("submit", (event) => event.preventDefault());
   form.addEventListener("click", (event) => {
-    const settingsTab = event.target?.closest?.("[data-settings-tab]");
+    const settingsTab = event.target?.closest?.('[role="tab"][data-settings-tab]');
     if (settingsTab) {
       selectSettingsTab(settingsTab.dataset.settingsTab);
       return;
@@ -904,11 +947,10 @@ if (form) {
       return;
     }
 
-    const action = event.target?.dataset?.action;
-    if (action) runAction(action).catch((error) => setStatus(String(error), "error"));
+    dispatchAction(event);
   });
   form.addEventListener("keydown", (event) => {
-    const settingsTab = event.target?.closest?.("[data-settings-tab]");
+    const settingsTab = event.target?.closest?.('[role="tab"][data-settings-tab]');
     if (settingsTab) {
       const current = settingsTabs.indexOf(settingsTab);
       if (current < 0) return;
@@ -978,7 +1020,4 @@ if (form) {
   loadUpdateStatus();
 }
 
-updateBand?.addEventListener("click", (event) => {
-  const action = event.target?.dataset?.action;
-  if (action) runAction(action).catch((error) => setStatus(String(error)));
-});
+updateBand?.addEventListener("click", dispatchAction);

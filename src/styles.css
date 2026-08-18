@@ -603,6 +603,17 @@ h2 {
   --activity-color: var(--activity-color-codex);
 }
 
+.tool-card[data-state="login_required"] .metric,
+.tool-card[data-state="login_required"] .session-row {
+  display: none;
+}
+
+.tool-card[data-state="login_required"] .empty-hint {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .activity-card[data-filter="grok"] {
   --activity-color: var(--activity-color-grok);
 }
@@ -1426,6 +1437,27 @@ html[data-panel-visible="false"] * {
   color: var(--codex-text-color);
 }
 
+.bar-tool[data-state="login_required"] .bar-ring,
+.bar-tool[data-state="login_required"] .bar-quad,
+.bar-tool[data-state="login_required"] .bar-bars {
+  display: none !important;
+}
+
+.bar-shell .bar-tool[data-state="login_required"] .bar-copy {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  column-gap: 5px;
+  overflow: visible;
+}
+
+.bar-shell .bar-tool[data-state="login_required"] .bar-tool-name {
+  display: inline;
+}
+
+.bar-tool[data-state="login_required"] .bar-copy > .bar-line:last-child {
+  display: none;
+}
+
 .bar-shell[data-grok-text-color="custom"] .bar-tool[data-tool="grok"] .bar-tool-name {
   color: var(--grok-text-color);
 }
@@ -1593,6 +1625,11 @@ html[data-panel-visible="false"] * {
   overflow: visible;
 }
 
+.bar-shell[data-taskbar-orientation="horizontal"][data-mode="dual"] .bar-tool,
+.bar-shell[data-taskbar-orientation="horizontal"][data-mode="quad"] .bar-tool {
+  width: max-content;
+}
+
 .bar-shell[data-taskbar-orientation="vertical"] {
   padding: 8px 0;
   grid-auto-flow: row;
@@ -1607,6 +1644,32 @@ html[data-panel-visible="false"] * {
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-copy {
   display: none !important;
+}
+
+.bar-shell[data-mode="dual"] .bar-tool[data-state="login_required"] .bar-copy,
+.bar-shell[data-mode="quad"] .bar-tool[data-state="login_required"] .bar-copy {
+  display: grid;
+}
+
+.bar-shell[data-taskbar-orientation="vertical"] .bar-tool[data-state="login_required"] {
+  height: max-content;
+  overflow: visible;
+}
+
+.bar-shell[data-taskbar-orientation="vertical"] .bar-tool[data-state="login_required"] .bar-copy {
+  display: grid !important;
+  grid-template-columns: max-content;
+  grid-template-rows: max-content max-content;
+  row-gap: 4px;
+  justify-items: center;
+  max-width: none;
+  overflow: visible;
+}
+
+.bar-shell[data-taskbar-orientation="vertical"] .bar-tool[data-state="login_required"] .bar-tool-name,
+.bar-shell[data-taskbar-orientation="vertical"] .bar-tool[data-state="login_required"] .bar-line {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-quad {

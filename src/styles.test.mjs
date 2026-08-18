@@ -69,6 +69,7 @@ const windowsCi = readOptional(resolve(here, "../.github/workflows/windows-ci.ym
 const signedReleaseWorkflow = readOptional(
   resolve(here, "../.github/workflows/signed-release-draft.yml"),
 );
+const nsisHooks = readOptional(resolve(here, "../src-tauri/windows/hooks.nsh"));
 const runtimeSmoke = readOptional(resolve(here, "../.github/scripts/runtime-smoke.ps1"));
 const barMarkup = readFileSync(resolve(here, "bar.html"), "utf8").replace(/\r\n?/g, "\n");
 
@@ -1239,6 +1240,8 @@ test("about and update sections keep product copy separate from guarded update c
   assert.doesNotMatch(about, /name="update_check_on"|data-action="check-updates"/);
   assert.match(settingsJs, /invoke\("get_update_status"\)/);
   assert.match(settingsJs, /invoke\("check_for_updates"\)/);
+  assert.match(settingsJs, /\[role="tab"\]\[data-settings-tab\]/);
+  assert.match(settingsJs, /function actionFromEvent[\s\S]*closest\?\.\("\[data-action\]"\)/);
   assert.match(settingsJs, /new Channel\(\)/);
   assert.match(settingsJs, /invoke\("install_update", \{ expectedVersion: version, onEvent \}\)/);
   assert.match(settingsJs, /invoke\("open_release_page", \{ url:/);
@@ -1275,6 +1278,15 @@ test("updates use one signed HTTPS manifest without exposing updater capability 
   assert.match(rustLib, /exit_after_update_cleanup\(app\)/);
   assert.doesNotMatch(rustLib, /\.download_and_install\(/);
   assert.doesNotMatch(rustLib, /launch_verified_installer/);
+  assert.match(
+    nsisHooks,
+    /!macro NSIS_HOOK_PREINSTALL[\s\S]*Rename "\$INSTDIR\\agentjuice-statusline\.exe" "\$INSTDIR\\agentjuice-statusline\.juice-update-old\.exe"[\s\S]*Sleep 50[\s\S]*IntCmp \$R8 200[\s\S]*Abort/,
+  );
+  assert.match(
+    nsisHooks,
+    /!macro NSIS_HOOK_POSTINSTALL[\s\S]*Delete \/REBOOTOK "\$INSTDIR\\agentjuice-statusline\.juice-update-old\.exe"/,
+  );
+  assert.doesNotMatch(nsisHooks, /taskkill|TerminateProcess/i);
   for (const capability of capabilities) {
     assert.doesNotMatch(JSON.stringify(capability.permissions), /updater|process/);
   }
@@ -1323,6 +1335,10 @@ test("signed updater releases are manual draft-only jobs with isolated secrets a
   assert.doesNotMatch(signedReleaseWorkflow, /tauri-apps\/tauri-action/);
   assert.doesNotMatch(signedReleaseWorkflow, /\$\w+\s*=\s*"\$\{\{ inputs\./);
   assert.match(signedReleaseWorkflow, /INPUT_VERSION: \$\{\{ inputs\.version \}\}/);
+  assert.match(signedReleaseWorkflow, /\$packageLockVersion = \$packageLock\.version/);
+  assert.match(signedReleaseWorkflow, /\$packageLockRootVersion = \$packageLock\.packages\.""\.version/);
+  assert.match(signedReleaseWorkflow, /\$cargoLockVersion = \[regex\]::Match\(/);
+  assert.match(signedReleaseWorkflow, /name\\s\*=\\s\*"agent-juice"/);
   assert.match(signedReleaseWorkflow, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(signedReleaseWorkflow, /--target \$env:RELEASE_COMMIT/);
   assert.match(signedReleaseWorkflow, /gh release upload \$tag \$assets --clobber/);
@@ -1576,7 +1592,7 @@ test("manual refresh remains available while the periodic loop gates inactive Wi
     /fn refresh_status\(\s*window: tauri::Window,\s*app: tauri::AppHandle,\s*\)/,
   );
   assert.match(rustLib, /refresh_status,/);
-  assert.match(statusLoop, /handle\.emit\("status-updated"/);
+  assert.match(statusLoop, /emit_collection_snapshot\(&handle/);
   assert.match(statusLoop, /wait_until_ready_or_timeout/);
   assert.match(statusLoop, /wait_until_active\(\)\.await/);
   assert.match(statusLoop, /publish_if_current\(started/);
@@ -1665,7 +1681,18 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.12"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.13"]));
+});
+
+test("login-required status remains visible in compact indicator and vertical layouts", () => {
+  assert.match(
+    css,
+    /\[data-mode="dual"\] \.bar-tool\[data-state="login_required"\] \.bar-copy,[\s\S]*?\[data-mode="quad"\] \.bar-tool\[data-state="login_required"\] \.bar-copy\s*\{\s*display: grid;/,
+  );
+  assert.match(
+    css,
+    /\[data-taskbar-orientation="vertical"\] \.bar-tool\[data-state="login_required"\] \.bar-copy\s*\{[\s\S]*?display: grid !important;[\s\S]*?writing-mode: vertical-rl;/,
+  );
 });
 
 test("runtime verifier enforces deterministic hang and resource budgets", (t) => {

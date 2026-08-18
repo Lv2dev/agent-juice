@@ -321,6 +321,117 @@ test("full bar reports packed content width once after horizontal rendering", as
   delete global.document;
 });
 
+test("login-required dual bar expands and returns to its indicator width", async () => {
+  const root = { dataset: {} };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+  let measuredWidth = 96;
+  tools.codex.getBoundingClientRect = () => ({ width: measuredWidth, height: 40 });
+  Object.defineProperty(tools.codex, "scrollWidth", {
+    get() { return measuredWidth; },
+  });
+  const calls = [];
+  const eventHandlers = {};
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          if (command === "get_settings") return { bar_mode: "dual" };
+          if (command === "get_status") return [];
+          if (command === "get_collection_health") return { codex: "login_required" };
+          if (command === "get_taskbar_orientation") return "horizontal";
+          return null;
+        },
+      },
+      event: {
+        async listen(name, handler) {
+          eventHandlers[name] = handler;
+        },
+      },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-login-required-dual-width`);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(
+    calls.filter(({ command }) => command === "set_taskbar_content_width"),
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 96 } }],
+  );
+
+  measuredWidth = 37;
+  eventHandlers["collection-health-updated"]?.({ payload: { codex: "ready" } });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(
+    calls.filter(({ command }) => command === "set_taskbar_content_width"),
+    [
+      { command: "set_taskbar_content_width", args: { tool: "codex", width: 96 } },
+      { command: "set_taskbar_content_width", args: { tool: "codex", width: 37 } },
+    ],
+  );
+  delete global.window;
+  delete global.document;
+});
+
+test("vertical login-required bar reports its rendered content height", async () => {
+  const root = { dataset: {} };
+  const tools = {
+    claude: toolStub(),
+    codex: toolStub(),
+  };
+  tools.codex.scrollHeight = 84;
+  tools.codex.getBoundingClientRect = () => ({ width: 40, height: 83.2 });
+  const calls = [];
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          if (command === "get_settings") return { bar_mode: "quad" };
+          if (command === "get_status") return [];
+          if (command === "get_collection_health") return { codex: "login_required" };
+          if (command === "get_taskbar_orientation") return "vertical";
+          return null;
+        },
+      },
+      event: { async listen() {} },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-vertical-login-required-height`);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(
+    calls.filter(({ command }) => command === "set_taskbar_content_width"),
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 84 } }],
+  );
+  delete global.window;
+  delete global.document;
+});
+
 test("bar render applies ring number and geometry settings to the root", async () => {
   const rootStyleProps = new Map();
   const eventHandlers = {};
@@ -1513,7 +1624,8 @@ test("bar bounds pending listeners, cleans late registrations, and preserves new
 
     windowListeners.beforeunload?.();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(normalUnlistenCalls, 4);
+    assert.ok(attempts.has("collection-health-updated"));
+    assert.equal(normalUnlistenCalls, 5);
 
     for (const resolve of pendingListenerResolvers.slice(1)) {
       resolve(() => {
