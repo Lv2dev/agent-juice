@@ -3,18 +3,39 @@ use std::{
     fs,
     path::Path,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn unique_temp_dir() -> std::path::PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    temp_dir_with_suffix(suffix)
+}
+
+fn temp_dir_with_suffix(suffix: u128) -> std::path::PathBuf {
+    let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "agent-juice-collector-test-{}-{suffix}",
+        "agent-juice-collector-test-{}-{suffix}-{sequence}",
         std::process::id()
     ))
+}
+
+#[test]
+fn temp_fixture_paths_are_unique_when_clock_values_repeat() {
+    let workers: Vec<_> = (0..32)
+        .map(|_| std::thread::spawn(|| temp_dir_with_suffix(0)))
+        .collect();
+    let paths: std::collections::HashSet<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+
+    assert_eq!(paths.len(), 32);
 }
 
 #[test]
