@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Claude Code, Codex, Grok Build의 잔여량 또는 사용량을 Windows 작업표시줄에서 바로 확인하세요.</strong><br>
+  <strong>Claude Code, Codex, Grok Build, Cursor Agent의 잔여량 또는 사용량을 Windows 작업표시줄에서 바로 확인하세요.</strong><br>
   로컬 CLI 상태만 읽는 Windows 11용 경량 사용량 모니터입니다.
 </p>
 
@@ -25,19 +25,19 @@
 
 ### 무엇을 보여주나요?
 
-Juice는 현재 PC에 로그인된 Claude Code·Codex의 **5시간/주간 한도**와 Grok Build의 **현재 주간 또는 월간 한도**를 읽어 작업표시줄과 설정 패널에 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
+Juice는 현재 PC에 로그인된 Claude Code·Codex의 **5시간/주간 한도**, Grok Build의 **현재 주간 또는 월간 한도**, Cursor Agent의 **Cursor Models/Other Models 월간 풀**을 읽어 작업표시줄과 설정 패널에 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
 
 | 기능 | 동작 |
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
-| 로컬 우선 수집 | 현재 PC의 Claude Code 로그인/statusline, Codex app-server/rollout, Grok Build 공식 ACP와 세션 로그만 사용합니다. |
+| 로컬 우선 수집 | 현재 PC의 Claude Code 로그인/statusline, Codex app-server/rollout, Grok Build 공식 ACP, Cursor Agent 내장 `/usage`를 사용합니다. |
 | 로그인 상태 안내 | 명시적인 인증 실패가 확인되면 오래된 값을 현재값처럼 표시하지 않고 해당 카드와 바에 `로그인 필요`를 표시합니다. 네트워크·timeout·형식 오류와는 구분합니다. |
 | 토큰 활동 | Claude·Codex·Grok의 로컬 세션 로그에서 실제 토큰을 일별로 집계해 최근 4~52주 활동을 히트맵으로 표시합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
-| 도구별 색상 | Claude·Codex의 5h/주간과 Grok의 주간/월간 기본색, 경고·위험색을 지정하고 단계별 색상 변경을 각각 켜거나 끕니다. |
+| 도구별 색상 | Claude·Codex의 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀 기본색과 경고·위험색을 지정합니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
-| 도구별 독립 바 | 세 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok은 기존 사용자를 위해 기본 OFF입니다. |
+| 도구별 독립 바 | 네 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok과 Cursor는 기존 사용자를 위해 기본 OFF입니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
 | 원클릭 업데이트 | 하루 한 번 최신 정식 릴리즈를 확인하고, 사용자가 승인하면 서명을 검증한 설치 파일을 내려받아 업데이트 후 재시작합니다. |
 
@@ -48,8 +48,9 @@ Juice는 현재 PC에 로그인된 Claude Code·Codex의 **5시간/주간 한도
 | Claude | Claude Code 로컬 로그인의 OAuth usage 조회 | statusline `rate_limits`, 구버전 `/usage` fallback | OAuth 조회는 계정 한도이며, statusline과 fallback 일부 값은 근사치일 수 있습니다. |
 | Codex | 공식 Codex app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | app-server 값은 정확값으로, rollout fallback은 근사치로 표시합니다. |
 | Grok Build | 공식 ACP `_x.ai/billing` | 없음 | ACP가 반환한 현재 단일 주간/월간 크레딧 period를 정확값으로 표시합니다. 세션·프롬프트·모델 호출은 만들지 않습니다. |
+| Cursor Agent | 내장 `/usage`의 `Auto/API` 월간 풀 | 없음 | `Auto`를 Cursor Models, `API`를 Other Models로 표시합니다. 모델 프롬프트를 보내지 않으며 reset은 Cursor가 보여주는 날짜 단위로 표시합니다. |
 
-Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok은 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다.
+Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다.
 
 ### 토큰 활동
 
@@ -82,12 +83,12 @@ Juice에는 **4가지 바 모드**가 있습니다.
 | --- | --- |
 | 넉넉 | 도구명, 링, 사용 가능한 한도 값과 리셋까지 남은 시간을 표시합니다. 리셋 시간은 설정에서 끌 수 있습니다. |
 | 컴팩트 | 도구명을 줄이고 사용 가능한 한도 값을 중심으로 표시합니다. |
-| 이중원 | Claude·Codex의 5h와 주간을 겹치지 않는 두 원으로 압축하며 Grok은 단일 원을 사용합니다. |
-| 링4 | 각 한도를 독립된 단일 링으로 표시하며 Grok은 실제 period 하나만 만듭니다. |
+| 이중원 | Claude·Codex의 5h/주간과 Cursor의 두 월간 풀을 겹치지 않는 두 원으로 압축하며 Grok은 단일 원을 사용합니다. |
+| 링4 | 각 한도를 독립된 단일 링으로 표시하며 Cursor는 두 링, Grok은 실제 period 하나만 만듭니다. |
 
 - 원 대신 위아래 두 줄의 가로 바로 바꿀 수 있습니다.
 - 5h/주간 표시 순서, 링 숫자, 숫자 윤곽, 링 크기·두께·간격과 실제 중앙 공간 지름을 0.1px 단위로 조절할 수 있습니다.
-- Claude·Codex·Grok 바는 서로 다른 투명 창입니다. 각각 직접 드래그하며 현재 연결된 모니터 조합별로 위치가 저장됩니다.
+- Claude·Codex·Grok·Cursor 바는 서로 다른 투명 창입니다. 각각 직접 드래그하며 현재 연결된 모니터 조합별로 위치가 저장됩니다.
 - 최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다.
 - 숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다.
 - 기본으로 켜진 `바 겹침 자동 방지`는 값이나 리셋 문구가 길어질 때 같은 작업표시줄의 뒤쪽 바만 임시로 밀어냅니다. 사용자가 저장한 위치와 간격은 바뀌지 않으며 내용이 짧아지면 원래 배치로 돌아갑니다.
@@ -105,7 +106,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 
 <p align="center"><sub>이동 흐름을 알아보기 쉽게 만든 합성 데모입니다. 실제 바 구조와 모니터별 위치 저장 동작을 기준으로 제작했습니다.</sub></p>
 
-Claude·Codex·Grok은 서로 다른 투명 창이므로 하나만 잡아 다른 모니터의 작업표시줄로 옮길 수 있습니다. 기본으로 켜진 **모니터 조합별 위치 기억**은 현재 연결된 모니터 구성을 구분해 도구별 대상 모니터와 작업표시줄 상대 위치를 따로 저장합니다. 노트북 단독, 집, 사무실처럼 이전에 사용한 구성이 다시 연결되면 당시 위치를 복원합니다.
+Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡아 다른 모니터의 작업표시줄로 옮길 수 있습니다. 기본으로 켜진 **모니터 조합별 위치 기억**은 현재 연결된 모니터 구성을 구분해 도구별 대상 모니터와 작업표시줄 상대 위치를 따로 저장합니다. 노트북 단독, 집, 사무실처럼 이전에 사용한 구성이 다시 연결되면 당시 위치를 복원합니다.
 
 - 최근 사용한 모니터 조합을 최대 16개까지 유지합니다.
 - 모니터 연결이 바뀌는 동안의 일시적인 구성은 저장하지 않아 기존 배치를 보호합니다.
@@ -137,7 +138,7 @@ Claude·Codex·Grok은 서로 다른 투명 창이므로 하나만 잡아 다른
 </p>
 
 - 기본 테마는 Windows 시스템 설정을 따르며 라이트와 다크를 직접 고정할 수 있습니다.
-- 9개 팔레트 중 `도구별`을 선택하면 Claude 5h/주간, Codex 5h/주간, Grok 주간/월간 기본색을 각각 지정할 수 있습니다.
+- 9개 팔레트 중 `도구별`을 선택하면 Claude 5h/주간, Codex 5h/주간, Grok 주간/월간, Cursor Models/Other Models 기본색을 각각 지정할 수 있습니다.
 - 공통 경고색과 위험색도 직접 지정하며, `경고 시 색상 변경`과 `위험 시 색상 변경`을 서로 독립적으로 켜거나 끌 수 있습니다.
 - 위험 색상 변경만 끄면 위험 구간에서도 경고색을 유지하고, 두 변경을 모두 끄면 모든 구간에서 도구별 기본색을 유지합니다. 색상과 토글은 즉시 저장되어 모든 원·바 모드에 적용됩니다.
 
@@ -154,7 +155,7 @@ Claude·Codex·Grok은 서로 다른 투명 창이므로 하나만 잡아 다른
 | 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
 | 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
 | 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 모니터 조합별 위치 기억·초기화, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
-| 색상 | 9개 팔레트, 세 도구·기간별 기본 6색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
+| 색상 | 9개 팔레트, 네 도구·기간별 기본 8색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
 | 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 서명 검증 업데이트·재시작, 릴리즈 페이지 fallback, 최근 확인 결과 |
 | 정보 카드 | 프로그램 설명, 현재 버전, 로컬 처리 원칙 |
@@ -201,6 +202,18 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 - 토큰 활동은 현재 PC의 `~/.grok/sessions/**/updates.jsonl`에서 완료된 응답 usage를 읽습니다. 캐시 토큰은 포함하고 output에 포함된 reasoning token은 중복 가산하지 않습니다.
 - Juice는 Grok `auth.json`을 직접 읽거나 저장하지 않습니다. 공식 실행 파일을 찾을 수 없거나 미로그인·구버전·timeout인 경우 Grok만 마지막 정상값 또는 빈 상태로 남고 Claude/Codex 수집은 계속됩니다.
 
+### Cursor Agent 사용량 자동 수집
+
+Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않도록 기본값이 **꺼짐**입니다. `표시줄` 탭에서 **Cursor 활성화**를 켜면 Cursor Agent의 두 월간 풀을 표시합니다.
+
+- Juice는 `%LOCALAPPDATA%\cursor-agent`의 공급자 고유 실행 경로, reparse/포함 관계, runtime file ID를 확인하고 조회가 끝날 때까지 파일 교체를 잠근 뒤 숨은 Windows ConPTY에서 내장 `/usage`만 실행합니다. 일반 `agent` 명령은 Grok Build 등과 충돌할 수 있어 사용하지 않습니다.
+- `/usage`의 `Auto`는 **Cursor Models**, `API`는 **Other Models**로 표시합니다. `Included` 합계와 On-Demand 지출은 중복되거나 별도 성격이라 첫 버전의 indicator에서 제외합니다.
+- 매 조회는 비어 있는 임시 HOME·workspace·data와 최소 시스템 환경변수만 사용해 사용자/프로젝트 hook, MCP, rule, workspace context 또는 다른 도구의 API key를 상속하지 않으며 종료 직후 제거됩니다.
+- Cursor Agent가 제공하는 reset은 월·일 단위이므로 Juice도 정확하지 않은 연도·시각·countdown을 만들지 않고 월간 초기화 월·일만 표시합니다.
+- 조회는 모델 프롬프트나 새 대화를 만들지 않습니다. Cursor 프로세스 기동 비용을 줄이기 위해 자동 조회는 최소 5분 간격이며 바 우클릭 또는 트레이 새로고침은 즉시 강제 조회합니다.
+- Juice는 Cursor의 auth JSON이나 token을 읽지 않습니다. 종료 시 Job Object로 Cursor node/worker를 함께 정리하며, 실패하면 Cursor만 마지막 정상값 또는 빈 상태로 남습니다.
+- Cursor의 로컬 토큰 로그에는 아직 안정적인 집계 계약이 없어 토큰 활동 히트맵에는 포함하지 않습니다.
+
 ### 설치와 첫 실행
 
 1. [Releases](https://github.com/Lv2dev/agent-juice/releases/latest)에서 최신 `Juice_*_x64-setup.exe`를 받습니다.
@@ -209,6 +222,7 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 4. Claude 자동 수집을 끈 경우 이 PC에서 Claude Code를 한 번 사용해 statusline 데이터를 생성합니다.
 5. 이 PC의 Codex CLI 로그인을 확인합니다. 공식 app-server 조회가 실패할 때를 대비하려면 Codex도 한 번 사용해 rollout fallback 데이터를 만듭니다.
 6. Grok Build를 사용한다면 로컬 로그인을 확인한 뒤 Juice의 표시줄 탭에서 Grok을 활성화합니다.
+7. Cursor를 사용한다면 Cursor Agent CLI에 로그인한 뒤 Juice의 표시줄 탭에서 Cursor를 활성화합니다.
 
 ### 주요 동작
 
@@ -216,7 +230,7 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 - **테마:** 기본값은 시스템 테마이며 라이트와 다크를 직접 선택할 수 있습니다.
 - **언어:** 시스템 언어를 따르거나 한국어/영어를 고정할 수 있습니다.
 - **폰트:** Windows 작업표시줄과 맞춘 시스템 폰트가 기본이며 Pretendard를 선택할 수 있습니다.
-- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 세 도구·기간별 여섯 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
+- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 네 도구·기간별 여덟 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
 - **전체화면 숨김:** 신규 설치 기본값은 꺼짐입니다. 켜면 같은 모니터의 전체화면 앱을 감지할 때 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
 - **다중 모니터:** 각 바를 원하는 모니터 작업표시줄로 직접 끌어 놓으면 모니터와 상대 위치를 기억합니다.
 - **오래됨 표시:** 마지막 기록이 설정한 시간보다 오래되면 값이 오래된 상태임을 표시합니다.
@@ -224,22 +238,24 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 
 ### 다른 PC에서 값이 안 보일 때
 
-Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude Code·Codex·Grok Build의 로컬 로그인을 각각 확인해야 합니다.
+Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude Code·Codex·Grok Build·Cursor Agent의 로컬 로그인을 각각 확인해야 합니다.
 
 1. Juice에서 Claude가 활성화되어 있는지 확인해 statusline 자동 연결과 수집을 시작합니다.
 2. 기본 Claude 자동 수집을 유지하거나 Claude Code를 한 번 사용해 statusline forward 파일을 생성합니다.
 3. Codex CLI 로그인을 확인합니다.
 4. app-server fallback이 필요하다면 Codex를 한 번 사용해 rollout JSONL을 생성합니다.
 5. Grok을 사용한다면 Grok Build 로그인을 확인하고 Juice에서 Grok을 활성화합니다.
+6. Cursor를 사용한다면 Cursor Agent CLI 설치·로그인을 확인하고 Juice에서 Cursor를 활성화합니다.
 
 한 PC의 사용량을 다른 PC에서 보는 기능은 후속 다중 PC 버전 범위입니다.
 
 ### 문제 해결
 
-- **로그인 필요가 표시됨:** 해당 Claude Code·Codex CLI·Grok Build에 다시 로그인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
+- **로그인 필요가 표시됨:** 해당 Claude Code·Codex CLI·Grok Build·Cursor Agent에 다시 로그인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
 - **Claude가 비어 있음:** 표시줄 탭에서 Claude가 활성화되어 있고 Claude 계정 자동 수집이 켜져 있는지 확인하거나, Juice를 다시 실행한 뒤 Claude Code를 한 번 사용하세요.
 - **Codex가 비어 있음:** 현재 PC의 Codex CLI 로그인을 확인하세요. app-server 조회가 실패한다면 Codex를 한 번 사용해 rollout fallback 데이터를 만드세요.
 - **Grok이 비어 있음:** 표시줄 탭에서 Grok을 활성화하고 현재 PC의 Grok Build 설치·로그인을 확인하세요. Grok은 기본 OFF이며 공식 ACP billing을 사용할 수 있을 때 표시됩니다.
+- **Cursor가 비어 있음:** 표시줄 탭에서 Cursor를 활성화하고 Cursor Agent CLI 설치·로그인을 확인하세요. Cursor는 기본 OFF이며 내장 `/usage`가 두 월간 풀을 반환할 때 표시됩니다.
 - **값이 대시로 보임:** 해당 도구가 아직 한도 정보를 내보내지 않았거나 기록이 오래됐을 수 있습니다.
 - **설정창을 최소화한 뒤 안 보임:** 트레이의 Juice 아이콘을 다시 클릭하세요.
 - **바가 안 보임:** 전체화면/최대화 숨김, 트레이 일시중지, 도구별 표시 설정과 저장된 대상 모니터를 확인하세요.
@@ -249,6 +265,7 @@ Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않�
 - Juice가 저장하는 설정과 수집 결과는 현재 PC에만 남으며 별도 Juice 서버로 전송하지 않습니다.
 - Claude 계정 자동 수집은 로컬 Claude Code OAuth token을 Anthropic의 Claude usage endpoint에만 보내 계정 한도를 조회합니다.
 - Grok 한도 수집은 로그인된 공식 Grok Build 실행 파일의 로컬 ACP만 호출하며 Juice가 Grok 인증 token이나 `auth.json`을 읽지 않습니다.
+- Cursor 한도 수집은 로그인된 Cursor Agent의 PTY `/usage`만 호출하며 Juice가 Cursor 인증 token이나 auth JSON을 읽지 않습니다.
 - 업데이트 확인은 고정된 GitHub `latest.json` 주소로 표준 HTTPS 요청만 전송합니다. 사용자가 설치를 승인하면 해당 manifest가 지정한 서명된 설치 파일만 내려받으며, 계정 token, 사용량, PC 식별값은 보내지 않습니다.
 - LLM API 키나 Juice 전용 계정을 저장하지 않습니다.
 - Claude OAuth usage endpoint는 Claude Code 내부 계약이라 향후 CLI 변경의 영향을 받을 수 있습니다. 실패하면 statusline과 구버전 `/usage` fallback만 유지합니다.
@@ -260,19 +277,19 @@ Juice v1은 단일 PC 로컬 모니터라 PC 간 데이터를 공유하지 않�
 
 ### What does Juice show?
 
-Juice reads the **5-hour and weekly limits** from Claude Code and Codex plus the **current weekly or monthly limit** from Grok Build on this PC. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
+Juice reads the **5-hour and weekly limits** from Claude Code and Codex, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor Agent on this PC. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
 
 | Feature | Behavior |
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
-| Local-first collection | Uses the local Claude Code login/statusline, Codex app-server/rollout data, and official Grok Build ACP/session logs. |
+| Local-first collection | Uses the local Claude Code login/statusline, Codex app-server/rollout data, official Grok Build ACP, and Cursor Agent's built-in `/usage`. |
 | Sign-in status | When an explicit authentication failure is confirmed, Juice shows `Sign in required` on that card and bar instead of presenting stale values as current. Network, timeout, and format errors remain distinct. |
 | Token activity | Aggregates actual tokens from local Claude, Codex, and Grok session logs by day and shows the latest 4 to 52 weeks as a heatmap. |
 | Live settings | Changes are saved and applied without a Save button. |
-| Per-tool colors | Assign separate base colors to Claude/Codex 5-hour and weekly values plus Grok weekly and monthly values, with customizable warning and danger colors. |
+| Per-tool colors | Assign separate base colors to Claude/Codex 5-hour and weekly, Grok weekly/monthly, and Cursor's two monthly pools, with customizable warning and danger colors. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
-| Independent tool bars | All three tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok defaults to off for existing users. |
+| Independent tool bars | All four tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok and Cursor default to off for existing users. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
 | One-click updates | Checks the latest stable release once a day and, after user approval, downloads a signed installer, verifies it, updates Juice, and restarts. |
 
@@ -283,8 +300,9 @@ Juice reads the **5-hour and weekly limits** from Claude Code and Codex plus the
 | Claude | OAuth usage lookup through the local Claude Code login | statusline `rate_limits`, then legacy `/usage` fallback | OAuth values are account limits; some statusline and fallback values may be approximate. |
 | Codex | Official Codex app-server `account/rateLimits/read` | Latest rollout JSONL under `~/.codex/sessions` | App-server values are marked exact; rollout fallback is approximate. |
 | Grok Build | Official ACP `_x.ai/billing` | None | Shows the exact current single weekly/monthly credit period returned by ACP without creating a session, prompt, or model call. |
+| Cursor Agent | Built-in `/usage` Auto/API pools | None | Maps Auto to Cursor Models and API to Other Models without sending a model prompt. Reset information is shown at the date precision provided by Cursor. |
 
-Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok starts collecting after you first enable it in the Taskbar tab.
+Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok and Cursor start collecting after you first enable them in the Taskbar tab.
 
 ### Token activity
 
@@ -317,12 +335,12 @@ Juice provides **four bar modes**.
 | --- | --- |
 | Full | Shows the tool name, ring, every available limit, and time remaining until reset. Reset times can be disabled in Settings. |
 | Compact | Hides the tool name and prioritizes the available limit values. |
-| Dual ring | Compresses Claude/Codex 5-hour and weekly limits into two rings; Grok uses one ring. |
-| Four rings | Uses one standalone ring per real limit, so Grok creates only one. |
+| Dual ring | Compresses Claude/Codex 5-hour and weekly limits and Cursor's two monthly pools into two rings; Grok uses one ring. |
+| Four rings | Uses one standalone ring per real limit, so Cursor creates two while Grok creates only one. |
 
 - Switch from rings to two stacked horizontal bars.
 - Adjust limit order, numbers, number outline, ring size, thickness, spacing, and the real center opening in 0.1px steps.
-- Claude, Codex, and Grok use separate transparent windows, so each can be dragged independently and remembered for the current monitor setup.
+- Claude, Codex, Grok, and Cursor use separate transparent windows, so each can be dragged independently and remembered for the current monitor setup.
 - On first launch, visible bars are placed from the left edge of the taskbar without overlapping.
 - Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars.
 - `Prevent bar overlap` is enabled by default. When values or reset text grow, Juice temporarily moves only the trailing bar on the same taskbar. Saved positions and spacing remain unchanged, and the original layout returns when content shrinks.
@@ -340,7 +358,7 @@ Juice provides **four bar modes**.
 
 <p align="center"><sub>This synthetic demo makes the movement easy to follow. It reflects the real bar structure and per-monitor position persistence.</sub></p>
 
-Claude, Codex, and Grok are separate transparent windows, so any one bar can be dragged to another monitor's taskbar without moving the others. **Remember positions by monitor setup** is enabled by default and stores each tool's target monitor and relative taskbar position separately for every connected-monitor setup. When a familiar laptop-only, home, or office setup returns, Juice restores the layout used with that setup.
+Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar can be dragged to another monitor's taskbar without moving the others. **Remember positions by monitor setup** is enabled by default and stores each tool's target monitor and relative taskbar position separately for every connected-monitor setup. When a familiar laptop-only, home, or office setup returns, Juice restores the layout used with that setup.
 
 - Juice keeps up to 16 recently used monitor setups.
 - Transient configurations observed while monitors are connecting are not saved over a stable layout.
@@ -372,7 +390,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 </p>
 
 - The default theme follows Windows, with explicit light and dark overrides.
-- With the `Per tool` palette, Claude/Codex 5-hour and weekly plus Grok weekly and monthly base colors can be assigned independently.
+- With the `Per tool` palette, Claude/Codex 5-hour and weekly, Grok weekly/monthly, and Cursor Models/Other Models base colors can be assigned independently.
 - Shared warning and danger colors are customizable, and `Recolor on warning` and `Recolor on danger` can be toggled independently.
 - Disabling only danger recoloring keeps the warning color in the danger range; disabling both keeps each per-tool base color throughout. Colors and toggles save immediately and apply to every ring and bar mode.
 
@@ -389,7 +407,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
 | Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
 | Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup position memory and reset, fullscreen/maximized hiding, per-tool display and collection |
-| Colors | Nine palettes, six tool/period base colors, warning/danger colors and toggles, name/info/ring-number text colors |
+| Colors | Nine palettes, eight tool/period base colors, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
 | Updates card | Automatic and manual checks, signed update and restart, Releases fallback, and the latest check result |
 | About card | Product description, current version, and local-processing policy |
@@ -436,6 +454,18 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 - Token activity comes from completed response usage under `~/.grok/sessions/**/updates.jsonl`. Cache tokens are included, while reasoning tokens already contained in output are not added twice.
 - Juice never reads or stores Grok `auth.json`. If the official executable is unavailable, logged out, too old, malformed, or times out, only Grok remains on its last known or empty state; Claude and Codex collection continue.
 
+### Automatic Cursor Agent usage collection
+
+Cursor defaults to **off** so existing users do not suddenly receive an empty fourth bar. Enabling **Cursor** in the `Taskbar` tab displays its two monthly usage pools.
+
+- Juice validates the provider-specific executable, reparse points, path containment, and runtime file IDs under `%LOCALAPPDATA%\cursor-agent`, locks the files against replacement for the lookup, starts them in a hidden Windows ConPTY, and selects only the built-in `/usage` command. It never trusts a generic `agent` command that may belong to another provider.
+- `/usage` Auto maps to **Cursor Models** and API maps to **Other Models**. The aggregate Included value and On-Demand spend are intentionally excluded from the first indicator version.
+- Every lookup runs with empty temporary HOME, workspace, and data directories plus a minimal system environment allowlist, so user/project hooks, MCP, rules, workspace context, and unrelated tool API keys are not inherited; those directories are removed immediately afterward.
+- Cursor exposes only the reset month and day, so Juice shows those values without inventing a year, exact time, or countdown.
+- The lookup creates no model prompt or new conversation. Automatic Cursor collection has a five-minute minimum cadence; taskbar or tray refresh forces an immediate lookup.
+- Juice does not read Cursor auth JSON or tokens. A Job Object closes the Cursor node/worker process tree after every bounded lookup, and failures preserve only Cursor's last known or empty state.
+- Cursor is not included in the token activity heatmap until a stable local token-log contract is available.
+
 ### Install and first run
 
 1. Download the latest `Juice_*_x64-setup.exe` from [Releases](https://github.com/Lv2dev/agent-juice/releases/latest).
@@ -444,6 +474,7 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 4. If Claude auto-collection is off, use Claude Code once on this PC so statusline data is emitted.
 5. Confirm that the Codex CLI is logged in on this PC. Use Codex once if rollout fallback data may be needed when app-server collection is unavailable.
 6. If you use Grok Build, confirm its local login and then enable Grok in Juice's Taskbar tab.
+7. If you use Cursor, sign in to Cursor Agent CLI and enable Cursor in Juice's Taskbar tab.
 
 ### Key behavior
 
@@ -451,7 +482,7 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 - **Theme:** Follows the system by default, with explicit light and dark choices.
 - **Language:** Follows the system or locks the UI to Korean or English.
 - **Font:** Uses the Windows taskbar-style system font by default, with Pretendard available.
-- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes six tool/period base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
+- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes eight tool/period base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
 - **Fullscreen hiding:** Off by default on a new installation. When enabled, it hides each bar while a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
 - **Multiple monitors:** Drag each bar onto a monitor's taskbar to remember that monitor and relative position.
 - **Stale state:** Marks data as old after the configured time since the last record.
@@ -459,22 +490,24 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 
 ### If another PC shows no data
 
-Juice v1 is a local single-PC monitor and does not share data between PCs. Install Juice and verify the local Claude Code, Codex, and Grok Build logins you intend to use on every PC.
+Juice v1 is a local single-PC monitor and does not share data between PCs. Install Juice and verify the local Claude Code, Codex, Grok Build, and Cursor Agent logins you intend to use on every PC.
 
 1. Confirm that Claude is enabled in Juice so automatic statusline connection and collection can start.
 2. Keep the default Claude auto-collection enabled or use Claude Code once to create statusline forward data.
 3. Confirm the Codex CLI login.
 4. Use Codex once if rollout JSONL fallback data is needed.
 5. If you use Grok, confirm the Grok Build login and enable Grok in Juice.
+6. If you use Cursor, install and sign in to Cursor Agent CLI, then enable Cursor in Juice.
 
 Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
 ### Troubleshooting
 
-- **Sign in required is shown:** Sign in again to the affected Claude Code, Codex CLI, or Grok Build account, then force a refresh in Juice. The state clears automatically after the next successful collection.
+- **Sign in required is shown:** Sign in again to the affected Claude Code, Codex CLI, Grok Build, or Cursor Agent account, then force a refresh in Juice. The state clears automatically after the next successful collection.
 - **Claude is empty:** Confirm that Claude is enabled in the Taskbar tab and account auto-collection is on, or restart Juice and use Claude Code once.
 - **Codex is empty:** Confirm the local Codex CLI login. If app-server collection fails, use Codex once to create rollout fallback data.
 - **Grok is empty:** Enable Grok in the Taskbar tab and confirm the local Grok Build installation and login. Grok defaults to off and appears when official ACP billing is available.
+- **Cursor is empty:** Enable Cursor in the Taskbar tab and confirm the local Cursor Agent installation and login. Cursor defaults to off and appears when built-in `/usage` returns both monthly pools.
 - **Values are dashes:** The tool may not have emitted limit data yet, or the record may be stale.
 - **The minimized panel is missing:** Click the Juice tray icon again.
 - **The taskbar bar is missing:** Check fullscreen/maximized hiding, tray pause, per-tool visibility, and the remembered target monitor.
@@ -484,6 +517,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 - Settings and collected results stored by Juice remain on the current PC and are not sent to a separate Juice server.
 - Claude account auto-collection sends the local Claude Code OAuth token only to Anthropic's Claude usage endpoint to read account limits.
 - Grok limit collection calls only the logged-in official Grok Build local ACP; Juice never reads its authentication token or `auth.json`.
+- Cursor limit collection calls only the signed-in Cursor Agent PTY `/usage`; Juice never reads Cursor auth tokens or auth JSON.
 - Update checks send only a standard HTTPS request to the fixed GitHub `latest.json` endpoint. After user approval, Juice downloads only the signed installer named by that manifest. It sends no account token, usage data, or PC identifier.
 - Juice stores no LLM API key and requires no Juice account.
 - The Claude OAuth usage endpoint is an internal Claude Code contract and may change with future CLI versions. Juice falls back to statusline and legacy `/usage` data.

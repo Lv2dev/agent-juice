@@ -32,6 +32,10 @@ const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8").r
   /\r\n?/g,
   "\n",
 );
+const rustBuild = readFileSync(resolve(here, "../src-tauri/build.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
 const rustSystemActivity = readFileSync(
   resolve(here, "../src-tauri/src/system_activity.rs"),
   "utf8",
@@ -133,10 +137,11 @@ test("usage cards share the same surface tint regardless of tool", () => {
   const cardTint = cssBlock(".tool-card::before");
   const hover = cssBlock(".tool-card:hover");
   const dot = cssBlock(".tool-dot");
-  const dotFill = cssBlock(".claude-dot,\n.codex-dot,\n.grok-dot");
+  const dotFill = cssBlock(".claude-dot,\n.codex-dot,\n.grok-dot,\n.cursor-dot");
   const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
   const codexCard = cssBlock('.tool-card[data-tool="codex"]');
   const grokCard = cssBlock('.tool-card[data-tool="grok"]');
+  const cursorCard = cssBlock('.tool-card[data-tool="cursor"]');
 
   assert.match(cardTint, /display: none/);
   assert.doesNotMatch(cardTint, /var\(--tool-glow\)/);
@@ -148,9 +153,11 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.match(claudeCard, /--tool-brand: #d79a32/);
   assert.match(codexCard, /--tool-brand: #2fac7d/);
   assert.match(grokCard, /--tool-brand: #d9578b/);
+  assert.match(cursorCard, /--tool-brand: #3b82f6/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
   assert.doesNotMatch(grokCard, /--tool-glow/);
+  assert.doesNotMatch(cursorCard, /--tool-glow/);
 });
 
 test("styles default to system theme and allow explicit light or dark overrides", () => {
@@ -230,18 +237,19 @@ test("styles keep the AppBar contract stable", () => {
   assert.match(tool, /min-width: 0/);
   assert.deepEqual(
     barWindows.map((item) => item.label).sort(),
-    ["bar-claude", "bar-codex", "bar-grok"],
+    ["bar-claude", "bar-codex", "bar-cursor", "bar-grok"],
   );
   for (const barWindowConfig of barWindows) {
     assert.equal(barWindowConfig?.title, "Juice Bar");
     assert.equal(barWindowConfig?.transparent, true);
     assert.equal(barWindowConfig?.shadow, false);
-    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex|grok)/);
+    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex|grok|cursor)/);
   }
   const capabilityWindows = capabilities.flatMap((item) => item.windows ?? []);
   assert.ok(capabilityWindows.includes("bar-claude"));
   assert.ok(capabilityWindows.includes("bar-codex"));
   assert.ok(capabilityWindows.includes("bar-grok"));
+  assert.ok(capabilityWindows.includes("bar-cursor"));
   assert.ok(!capabilityWindows.includes("bar"));
 });
 
@@ -1231,7 +1239,7 @@ test("about and update sections keep product copy separate from guarded update c
   const update = markupSection("update");
 
   assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="install-update"/);
-  assert.match(about, /Claude Code, Codex, Grok Build의 사용량/);
+  assert.match(about, /Claude Code, Codex, Grok Build, Cursor Agent의 사용량/);
   assert.match(about, /별도 Juice 서버에 저장하지 않습니다/);
   assert.match(update, /name="update_check_on" checked/);
   assert.match(update, /data-action="check-updates"/);
@@ -1258,6 +1266,14 @@ test("about and update sections keep product copy separate from guarded update c
   assert.doesNotMatch(tauriConfig.app.security.csp, /github\.com/);
   assert.match(i18nJs, /"status\.updateFailed": "업데이트를 확인하지 못했습니다/);
   assert.match(i18nJs, /"status\.updateFailed": "Could not check for updates/);
+});
+
+test("limit order copy remains accurate for providers without 5-hour and weekly pools", () => {
+  assert.match(panelMarkup, /option\.primaryFirst">첫 번째 한도 먼저/);
+  assert.match(panelMarkup, /option\.secondaryFirst">두 번째 한도 먼저/);
+  assert.match(i18nJs, /"option\.primaryFirst": "First limit first"/);
+  assert.match(i18nJs, /"option\.secondaryFirst": "Second limit first"/);
+  assert.doesNotMatch(panelMarkup, />5h 먼저<|>주간 먼저</);
 });
 
 test("updates use one signed HTTPS manifest without exposing updater capability to WebViews", () => {
@@ -1552,7 +1568,7 @@ test("statusline bridge verifier uses an isolated data directory", (t) => {
 test("taskbar bar initial paint hides tool sections and placeholder values", () => {
   const hiddenTools = barMarkup.match(/<section class="bar-tool"[^>]*hidden/g) ?? [];
 
-  assert.equal(hiddenTools.length, 3);
+  assert.equal(hiddenTools.length, 4);
   assert.doesNotMatch(barMarkup, /<strong class="bar-worst">[–-]<\/strong>/);
   assert.doesNotMatch(barMarkup, /5h\s*[–-]/);
   assert.doesNotMatch(barMarkup, /주간\s*[–-]/);
@@ -1577,7 +1593,12 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
   assert.ok(panelCapability);
   assert.ok(barCapability);
   assert.deepEqual(panelCapability.windows, ["panel"]);
-  assert.deepEqual(barCapability.windows.sort(), ["bar-claude", "bar-codex", "bar-grok"]);
+  assert.deepEqual(barCapability.windows.sort(), [
+    "bar-claude",
+    "bar-codex",
+    "bar-cursor",
+    "bar-grok",
+  ]);
   assert.ok(barCapability.permissions.includes("core:default"));
   assert.notEqual(panelCapability.identifier, barCapability.identifier);
   assert.match(rustLib, /ensure_panel_command/);
@@ -1640,6 +1661,18 @@ test("Windows CI pins external actions to full commit SHAs", () => {
   assert.match(runtimeSmoke, /WorkingSet64/);
 });
 
+test("Windows Rust tests embed the Common Controls v6 activation manifest", () => {
+  const testManifest = readFileSync(
+    resolve(here, "../src-tauri/windows/test-common-controls.manifest"),
+    "utf8",
+  );
+  assert.match(rustBuild, /compile_for_tests/);
+  assert.match(rustBuild, /manifest_required/);
+  assert.match(rustLib, /#\[link\(name = "test-common-controls"\)\]/);
+  assert.match(testManifest, /Microsoft\.Windows\.Common-Controls/);
+  assert.match(testManifest, /version="6\.0\.0\.0"/);
+});
+
 test("taskbar idle and drag paths reuse snapshots instead of repeated disk and shell scans", () => {
   const dragLoop = rustLib.match(/fn spawn_taskbar_drag_loop[\s\S]*?\n}\n\nfn spawn_taskbar_visibility_loop/)?.[0] ?? "";
   const visibilityLoop = rustLib.match(/fn spawn_taskbar_visibility_loop[\s\S]*?\n}\n\nfn statusline_bridge_path/)?.[0] ?? "";
@@ -1683,7 +1716,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.13"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.14"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

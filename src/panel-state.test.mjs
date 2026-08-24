@@ -17,7 +17,7 @@ const settings = {
 };
 
 test("viewModelForTool shows localized login-required state for all providers", () => {
-  for (const tool of ["claude", "codex", "grok"]) {
+  for (const tool of ["claude", "codex", "grok", "cursor"]) {
     const vm = viewModelForTool(
       [],
       tool,
@@ -268,4 +268,28 @@ test("viewModelForTool exposes Grok's dynamic period and distinct tool color", (
   assert.equal(vm.primary.value, "75%");
   assert.equal(vm.primary.color, "#8a6fd1");
   assert.equal(vm.secondary.visible, false);
+});
+
+test("viewModelForTool maps Cursor Auto and API pools to two monthly indicators", () => {
+  const vm = viewModelForTool(
+    [{
+      tool: "cursor",
+      captured_at: "2026-08-21T00:00:00Z",
+      primary: { label: "cursor_models", used_percent: 1, resets_at: "09-21" },
+      secondary: { label: "other_models", used_percent: 0, resets_at: "09-21" },
+      session: { active: true },
+      approx: false,
+    }],
+    "cursor",
+    { ...settings, language: "en", show_cursor: true },
+    new Date("2026-08-21T00:00:00Z"),
+  );
+
+  assert.equal(vm.brandColor, "#3b82f6");
+  assert.equal(vm.primary.label, "Cursor Models");
+  assert.equal(vm.primary.value, "99%");
+  assert.equal(vm.primary.reset, "Resets Sep 21");
+  assert.equal(vm.secondary.label, "Other Models");
+  assert.equal(vm.secondary.value, "100%");
+  assert.equal(vm.secondary.color, "#06b6d4");
 });

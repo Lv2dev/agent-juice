@@ -321,6 +321,58 @@ test("full bar reports packed content width once after horizontal rendering", as
   delete global.document;
 });
 
+test("content width retries while the native taskbar target is still initializing", async () => {
+  const root = { dataset: {} };
+  const tools = { claude: toolStub(), codex: toolStub() };
+  tools.codex.scrollWidth = 187;
+  tools.codex.getBoundingClientRect = () => ({ width: 187, height: 40 });
+  const calls = [];
+  let widthAttempts = 0;
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          if (command === "get_settings") return { bar_mode: "full" };
+          if (command === "get_status") return [];
+          if (command === "get_collection_health") return {};
+          if (command === "get_taskbar_orientation") return "horizontal";
+          if (command === "set_taskbar_content_width") {
+            widthAttempts += 1;
+            if (widthAttempts < 3) throw new Error("target pending");
+          }
+          return undefined;
+        },
+      },
+      event: { async listen() {} },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-content-width-retry`);
+  await new Promise((resolve) => setTimeout(resolve, 850));
+  assert.equal(widthAttempts, 3);
+  assert.deepEqual(
+    calls.filter(({ command }) => command === "set_taskbar_content_width"),
+    Array.from({ length: 3 }, () => ({
+      command: "set_taskbar_content_width",
+      args: { tool: "codex", width: 187 },
+    })),
+  );
+  delete global.window;
+  delete global.document;
+});
+
 test("login-required dual bar expands and returns to its indicator width", async () => {
   const root = { dataset: {} };
   const tools = {

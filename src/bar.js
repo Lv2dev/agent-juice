@@ -19,11 +19,15 @@ const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 const STARTUP_STATUS_TIMEOUT_MS = 20_000;
 const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
+const CONTENT_WIDTH_RETRY_DELAY_MS = 250;
+const CONTENT_WIDTH_MAX_RETRIES = 20;
 let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
 let contentWidthSyncTimer = null;
 let lastRequestedContentWidth = "";
-const TOOLS = ["claude", "codex", "grok"];
+let contentWidthRetryKey = "";
+let contentWidthRetryCount = 0;
+const TOOLS = ["claude", "codex", "grok", "cursor"];
 
 function currentWindowTool() {
   const search = window.location?.search ?? globalThis.location?.search ?? "";
@@ -381,10 +385,34 @@ function scheduleTaskbarContentWidthSync() {
     if (!Number.isFinite(width) || width < 1 || width > 1024) return;
     const requestKey = `${vertical ? "vertical" : "horizontal"}:${mode}:${width}`;
     if (requestKey === lastRequestedContentWidth) return;
+    if (requestKey !== contentWidthRetryKey) {
+      contentWidthRetryKey = requestKey;
+      contentWidthRetryCount = 0;
+    }
     lastRequestedContentWidth = requestKey;
-    void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width }).catch(() => {
-      if (lastRequestedContentWidth === requestKey) lastRequestedContentWidth = "";
-    });
+    void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width })
+      .then(() => {
+        if (contentWidthRetryKey === requestKey) {
+          contentWidthRetryKey = "";
+          contentWidthRetryCount = 0;
+        }
+      })
+      .catch(() => {
+        if (lastRequestedContentWidth === requestKey) lastRequestedContentWidth = "";
+        if (
+          contentWidthRetryKey !== requestKey ||
+          contentWidthRetryCount >= CONTENT_WIDTH_MAX_RETRIES ||
+          listenersDisposed
+        ) {
+          return;
+        }
+        contentWidthRetryCount += 1;
+        clearTimeout(contentWidthSyncTimer);
+        contentWidthSyncTimer = setTimeout(() => {
+          contentWidthSyncTimer = null;
+          scheduleTaskbarContentWidthSync();
+        }, CONTENT_WIDTH_RETRY_DELAY_MS);
+      });
   }, CONTENT_WIDTH_SYNC_DELAY_MS);
 }
 
@@ -416,6 +444,7 @@ function renderBar() {
   root.dataset.claudeTextColor = vm.claudeTextColorOn ? "custom" : "auto";
   root.dataset.codexTextColor = vm.codexTextColorOn ? "custom" : "auto";
   root.dataset.grokTextColor = vm.grokTextColorOn ? "custom" : "auto";
+  root.dataset.cursorTextColor = vm.cursorTextColorOn ? "custom" : "auto";
   root.dataset.infoTextColor = vm.infoTextColorOn ? "custom" : "auto";
   root.dataset.ringTextColor = vm.ringTextColorOn ? "custom" : "auto";
   root.dataset.ring = vm.ringOn ? "on" : "off";
@@ -433,6 +462,7 @@ function renderBar() {
   root.style?.setProperty("--claude-text-color", vm.claudeTextColor);
   root.style?.setProperty("--codex-text-color", vm.codexTextColor);
   root.style?.setProperty("--grok-text-color", vm.grokTextColor);
+  root.style?.setProperty("--cursor-text-color", vm.cursorTextColor);
   root.style?.setProperty("--info-text-color", vm.infoTextColor);
   root.style?.setProperty("--ring-text-color", vm.ringTextColor);
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);

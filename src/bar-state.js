@@ -12,10 +12,11 @@ const TOOL_LABELS = {
   claude: "Claude",
   codex: "Codex",
   grok: "Grok",
+  cursor: "Cursor",
 };
 
 const MODES = new Set(["full", "compact", "dual", "quad"]);
-const TOOLS = ["claude", "codex", "grok"];
+const TOOLS = ["claude", "codex", "grok", "cursor"];
 const INDICATOR_STYLES = new Set(["ring", "bar"]);
 const INDICATOR_EFFECT_STYLES = new Set(["flat", "soft", "depth", "glow", "breathe"]);
 const LIMIT_ORDERS = new Set(["primary_first", "secondary_first"]);
@@ -28,6 +29,7 @@ function toolEnabled(settings, tool) {
   if (tool === "claude") return settings.show_claude !== false;
   if (tool === "codex") return settings.show_codex !== false;
   if (tool === "grok") return settings.show_grok === true;
+  if (tool === "cursor") return settings.show_cursor === true;
   return true;
 }
 
@@ -143,6 +145,24 @@ function ringSvgGeometry(sizePx, thicknessPx, gapPx, centerSizePx) {
 
 function shortReset(iso, now, language) {
   if (!iso) return "";
+  const fullDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const monthDay = /^(\d{2})-(\d{2})$/.exec(iso);
+  if (fullDate || monthDay) {
+    const year = fullDate ? Number(fullDate[1]) : 2000;
+    const month = Number((fullDate || monthDay)[fullDate ? 2 : 1]);
+    const day = Number((fullDate || monthDay)[fullDate ? 3 : 2]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+      return "";
+    }
+    const options = {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    };
+    if (fullDate) options.year = "numeric";
+    return new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en-US", options).format(date);
+  }
   const resetAt = Date.parse(iso);
   if (!Number.isFinite(resetAt)) return "";
 
@@ -159,6 +179,7 @@ function limitModel(labelKey, limit, settings, now, language, tool, secondary = 
     number: numberText(displayed),
     percent: displayed,
     reset: shortReset(limit?.resets_at, now, language),
+    resetDateOnly: /^(?:\d{4}-\d{2}-\d{2}|\d{2}-\d{2})$/.test(String(limit?.resets_at ?? "")),
     color: colorForToolPercent(used, tool, settings, secondary),
     arc: arcText(displayed),
     dash: dashText(displayed),
@@ -176,6 +197,7 @@ function grokLimitLabel(limit) {
 
 function limitLabelKeys(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
+  if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
   return ["limit.fiveHour", "limit.weekly"];
 }
 
@@ -196,10 +218,11 @@ function taskbarTextColorOn(settings, key) {
   return boolSetting(settings?.taskbar_text_colors?.[`${key}_on`], false);
 }
 
-function tooltipResetLine(labelKey, reset, language) {
+function tooltipResetLine(labelKey, reset, language, dateOnly = false) {
   const label = t(labelKey, language);
   if (!reset) return `${label} –`;
   if (reset === t("reset.awaitingRefresh", language)) return `${label} ${reset}`;
+  if (dateOnly) return `${label} · ${t("reset.datePrefix", language)} ${reset}`;
   return `${label} ${t("reset.prefix", language)} ${reset}`;
 }
 
@@ -208,7 +231,7 @@ function toolTooltip(label, primary, secondary, language) {
     .filter((limit) => typeof limit === "string" || limit?.visible)
     .map((limit) => typeof limit === "string"
       ? limit
-      : tooltipResetLine(limit.labelKey, limit.reset, language))
+      : tooltipResetLine(limit.labelKey, limit.reset, language, limit.resetDateOnly))
     .join("\n");
 }
 
@@ -398,6 +421,8 @@ export function barViewModel(
     codexTextColorOn: taskbarTextColorOn(merged, "codex"),
     grokTextColor: taskbarTextColor(merged, "grok", "#d9578b"),
     grokTextColorOn: taskbarTextColorOn(merged, "grok"),
+    cursorTextColor: taskbarTextColor(merged, "cursor", "#3b82f6"),
+    cursorTextColorOn: taskbarTextColorOn(merged, "cursor"),
     infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
     infoTextColorOn: taskbarTextColorOn(merged, "info"),
     ringTextColor: taskbarTextColor(merged, "ring", "#6b7280"),

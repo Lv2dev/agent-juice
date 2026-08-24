@@ -428,6 +428,10 @@ h1::before {
   --tool-brand: #d9578b;
 }
 
+.tool-card[data-tool="cursor"] {
+  --tool-brand: #3b82f6;
+}
+
 .tool-card[data-state="stale"],
 .tool-card[data-state="empty"] {
   opacity: 0.64;
@@ -472,7 +476,8 @@ h2 {
 
 .claude-dot,
 .codex-dot,
-.grok-dot {
+.grok-dot,
+.cursor-dot {
   background: var(--tool-brand);
 }
 
@@ -899,6 +904,7 @@ h2 {
   --claude-text-color: #d79a32;
   --codex-text-color: #2fac7d;
   --grok-text-color: #d9578b;
+  --cursor-text-color: #3b82f6;
   --info-text-color: #6b7280;
   --ring-text-color: #6b7280;
   --bar-text-font-size: 11px;
@@ -999,6 +1005,10 @@ html[data-panel-visible="false"] * {
 
 .bar-tool[data-tool="grok"] {
   --tool-brand: #d9578b;
+}
+
+.bar-tool[data-tool="cursor"] {
+  --tool-brand: #3b82f6;
 }
 
 .bar-tool[data-state="stale"],
@@ -1462,6 +1472,10 @@ html[data-panel-visible="false"] * {
   color: var(--grok-text-color);
 }
 
+.bar-shell[data-cursor-text-color="custom"] .bar-tool[data-tool="cursor"] .bar-tool-name {
+  color: var(--cursor-text-color);
+}
+
 .bar-shell[data-info-text-color="custom"] .bar-line,
 .bar-shell[data-info-text-color="custom"] .primary-reset,
 .bar-shell[data-info-text-color="custom"] .secondary-reset {
@@ -1506,6 +1520,10 @@ html[data-panel-visible="false"] * {
 
 .bar-shell[data-grok-text-color="custom"] .bar-tool[data-tool="grok"][data-state="stale"] .bar-tool-name {
   color: color-mix(in srgb, var(--grok-text-color) 62%, var(--text-muted));
+}
+
+.bar-shell[data-cursor-text-color="custom"] .bar-tool[data-tool="cursor"][data-state="stale"] .bar-tool-name {
+  color: color-mix(in srgb, var(--cursor-text-color) 62%, var(--text-muted));
 }
 
 .bar-shell[data-info-text-color="custom"] .bar-tool[data-state="stale"] .bar-line,

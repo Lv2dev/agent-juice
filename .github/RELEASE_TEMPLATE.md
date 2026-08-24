@@ -25,7 +25,7 @@
 
 ### 알려진 제한
 
-- v1은 로컬 전용입니다. 다른 PC의 사용량을 보려면 그 PC에도 Juice를 설치하고 Claude/Codex 연결을 별도로 설정해야 합니다.
+- v1은 로컬 전용입니다. 다른 PC의 사용량을 보려면 그 PC에도 Juice와 사용할 Claude Code, Codex, Grok Build, Cursor Agent의 로컬 로그인이 필요합니다.
 
 ## English
 
@@ -49,4 +49,4 @@
 
 ### Known Limitations
 
-- v1 is local-only. To view usage on another PC, install Juice on that PC and connect Claude/Codex there as well.
+- v1 is local-only. To view usage on another PC, install Juice there and sign in locally to the Claude Code, Codex, Grok Build, and Cursor Agent providers you use.
