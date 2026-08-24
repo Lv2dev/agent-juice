@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "taskbar-bars",
   "description": "Capability for read-only Juice taskbar bar renderers",
-  "windows": ["bar-claude", "bar-codex", "bar-grok"],
+  "windows": ["bar-claude", "bar-codex", "bar-grok", "bar-cursor"],
   "permissions": ["core:default"]
 }

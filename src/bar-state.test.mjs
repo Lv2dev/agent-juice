@@ -13,7 +13,7 @@ const settings = {
 };
 
 test("barToolViewModel prioritizes login-required health for every provider", () => {
-  for (const tool of ["claude", "codex", "grok"]) {
+  for (const tool of ["claude", "codex", "grok", "cursor"]) {
     const status = {
       tool,
       captured_at: "2026-08-14T00:00:00Z",
@@ -541,6 +541,58 @@ test("barViewModel preserves every documented taskbar bar mode", () => {
   }
 });
 
+test("barViewModel preserves all 1-to-4 provider combinations across modes and indicators", () => {
+  const tools = ["claude", "codex", "grok", "cursor"];
+  const statuses = tools.map((tool) => ({
+    tool,
+    captured_at: "2026-08-21T00:00:00Z",
+    primary: {
+      label: tool === "grok" ? "week" : "primary",
+      used_percent: 10,
+      resets_at: tool === "cursor" ? "09-21" : null,
+    },
+    secondary: tool === "grok" ? null : {
+      label: "secondary",
+      used_percent: 20,
+      resets_at: tool === "cursor" ? "09-21" : null,
+    },
+    session: { active: true },
+  }));
+
+  for (let mask = 1; mask < 2 ** tools.length; mask += 1) {
+    const enabled = tools.filter((_, index) => (mask & (1 << index)) !== 0);
+    for (const bar_mode of ["full", "compact", "dual", "quad"]) {
+      for (const indicator_style of ["ring", "bar"]) {
+        for (const limit_order of ["primary_first", "secondary_first"]) {
+          const vm = barViewModel(statuses, {
+            ...settings,
+            bar_mode,
+            indicator_style,
+            limit_order,
+            show_claude: enabled.includes("claude"),
+            show_codex: enabled.includes("codex"),
+            show_grok: enabled.includes("grok"),
+            show_cursor: enabled.includes("cursor"),
+          }, new Date("2026-08-21T00:00:00Z"));
+
+          assert.equal(vm.mode, bar_mode);
+          assert.equal(vm.indicatorStyle, indicator_style);
+          assert.equal(vm.limitOrder, limit_order);
+          assert.deepEqual(vm.tools.map((tool) => tool.tool), enabled);
+          const grok = vm.tools.find((tool) => tool.tool === "grok");
+          if (grok) assert.equal(grok.secondary.visible, false);
+          const cursor = vm.tools.find((tool) => tool.tool === "cursor");
+          if (cursor) {
+            assert.equal(cursor.primary.labelKey, "limit.cursorModels");
+            assert.equal(cursor.secondary.labelKey, "limit.otherModels");
+            assert.equal(cursor.secondary.visible, true);
+          }
+        }
+      }
+    }
+  }
+});
+
 test("barViewModel filters hidden tools without restoring the removed tool-to-tool gap", () => {
   const codexOnly = barViewModel([], {
     ...settings,
@@ -595,4 +647,28 @@ test("Grok renders one dynamic weekly or monthly limit without an empty sibling"
   );
   assert.equal(monthly.primary.text, "Monthly 90%");
   assert.equal(monthly.primary.color, "#8a6fd1");
+});
+
+test("Cursor renders its two monthly pools and date-only reset without a fake countdown", () => {
+  const cursor = barToolViewModel(
+    [{
+      tool: "cursor",
+      captured_at: "2026-08-21T00:00:00Z",
+      primary: { label: "cursor_models", used_percent: 1, resets_at: "09-21" },
+      secondary: { label: "other_models", used_percent: 0, resets_at: "09-21" },
+      session: { active: true },
+      approx: false,
+    }],
+    "cursor",
+    { ...settings, language: "en", show_cursor: true },
+    new Date("2026-08-21T00:00:00Z"),
+  );
+
+  assert.equal(cursor.primary.text, "Cursor Models 99%");
+  assert.equal(cursor.secondary.text, "Other Models 100%");
+  assert.equal(cursor.primary.reset, "Sep 21");
+  assert.equal(cursor.primary.color, "#3b82f6");
+  assert.equal(cursor.secondary.color, "#06b6d4");
+  assert.match(cursor.tooltip, /Cursor Models · Resets Sep 21/);
+  assert.match(cursor.tooltip, /Other Models · Resets Sep 21/);
 });

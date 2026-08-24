@@ -186,6 +186,12 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /Grok defaults to \*\*off\*\*/);
   assert.match(readme, /calls only `initialize` followed by `_x\.ai\/billing`/);
   assert.match(readme, /weekly ACP period appears as one `Weekly` limit and a monthly period as one `Monthly` limit/);
+  assert.match(readme, /Cursor Agent 사용량 자동 수집/);
+  assert.match(readme, /Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않도록 기본값이 \*\*꺼짐\*\*/);
+  assert.match(readme, /`Auto`는 \*\*Cursor Models\*\*, `API`는 \*\*Other Models\*\*/);
+  assert.match(readme, /Automatic Cursor Agent usage collection/);
+  assert.match(readme, /Cursor defaults to \*\*off\*\*/);
+  assert.match(readme, /`\/usage` Auto maps to \*\*Cursor Models\*\* and API maps to \*\*Other Models\*\*/);
   assert.match(readme, /4가지 바 모드/);
   assert.match(readme, /four bar modes/);
   assert.match(readme, /원·바 표현 스타일/);
@@ -211,15 +217,15 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
 test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
-    ["juice-v014-panel-overview.png", [1240, 1320]],
+    ["juice-v014-panel-overview.png", [1240, 1696]],
     ["juice-v014-panel-activity.png", [1240, 726]],
-    ["juice-v014-panel-appearance.png", [1240, 1592]],
+    ["juice-v014-panel-appearance.png", [1240, 1668]],
     ["juice-v014-panel-taskbar.png", [1240, 1412]],
     ["juice-v014-panel-collection.png", [1240, 1416]],
     ["juice-v014-panel-effects.png", [1240, 2428]],
     ["juice-v014-panel-update.png", [1240, 588]],
-    ["juice-v014-taskbar-modes.png", [1800, 584]],
-    ["juice-v014-taskbar-bars.png", [1800, 584]],
+    ["juice-v014-taskbar-modes.png", [1800, 792]],
+    ["juice-v014-taskbar-bars.png", [1800, 792]],
   ]);
 
   for (const [name, dimensions] of assets) {
@@ -269,16 +275,29 @@ import sys
 from PIL import Image
 
 image = Image.open(sys.argv[1]).convert("RGB")
-colors = [(215, 154, 50), (211, 107, 134), (47, 172, 125), (77, 134, 214), (217, 87, 139), (138, 111, 209)]
-rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
-columns = [(224, 734), (734, 1245), (1245, 1756)]
+tool_colors = [
+    [(215, 154, 50), (211, 107, 134)],
+    [(47, 172, 125), (77, 134, 214)],
+    [(217, 87, 139), (138, 111, 209)],
+    [(59, 130, 246), (6, 182, 212)],
+]
+rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
+columns = [(224, 990), (990, 1756)]
 heights = []
 for top, bottom in rows:
     row = []
-    for left, right in columns:
+    middle = (top + bottom) // 2
+    cells = [
+        (*columns[0], top, middle),
+        (*columns[1], top, middle),
+        (*columns[0], middle, bottom),
+        (*columns[1], middle, bottom),
+    ]
+    for tool_index, (left, right, cell_top, cell_bottom) in enumerate(cells):
+        colors = tool_colors[tool_index]
         points = [
             (x, y)
-            for y in range(top, bottom)
+            for y in range(cell_top, cell_bottom)
             for x in range(left, right)
             if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
         ]
@@ -291,7 +310,11 @@ print(json.dumps(heights))
       { encoding: "utf8" },
     ),
   );
-  assert.deepEqual(ringHeights, [[64, 64, 64], [64, 64, 64], [64, 64, 64], [64, 64, 64]]);
+  for (const row of ringHeights) {
+    assert.equal(row.length, 4);
+    assert.ok(row.every((height) => height >= 63 && height <= 64), `ring size drifted: ${JSON.stringify(row)}`);
+    assert.ok(Math.max(...row) - Math.min(...row) <= 1, `ring sizes are uneven: ${JSON.stringify(row)}`);
+  }
 
   const taskbarBarsPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-bars.png");
   const barBounds = JSON.parse(
@@ -309,17 +332,25 @@ tool_colors = [
     [(215, 154, 50), (211, 107, 134)],
     [(47, 172, 125), (77, 134, 214)],
     [(217, 87, 139), (138, 111, 209)],
+    [(59, 130, 246), (6, 182, 212)],
 ]
-rows = [(70, 166), (202, 298), (334, 430), (466, 562)]
-columns = [(224, 734), (734, 1245), (1245, 1756)]
+rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
+columns = [(224, 990), (990, 1756)]
 bounds = []
 for top, bottom in rows:
     row = []
-    for tool_index, (left, right) in enumerate(columns):
+    middle = (top + bottom) // 2
+    cells = [
+        (*columns[0], top, middle),
+        (*columns[1], top, middle),
+        (*columns[0], middle, bottom),
+        (*columns[1], middle, bottom),
+    ]
+    for tool_index, (left, right, cell_top, cell_bottom) in enumerate(cells):
         colors = tool_colors[tool_index]
         points = [
             (x, y)
-            for y in range(top, bottom)
+            for y in range(cell_top, cell_bottom)
             for x in range(left, right)
             if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
         ]

@@ -23,6 +23,8 @@ pub enum Tool {
     Codex,
     #[serde(rename = "grok")]
     Grok,
+    #[serde(rename = "cursor")]
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

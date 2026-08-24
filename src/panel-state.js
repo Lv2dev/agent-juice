@@ -14,6 +14,8 @@ export const DEFAULT_SETTINGS = {
     codex_on: false,
     grok: [0xd9, 0x57, 0x8b],
     grok_on: false,
+    cursor: [0x3b, 0x82, 0xf6],
+    cursor_on: false,
     info: [0x6b, 0x72, 0x80],
     info_on: false,
     ring: [0x6b, 0x72, 0x80],
@@ -26,9 +28,11 @@ export const DEFAULT_SETTINGS = {
   claude_taskbar_offset_ratio: 0,
   codex_taskbar_offset_ratio: 0,
   grok_taskbar_offset_ratio: 0,
+  cursor_taskbar_offset_ratio: 0,
   show_claude: true,
   show_codex: true,
   show_grok: false,
+  show_cursor: false,
   claude_account_auto_collect_on: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
@@ -76,6 +80,7 @@ const TOOL_SAFE = {
   claude: ["#d79a32", "#d36b86"],
   codex: ["#2fac7d", "#4d86d6"],
   grok: ["#d9578b", "#8a6fd1"],
+  cursor: ["#3b82f6", "#06b6d4"],
 };
 
 function rgbColor(value, fallback) {
@@ -248,6 +253,26 @@ function percentText(value) {
 
 function formatReset(iso, now, language) {
   if (!iso) return "";
+  const fullDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  const monthDay = /^(\d{2})-(\d{2})$/.exec(iso);
+  if (fullDate || monthDay) {
+    const year = fullDate ? Number(fullDate[1]) : 2000;
+    const month = Number((fullDate || monthDay)[fullDate ? 2 : 1]);
+    const day = Number((fullDate || monthDay)[fullDate ? 3 : 2]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+      return "";
+    }
+    const locale = language === "ko" ? "ko-KR" : "en-US";
+    const options = {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    };
+    if (fullDate) options.year = "numeric";
+    const label = new Intl.DateTimeFormat(locale, options).format(date);
+    return `${t("reset.datePrefix", language)} ${label}`;
+  }
   const resetAt = parseTime(iso);
   if (resetAt == null) return "";
 
@@ -280,6 +305,7 @@ function grokLimitLabel(limit) {
 
 function limitLabels(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
+  if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
   return ["limit.fiveHour", "limit.weekly"];
 }
 
@@ -292,6 +318,7 @@ function emptyHintForTool(tool, settings, language) {
     return t("empty.claudeCollect", language);
   }
   if (tool === "grok") return t("empty.grok", language);
+  if (tool === "cursor") return t("empty.cursor", language);
   return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
 }
 

@@ -53,6 +53,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   const cards = {
     claude: toolCardStub(),
     codex: toolCardStub(),
+    cursor: toolCardStub(),
   };
 
   global.window = {
@@ -62,7 +63,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
         async invoke(command) {
           invokedCommands.push(command);
           if (command === "get_settings") {
-            return { show_claude: false, show_codex: true };
+            return { show_claude: false, show_codex: true, show_cursor: true };
           }
           if (command === "get_status") {
             return [
@@ -72,6 +73,14 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
                 captured_at: "2026-07-07T00:00:00Z",
                 primary: { used_percent: 18, resets_at: null },
                 secondary: { used_percent: 42, resets_at: null },
+                session: { active: true },
+              },
+              {
+                tool: "cursor",
+                pc_id: "DESKTOP",
+                captured_at: "2026-08-21T00:00:00Z",
+                primary: { label: "cursor_models", used_percent: 1, resets_at: "09-21" },
+                secondary: { label: "other_models", used_percent: 0, resets_at: "09-21" },
                 session: { active: true },
               },
             ];
@@ -114,6 +123,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
     querySelector(selector) {
       if (selector === '[data-tool="claude"]') return cards.claude;
       if (selector === '[data-tool="codex"]') return cards.codex;
+      if (selector === '[data-tool="cursor"]') return cards.cursor;
       return null;
     },
   };
@@ -123,7 +133,9 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
 
   assert.equal(cards.claude.hidden, true);
   assert.equal(cards.codex.hidden, false);
+  assert.equal(cards.cursor.hidden, false);
   assert.equal(cards.codex.style.getPropertyValue("--tool-brand"), "#2fac7d");
+  assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#3b82f6");
   assert.equal(focusListenerCount, 0);
   let prevented = false;
   listeners.contextmenu?.({ preventDefault() { prevented = true; } });

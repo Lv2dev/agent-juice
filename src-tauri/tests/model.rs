@@ -39,3 +39,21 @@ fn grok_status_roundtrips_with_a_single_dynamic_period() {
         .unwrap()
         .contains("\"tool\":\"grok\""));
 }
+
+#[test]
+fn cursor_status_roundtrips_with_two_date_only_monthly_pools() {
+    let json = r#"{"schema_version":"agent_status.v1","pc_id":"PC1","tool":"cursor",
+      "session_id":"cursor-agent-usage","captured_at":"2026-08-21T00:00:00Z",
+      "primary":{"label":"cursor_models","used_percent":1.0,"resets_at":"09-21"},
+      "secondary":{"label":"other_models","used_percent":0.0,"resets_at":"09-21"},
+      "session":{"active":true,"context_used_percent":null},
+      "cost_estimate_usd":null,"approx":false}"#;
+
+    let status: AgentStatus = serde_json::from_str(json).unwrap();
+    assert_eq!(status.tool, Tool::Cursor);
+    assert_eq!(status.primary.as_ref().unwrap().label, "cursor_models");
+    assert_eq!(status.secondary.as_ref().unwrap().label, "other_models");
+    assert!(serde_json::to_string(&status)
+        .unwrap()
+        .contains("\"tool\":\"cursor\""));
+}

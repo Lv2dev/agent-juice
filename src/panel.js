@@ -10,7 +10,7 @@ import { applyFont } from "./font.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
-const TOOLS = ["claude", "codex", "grok"];
+const TOOLS = ["claude", "codex", "grok", "cursor"];
 const WINDOW_ACTION_COMMANDS = {
   close: "hide_panel_window",
   minimize: "minimize_panel",
@@ -124,6 +124,7 @@ function toolEnabled(tool) {
   if (tool === "claude") return settings.show_claude !== false;
   if (tool === "codex") return settings.show_codex !== false;
   if (tool === "grok") return settings.show_grok === true;
+  if (tool === "cursor") return settings.show_cursor === true;
   return true;
 }
 
