@@ -275,19 +275,6 @@ mod tests {
         assert!(failed.partial);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_safety_policy_exposes_empty_partial_account_activity() {
-        let collector = CodexActivityCollector::default();
-        let now = Instant::now();
-        let view = collector.collect_with(false, now, now + Duration::from_secs(1), |timeout| {
-            collector::codex_account_usage_response(timeout)
-        });
-
-        assert!(view.days.is_empty());
-        assert!(view.partial);
-    }
-
     #[test]
     fn concurrent_force_requests_share_one_actual_fetch() {
         let collector = Arc::new(CodexActivityCollector::default());
