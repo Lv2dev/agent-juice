@@ -586,6 +586,7 @@ pub fn tray_quit_menu_id() -> &'static str {
 }
 
 fn begin_native_shutdown(app: &tauri::AppHandle) {
+    collector::begin_codex_app_server_shutdown();
     if let Some(state) = app.try_state::<TaskbarShutdownState>() {
         state.0.store(true, Ordering::Release);
     }
@@ -4420,6 +4421,7 @@ async fn save_settings(
         .map_err(|err| format!("settings load task failed: {err}"))?
         .map_err(|err| err.to_string())?;
     let previous_show_claude = baseline.show_claude;
+    let previous_show_codex = baseline.show_codex;
     let claude_collection_transition =
         (baseline.show_claude != requested.show_claude).then_some(requested.show_claude);
     let claude_enabled_now = !baseline.show_claude && requested.show_claude;
@@ -4477,6 +4479,11 @@ async fn save_settings(
             return Err(save_error);
         }
     };
+    if previous_show_codex != settings.show_codex {
+        if let Err(error) = collector::set_codex_app_server_enabled(settings.show_codex) {
+            eprintln!("[codex] app-server broker state update failed: {error}");
+        }
+    }
     if !taskbar_drag_active(&app) {
         sync_taskbar_content_layout_ratios(&app, &settings);
     }
@@ -6162,6 +6169,13 @@ pub fn run() {
                     None
                 }
             };
+            if let Err(error) = collector::set_codex_app_server_enabled(
+                settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.show_codex),
+            ) {
+                eprintln!("[codex] app-server broker startup failed: {error}");
+            }
             if let Some(settings) = settings.as_ref() {
                 set_taskbar_bars_paused(app, settings.taskbar_bars_paused);
                 let taskbar_retry = match try_setup_taskbar_dock(app, settings) {
@@ -7896,12 +7910,18 @@ mod tests {
         );
         assert_eq!(
             super::classify_collection_error(&anyhow::anyhow!(
-                "Codex app-server command unavailable by platform safety policy"
+                "Codex app-server command unavailable by collection policy"
             )),
             super::CollectionErrorKind::Unavailable
         );
         assert_eq!(
             super::classify_collection_error(&anyhow::anyhow!("Codex app-server timed out")),
+            super::CollectionErrorKind::Transport
+        );
+        assert_eq!(
+            super::classify_collection_error(&anyhow::anyhow!(
+                "Codex app-server retry backoff active"
+            )),
             super::CollectionErrorKind::Transport
         );
     }

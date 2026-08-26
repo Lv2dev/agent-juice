@@ -1,21 +1,33 @@
 use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{mpsc, OnceLock},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
 use serde_json::Value;
 
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
+#[cfg(test)]
 const CODEX_ACCOUNT_RESPONSE_ID: i64 = 2;
+#[cfg(test)]
 const CODEX_USAGE_RESPONSE_ID: i64 = 3;
 const GROK_BILLING_RESPONSE_ID: i64 = 2;
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_ERROR_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_LINE_BYTES: usize = 256 * 1024;
+const CODEX_BROKER_QUEUE_CAPACITY: usize = 8;
+const CODEX_BROKER_STDOUT_CAPACITY: usize = 32;
+const CODEX_BROKER_MAX_SKIPPED_MESSAGES: usize = 64;
+const CODEX_BROKER_IDLE_POLL: Duration = Duration::from_millis(250);
+const CODEX_BROKER_MIN_BACKOFF: Duration = Duration::from_secs(30);
+const CODEX_BROKER_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const CODEX_BROKER_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const TASKKILL_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_ROLLOUT_DEPTH: usize = 4;
@@ -27,10 +39,8 @@ const MAX_CODEX_DESKTOP_BIN_ENTRIES: usize = 64;
 const CODEX_RUNTIME_DIRECTORY_NAME_LEN: usize = 16;
 pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
-
-fn codex_app_server_polling_enabled() -> bool {
-    !cfg!(windows)
-}
+// One worker owns the Codex child and serializes every account RPC.
+static CODEX_APP_SERVER_BROKER: OnceLock<Result<CodexAppServerBroker, String>> = OnceLock::new();
 
 pub fn text_requires_login(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
@@ -655,31 +665,648 @@ fn is_token_count_event(line: &str) -> bool {
 }
 
 pub fn codex_account_rate_limits_response(timeout: Duration) -> anyhow::Result<String> {
-    let command = codex_app_server_command_with_policy(
-        codex_app_server_polling_enabled(),
-        codex_app_server_command,
-    )?;
-    codex_account_rate_limits_response_with_command(command, timeout)
+    codex_app_server_broker()?.request("account/rateLimits/read", timeout)
 }
 
 pub fn codex_account_usage_response(timeout: Duration) -> anyhow::Result<String> {
-    let command = codex_app_server_command_with_policy(
-        codex_app_server_polling_enabled(),
-        codex_app_server_command,
-    )?;
-    codex_account_usage_response_with_command(command, timeout)
+    codex_app_server_broker()?.request("account/usage/read", timeout)
 }
 
-fn codex_app_server_command_with_policy(
-    enabled: bool,
-    command_factory: impl FnOnce() -> anyhow::Result<Command>,
-) -> anyhow::Result<Command> {
-    if !enabled {
-        anyhow::bail!("Codex app-server command unavailable by platform safety policy");
+pub fn set_codex_app_server_enabled(enabled: bool) -> anyhow::Result<()> {
+    codex_app_server_broker()?.set_enabled(enabled);
+    Ok(())
+}
+
+pub fn begin_codex_app_server_shutdown() {
+    if let Some(Ok(broker)) = CODEX_APP_SERVER_BROKER.get() {
+        broker.begin_shutdown();
     }
-    command_factory()
 }
 
+fn codex_app_server_broker() -> anyhow::Result<&'static CodexAppServerBroker> {
+    match CODEX_APP_SERVER_BROKER.get_or_init(|| {
+        CodexAppServerBroker::start(
+            true,
+            Arc::new(codex_app_server_command),
+            CODEX_BROKER_MIN_BACKOFF,
+            CODEX_BROKER_MAX_BACKOFF,
+        )
+    }) {
+        Ok(broker) => Ok(broker),
+        Err(error) => Err(anyhow::anyhow!(error.clone())),
+    }
+}
+
+type CodexCommandFactory = Arc<dyn Fn() -> anyhow::Result<Command> + Send + Sync + 'static>;
+
+enum CodexBrokerMessage {
+    Request {
+        method: &'static str,
+        deadline: Instant,
+        reply: mpsc::SyncSender<Result<String, String>>,
+    },
+    Reset,
+    Shutdown {
+        reply: mpsc::SyncSender<()>,
+    },
+}
+
+struct CodexAppServerBroker {
+    sender: mpsc::SyncSender<CodexBrokerMessage>,
+    enabled: Arc<AtomicBool>,
+    #[cfg(test)]
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl CodexAppServerBroker {
+    fn start(
+        enabled: bool,
+        command_factory: CodexCommandFactory,
+        min_backoff: Duration,
+        max_backoff: Duration,
+    ) -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel(CODEX_BROKER_QUEUE_CAPACITY);
+        let enabled = Arc::new(AtomicBool::new(enabled));
+        let worker_enabled = Arc::clone(&enabled);
+        let worker = std::thread::Builder::new()
+            .name("juice-codex-app-server".into())
+            .spawn(move || {
+                CodexBrokerWorker::new(command_factory, worker_enabled, min_backoff, max_backoff)
+                    .run(receiver);
+            })
+            .map_err(|_| {
+                "Codex app-server command unavailable: broker thread failed".to_string()
+            })?;
+        #[cfg(not(test))]
+        drop(worker);
+        Ok(Self {
+            sender,
+            enabled,
+            #[cfg(test)]
+            worker: Mutex::new(Some(worker)),
+        })
+    }
+
+    fn request(&self, method: &'static str, timeout: Duration) -> anyhow::Result<String> {
+        if !self.enabled.load(Ordering::Acquire) {
+            anyhow::bail!("Codex app-server command unavailable by collection policy");
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| anyhow::anyhow!("Codex app-server timed out"))?;
+        if timeout.is_zero() {
+            anyhow::bail!("Codex app-server timed out");
+        }
+        let (reply, response) = mpsc::sync_channel(1);
+        self.send_until(
+            CodexBrokerMessage::Request {
+                method,
+                deadline,
+                reply,
+            },
+            deadline,
+        )?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            anyhow::bail!("Codex app-server timed out");
+        }
+        match response.recv_timeout(remaining) {
+            Ok(Ok(raw)) => Ok(raw),
+            Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+            Err(_) => Err(anyhow::anyhow!("Codex app-server timed out")),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            let _ = self.sender.try_send(CodexBrokerMessage::Reset);
+        }
+    }
+
+    fn begin_shutdown(&self) {
+        self.enabled.store(false, Ordering::Release);
+        let sender = self.sender.clone();
+        let _ = std::thread::Builder::new()
+            .name("juice-codex-shutdown".into())
+            .spawn(move || {
+                let deadline = Instant::now() + CODEX_BROKER_CONTROL_TIMEOUT;
+                let (reply, response) = mpsc::sync_channel(1);
+                if send_codex_broker_message_until(
+                    &sender,
+                    CodexBrokerMessage::Shutdown { reply },
+                    deadline,
+                )
+                .is_ok()
+                {
+                    let _ =
+                        response.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+                }
+            });
+    }
+
+    #[cfg(test)]
+    fn shutdown_for_test(&self) {
+        self.enabled.store(false, Ordering::Release);
+        let deadline = Instant::now() + CODEX_BROKER_CONTROL_TIMEOUT;
+        let (reply, response) = mpsc::sync_channel(1);
+        let sent = self
+            .send_until(CodexBrokerMessage::Shutdown { reply }, deadline)
+            .is_ok();
+        if sent {
+            let _ = response.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        }
+        if sent {
+            if let Some(worker) = self
+                .worker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn send_until(&self, message: CodexBrokerMessage, deadline: Instant) -> anyhow::Result<()> {
+        send_codex_broker_message_until(&self.sender, message, deadline)
+    }
+}
+
+fn send_codex_broker_message_until(
+    sender: &mpsc::SyncSender<CodexBrokerMessage>,
+    mut message: CodexBrokerMessage,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    loop {
+        match sender.try_send(message) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::TrySendError::Full(returned)) if Instant::now() < deadline => {
+                message = returned;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                anyhow::bail!("Codex app-server timed out")
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("Codex app-server command unavailable: broker stopped")
+            }
+        }
+    }
+}
+
+struct CodexBrokerWorker {
+    command_factory: CodexCommandFactory,
+    enabled: Arc<AtomicBool>,
+    session: Option<CodexAppServerSession>,
+    consecutive_failures: u32,
+    retry_at: Option<Instant>,
+    retry_error: Option<String>,
+    min_backoff: Duration,
+    max_backoff: Duration,
+}
+
+impl CodexBrokerWorker {
+    fn new(
+        command_factory: CodexCommandFactory,
+        enabled: Arc<AtomicBool>,
+        min_backoff: Duration,
+        max_backoff: Duration,
+    ) -> Self {
+        Self {
+            command_factory,
+            enabled,
+            session: None,
+            consecutive_failures: 0,
+            retry_at: None,
+            retry_error: None,
+            min_backoff,
+            max_backoff,
+        }
+    }
+
+    fn run(&mut self, receiver: mpsc::Receiver<CodexBrokerMessage>) {
+        loop {
+            if let Some(session) = self.session.as_mut() {
+                if let Err(error) = session.poll_idle() {
+                    self.session.take();
+                    self.record_failure(&error);
+                }
+            }
+            match receiver.recv_timeout(CODEX_BROKER_IDLE_POLL) {
+                Ok(CodexBrokerMessage::Request {
+                    method,
+                    deadline,
+                    reply,
+                }) => {
+                    let result = self.handle_request(method, deadline);
+                    let _ = reply.send(result);
+                }
+                Ok(CodexBrokerMessage::Reset) => self.reset(),
+                Ok(CodexBrokerMessage::Shutdown { reply }) => {
+                    self.reset();
+                    let _ = reply.send(());
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.reset();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_request(
+        &mut self,
+        method: &'static str,
+        deadline: Instant,
+    ) -> Result<String, String> {
+        if !self.enabled.load(Ordering::Acquire) {
+            self.reset();
+            return Err("Codex app-server command unavailable by collection policy".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("Codex app-server timed out".into());
+        }
+        if self
+            .retry_at
+            .is_some_and(|retry_at| Instant::now() < retry_at)
+        {
+            return Err(self
+                .retry_error
+                .clone()
+                .unwrap_or_else(|| "Codex app-server retry backoff active".into()));
+        }
+        if self.session.is_none() {
+            match CodexAppServerSession::start(
+                Arc::clone(&self.command_factory),
+                Arc::clone(&self.enabled),
+                deadline,
+            ) {
+                Ok(session) => self.session = Some(session),
+                Err(error) => {
+                    self.record_failure(&error);
+                    return Err(error);
+                }
+            }
+        }
+
+        let result = self
+            .session
+            .as_mut()
+            .expect("Codex session must exist after successful start")
+            .request(method, deadline);
+        match result {
+            Ok(raw) => {
+                self.consecutive_failures = 0;
+                self.retry_at = None;
+                self.retry_error = None;
+                Ok(raw)
+            }
+            Err(error) => {
+                let disabled = !self.enabled.load(Ordering::Acquire);
+                self.session.take();
+                if disabled {
+                    self.consecutive_failures = 0;
+                    self.retry_at = None;
+                    self.retry_error = None;
+                } else {
+                    self.record_failure(&error);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn record_failure(&mut self, error: &str) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(4);
+        let backoff = self
+            .min_backoff
+            .saturating_mul(1u32 << exponent)
+            .min(self.max_backoff);
+        self.retry_at = Instant::now().checked_add(backoff);
+        self.retry_error = Some(if text_requires_login(error) {
+            "Codex app-server authentication required".into()
+        } else if error.to_ascii_lowercase().contains("command unavailable") {
+            "Codex app-server command unavailable during retry backoff".into()
+        } else {
+            "Codex app-server retry backoff active".into()
+        });
+    }
+
+    fn reset(&mut self) {
+        self.session.take();
+        self.consecutive_failures = 0;
+        self.retry_at = None;
+        self.retry_error = None;
+    }
+}
+
+struct CodexAppServerSession {
+    child: Option<Child>,
+    tree: Option<ProcessTree>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<mpsc::Receiver<std::io::Result<String>>>,
+    stdout_done: mpsc::Receiver<()>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
+    stderr_done: mpsc::Receiver<()>,
+    enabled: Arc<AtomicBool>,
+    next_request_id: i64,
+}
+
+impl CodexAppServerSession {
+    fn start(
+        command_factory: CodexCommandFactory,
+        enabled: Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        if !enabled.load(Ordering::Acquire) {
+            return Err("Codex app-server command unavailable by collection policy".into());
+        }
+        let mut command =
+            command_factory().map_err(|_| "Codex app-server command unavailable".to_string())?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let hard_deadline = deadline
+            .checked_add(PROCESS_CLEANUP_GRACE)
+            .unwrap_or(deadline);
+        let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline)
+            .map_err(|_| "Codex app-server transport failed".to_string())?;
+        let setup = (|| {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "Codex app-server stdout unavailable".to_string())?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| "Codex app-server stderr unavailable".to_string())?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Codex app-server stdin unavailable".to_string())?;
+
+            let (stdout_sender, stdout_receiver) = mpsc::sync_channel(CODEX_BROKER_STDOUT_CAPACITY);
+            let (stdout_done_sender, stdout_done_receiver) = mpsc::sync_channel(1);
+            std::thread::Builder::new()
+                .name("juice-codex-stdout".into())
+                .spawn(move || {
+                    let mut reader = BufReader::new(stdout);
+                    loop {
+                        let mut line_bytes = 0;
+                        match read_bounded_line(&mut reader, &mut line_bytes) {
+                            Ok(Some(line)) => {
+                                if stdout_sender.send(Ok(line)).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(error) => {
+                                let _ = stdout_sender.send(Err(error));
+                                break;
+                            }
+                        }
+                    }
+                    let _ = stdout_done_sender.send(());
+                })
+                .map_err(|_| "Codex app-server stdout reader unavailable".to_string())?;
+
+            let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+            let stderr_reader_tail = Arc::clone(&stderr_tail);
+            let (stderr_done_sender, stderr_done_receiver) = mpsc::sync_channel(1);
+            std::thread::Builder::new()
+                .name("juice-codex-stderr".into())
+                .spawn(move || {
+                    drain_bounded_tail(BufReader::new(stderr), &stderr_reader_tail);
+                    let _ = stderr_done_sender.send(());
+                })
+                .map_err(|_| "Codex app-server stderr reader unavailable".to_string())?;
+            Ok::<_, String>((
+                stdin,
+                stdout_receiver,
+                stdout_done_receiver,
+                stderr_tail,
+                stderr_done_receiver,
+            ))
+        })();
+        let (stdin, stdout_receiver, stdout_done_receiver, stderr_tail, stderr_done_receiver) =
+            match setup {
+                Ok(setup) => setup,
+                Err(error) => {
+                    terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
+                    return Err(error);
+                }
+            };
+
+        let mut session = Self {
+            child: Some(child),
+            tree: Some(tree),
+            stdin: Some(stdin),
+            stdout: Some(stdout_receiver),
+            stdout_done: stdout_done_receiver,
+            stderr_tail,
+            stderr_done: stderr_done_receiver,
+            enabled,
+            next_request_id: 2,
+        };
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "agent-juice",
+                    "title": "Juice",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+        session.write_message(&initialize)?;
+        session.wait_for_response(1, deadline)?;
+        session.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }))?;
+        Ok(session)
+    }
+
+    fn request(&mut self, method: &'static str, deadline: Instant) -> Result<String, String> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or_else(|| "Codex app-server request id exhausted".to_string())?;
+        self.write_message(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": {}
+        }))?;
+        self.wait_for_response(request_id, deadline)
+    }
+
+    fn write_message(&mut self, message: &Value) -> Result<(), String> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "Codex app-server stdin unavailable".to_string())?;
+        writeln!(stdin, "{message}")
+            .and_then(|()| stdin.flush())
+            .map_err(|_| "Codex app-server transport failed".to_string())
+    }
+
+    fn wait_for_response(&mut self, response_id: i64, deadline: Instant) -> Result<String, String> {
+        let mut skipped = 0usize;
+        loop {
+            if !self.enabled.load(Ordering::Acquire) {
+                return Err("Codex app-server command unavailable by collection policy".into());
+            }
+            if Instant::now() >= deadline {
+                return Err(self.failure_with_stderr("Codex app-server timed out"));
+            }
+            if self
+                .child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+                .is_some()
+            {
+                return Err(self.failure_with_stderr("Codex app-server transport failed"));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let wait_for = remaining.min(Duration::from_millis(50));
+            let Some(stdout) = self.stdout.as_ref() else {
+                return Err("Codex app-server stdout unavailable".into());
+            };
+            match stdout.recv_timeout(wait_for) {
+                Ok(Ok(line)) => {
+                    let value = parse_codex_app_server_line(&line)?;
+                    if value
+                        .as_ref()
+                        .and_then(|value| value.get("id"))
+                        .and_then(Value::as_i64)
+                        != Some(response_id)
+                    {
+                        skipped = skipped.saturating_add(1);
+                        if skipped > CODEX_BROKER_MAX_SKIPPED_MESSAGES {
+                            return Err("Codex app-server message limit exceeded".into());
+                        }
+                        continue;
+                    }
+                    let value = value.expect("matching response id requires a JSON object");
+                    if let Some(error) = value.get("error") {
+                        if text_requires_login(&error.to_string()) {
+                            return Err("Codex app-server authentication required".into());
+                        }
+                        return Err("Codex app-server returned an error".into());
+                    }
+                    return Ok(line);
+                }
+                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(self.failure_with_stderr("Codex app-server transport failed"));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
+        }
+    }
+
+    fn poll_idle(&mut self) -> Result<(), String> {
+        if self
+            .child
+            .as_mut()
+            .and_then(|child| child.try_wait().ok().flatten())
+            .is_some()
+        {
+            return Err(self.failure_with_stderr("Codex app-server transport failed"));
+        }
+        let Some(stdout) = self.stdout.as_ref() else {
+            return Err("Codex app-server stdout unavailable".into());
+        };
+        for _ in 0..CODEX_BROKER_MAX_SKIPPED_MESSAGES {
+            match stdout.try_recv() {
+                Ok(Ok(line)) => {
+                    parse_codex_app_server_line(&line)?;
+                }
+                Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(self.failure_with_stderr("Codex app-server transport failed"));
+                }
+                Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            }
+        }
+        Err("Codex app-server message limit exceeded".into())
+    }
+
+    fn failure_with_stderr(&self, fallback: &str) -> String {
+        let tail = self
+            .stderr_tail
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if text_requires_login(&String::from_utf8_lossy(&tail)) {
+            "Codex app-server authentication required".into()
+        } else {
+            fallback.into()
+        }
+    }
+}
+
+fn parse_codex_app_server_line(line: &str) -> Result<Option<Value>, String> {
+    let line = line.trim();
+    // Bounded diagnostics are skipped, but malformed JSON-looking frames desync the session.
+    if line.is_empty() || !line.starts_with('{') {
+        return Ok(None);
+    }
+    serde_json::from_str::<Value>(line)
+        .map(Some)
+        .map_err(|_| "Codex app-server returned malformed JSON".to_string())
+}
+
+impl Drop for CodexAppServerSession {
+    fn drop(&mut self) {
+        self.stdin.take();
+        self.stdout.take();
+        let deadline = Instant::now() + PROCESS_CLEANUP_GRACE;
+        if let Some(child) = self.child.as_mut() {
+            terminate_process_tree_until(child, self.tree.as_ref(), deadline);
+        }
+        let _ = self
+            .stdout_done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let _ = self
+            .stderr_done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+}
+
+fn drain_bounded_tail(mut reader: impl Read, tail: &Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0u8; 4096];
+    while let Ok(read) = reader.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        let mut tail = tail.lock().unwrap_or_else(|error| error.into_inner());
+        let incoming = &chunk[..read];
+        if incoming.len() >= MAX_COMMAND_ERROR_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&incoming[incoming.len() - MAX_COMMAND_ERROR_BYTES..]);
+            continue;
+        }
+        let overflow = tail
+            .len()
+            .saturating_add(incoming.len())
+            .saturating_sub(MAX_COMMAND_ERROR_BYTES);
+        if overflow > 0 {
+            let drain = overflow.min(tail.len());
+            tail.drain(..drain);
+        }
+        tail.extend_from_slice(incoming);
+    }
+}
+
+#[cfg(test)]
 fn codex_account_rate_limits_response_with_command(
     command: Command,
     timeout: Duration,
@@ -692,6 +1319,7 @@ fn codex_account_rate_limits_response_with_command(
     )
 }
 
+#[cfg(test)]
 fn codex_account_usage_response_with_command(
     command: Command,
     timeout: Duration,
@@ -704,6 +1332,7 @@ fn codex_account_usage_response_with_command(
     )
 }
 
+#[cfg(test)]
 fn codex_account_method_response_with_command(
     command: Command,
     timeout: Duration,
@@ -1415,8 +2044,8 @@ mod tests {
     use std::{
         io::BufRead,
         sync::{
-            atomic::{AtomicBool, AtomicU64, Ordering},
-            Arc,
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            Arc, Barrier,
         },
     };
 
@@ -1734,6 +2363,122 @@ mod tests {
     }
 
     #[test]
+    fn fake_persistent_app_server_child() {
+        if std::env::var_os("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER").is_none() {
+            return;
+        }
+
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        let mut initialize_count = 0u64;
+        let mut account_responses = 0u64;
+        loop {
+            let mut request = String::new();
+            if reader.read_line(&mut request).unwrap_or_default() == 0 {
+                break;
+            }
+            let value: Value = serde_json::from_str(&request).unwrap();
+            let method = value.get("method").and_then(Value::as_str);
+            let id = value.get("id").and_then(Value::as_i64);
+            match method {
+                Some("initialize") => {
+                    initialize_count += 1;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {"serverInfo": {"name": "fixture"}}
+                        })
+                    );
+                    std::io::stdout().flush().unwrap();
+                }
+                Some("initialized") => {}
+                Some("account/rateLimits/read") | Some("account/usage/read") => {
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_HANG").is_some() {
+                        std::thread::sleep(Duration::from_secs(30));
+                        continue;
+                    }
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_MALFORMED").is_some() {
+                        println!("{{malformed");
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_OVERSIZED").is_some() {
+                        std::io::stdout()
+                            .write_all(&vec![b'x'; MAX_COMMAND_LINE_BYTES + 1])
+                            .unwrap();
+                        println!();
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_AUTH_ERROR").is_some() {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"message": "authentication required"}
+                            })
+                        );
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+                    account_responses += 1;
+                    let result = if method == Some("account/usage/read") {
+                        serde_json::json!({
+                            "summary": {"lifetimeTokens": 30, "peakDailyTokens": 20},
+                            "dailyUsageBuckets": [
+                                {"startDate": "2026-08-25", "tokens": 10},
+                                {"startDate": "2026-08-26", "tokens": 20}
+                            ],
+                            "fixturePid": std::process::id(),
+                            "initializeCount": initialize_count
+                        })
+                    } else {
+                        serde_json::json!({
+                            "rateLimits": {
+                                "primary": {"usedPercent": 12, "windowDurationMins": 300},
+                                "secondary": {"usedPercent": 34, "windowDurationMins": 10080}
+                            },
+                            "fixturePid": std::process::id(),
+                            "initializeCount": initialize_count
+                        })
+                    };
+                    println!(
+                        "{}",
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+                    );
+                    std::io::stdout().flush().unwrap();
+                    if account_responses == 1
+                        && std::env::var_os("AGENT_JUICE_FAKE_BROKER_EXIT_AFTER_ONE").is_some()
+                    {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn fake_persistent_broker(
+        spawns: Arc<AtomicUsize>,
+        configure: impl Fn(&mut Command) + Send + Sync + 'static,
+        min_backoff: Duration,
+    ) -> CodexAppServerBroker {
+        let configure = Arc::new(configure);
+        let command_factory: CodexCommandFactory = Arc::new(move || {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            let mut command = test_process("collector::tests::fake_persistent_app_server_child");
+            command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+            configure(&mut command);
+            Ok(command)
+        });
+        CodexAppServerBroker::start(true, command_factory, min_backoff, Duration::from_secs(1))
+            .unwrap()
+    }
+
+    #[test]
     fn codex_app_server_keeps_stdin_open_until_the_response_arrives() {
         let mut command = test_process("collector::tests::fake_app_server_child");
         command.env("AGENT_JUICE_FAKE_APP_SERVER", "1");
@@ -1765,34 +2510,253 @@ mod tests {
     }
 
     #[test]
-    fn disabled_codex_app_server_policy_does_not_resolve_or_spawn_a_runtime() {
-        let command_factory_called = AtomicBool::new(false);
-        let error = codex_app_server_command_with_policy(false, || {
-            command_factory_called.store(true, Ordering::SeqCst);
-            Ok(test_process("collector::tests::fake_quick_child"))
-        })
-        .unwrap_err();
-
-        assert!(!command_factory_called.load(Ordering::SeqCst));
-        assert!(format!("{error:#}")
-            .to_ascii_lowercase()
-            .contains("command unavailable"));
+    fn persistent_codex_broker_reuses_one_initialized_child_for_one_hundred_requests() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker =
+            fake_persistent_broker(Arc::clone(&spawns), |_| {}, Duration::from_millis(100));
+        let mut fixture_pid = None;
+        for index in 0..100 {
+            let method = if index % 2 == 0 {
+                "account/rateLimits/read"
+            } else {
+                "account/usage/read"
+            };
+            let raw = broker.request(method, Duration::from_secs(2)).unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            let result = value.get("result").unwrap();
+            assert_eq!(
+                result.get("initializeCount").and_then(Value::as_u64),
+                Some(1)
+            );
+            let pid = result.get("fixturePid").and_then(Value::as_u64);
+            assert!(pid.is_some());
+            assert!(fixture_pid.is_none() || fixture_pid == pid);
+            fixture_pid = pid;
+        }
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_codex_rate_limit_and_activity_collectors_fail_closed() {
-        assert!(!codex_app_server_polling_enabled());
-
-        for result in [
-            codex_account_rate_limits_response(Duration::from_secs(1)),
-            codex_account_usage_response(Duration::from_secs(1)),
-        ] {
-            let error = result.unwrap_err();
-            assert!(format!("{error:#}")
-                .to_ascii_lowercase()
-                .contains("command unavailable"));
+    fn concurrent_codex_requests_share_one_child_and_receive_distinct_responses() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = Arc::new(fake_persistent_broker(
+            Arc::clone(&spawns),
+            |_| {},
+            Duration::from_millis(100),
+        ));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let broker = Arc::clone(&broker);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let method = if index % 2 == 0 {
+                    "account/rateLimits/read"
+                } else {
+                    "account/usage/read"
+                };
+                broker.request(method, Duration::from_secs(2)).unwrap()
+            }));
         }
+        let mut ids = std::collections::HashSet::new();
+        let mut pids = std::collections::HashSet::new();
+        for worker in workers {
+            let value: Value = serde_json::from_str(&worker.join().unwrap()).unwrap();
+            ids.insert(value.get("id").and_then(Value::as_i64).unwrap());
+            pids.insert(
+                value
+                    .pointer("/result/fixturePid")
+                    .and_then(Value::as_u64)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(ids.len(), 8);
+        assert_eq!(pids.len(), 1);
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn disabled_codex_broker_blocks_admission_without_spawning() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker =
+            fake_persistent_broker(Arc::clone(&spawns), |_| {}, Duration::from_millis(100));
+        broker.set_enabled(false);
+
+        let error = broker
+            .request("account/rateLimits/read", Duration::from_secs(1))
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("collection policy"));
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn failed_codex_session_enters_backoff_without_respawn_churn() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker(
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_EXIT_AFTER_ONE", "1");
+            },
+            Duration::from_secs(1),
+        );
+        broker
+            .request("account/rateLimits/read", Duration::from_secs(2))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = broker.request("account/rateLimits/read", Duration::from_millis(300));
+        let error = broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("retry backoff"));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn timed_out_codex_session_is_killed_and_backoff_blocks_the_next_spawn() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker(
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_HANG", "1");
+            },
+            Duration::from_secs(1),
+        );
+
+        let timeout = broker
+            .request("account/rateLimits/read", Duration::from_millis(150))
+            .unwrap_err();
+        let backoff = broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .unwrap_err();
+
+        assert!(format!("{timeout:#}").contains("timed out"));
+        assert!(format!("{backoff:#}").contains("retry backoff"));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn malformed_and_oversized_codex_frames_reset_the_session_and_enter_backoff() {
+        for variable in [
+            "AGENT_JUICE_FAKE_BROKER_MALFORMED",
+            "AGENT_JUICE_FAKE_BROKER_OVERSIZED",
+        ] {
+            let spawns = Arc::new(AtomicUsize::new(0));
+            let broker = fake_persistent_broker(
+                Arc::clone(&spawns),
+                move |command| {
+                    command.env(variable, "1");
+                },
+                Duration::from_secs(1),
+            );
+
+            let first = broker
+                .request("account/rateLimits/read", Duration::from_secs(2))
+                .unwrap_err();
+            let second = broker
+                .request("account/rateLimits/read", Duration::from_millis(300))
+                .unwrap_err();
+
+            assert!(
+                format!("{first:#}").contains("malformed JSON")
+                    || format!("{first:#}").contains("transport failed")
+            );
+            assert!(format!("{second:#}").contains("retry backoff"));
+            assert_eq!(spawns.load(Ordering::SeqCst), 1);
+            broker.shutdown_for_test();
+        }
+    }
+
+    #[test]
+    fn disabling_an_active_codex_broker_closes_the_session_before_reenable() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker =
+            fake_persistent_broker(Arc::clone(&spawns), |_| {}, Duration::from_millis(100));
+        let first: Value = serde_json::from_str(
+            &broker
+                .request("account/rateLimits/read", Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+        broker.set_enabled(false);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .is_err());
+        broker.set_enabled(true);
+        let second: Value = serde_json::from_str(
+            &broker
+                .request("account/rateLimits/read", Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(
+            first.pointer("/result/fixturePid").and_then(Value::as_u64),
+            second.pointer("/result/fixturePid").and_then(Value::as_u64)
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn codex_broker_backoff_preserves_authentication_error_classification() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker(
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_AUTH_ERROR", "1");
+            },
+            Duration::from_secs(1),
+        );
+
+        let first = broker
+            .request("account/rateLimits/read", Duration::from_secs(2))
+            .unwrap_err();
+        let second = broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .unwrap_err();
+
+        assert!(error_requires_login(&first));
+        assert!(error_requires_login(&second));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn codex_broker_backoff_preserves_missing_runtime_classification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let command_factory: CodexCommandFactory = Arc::new(move || {
+            factory_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("fixture runtime missing")
+        });
+        let broker = CodexAppServerBroker::start(
+            true,
+            command_factory,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let first = broker
+            .request("account/rateLimits/read", Duration::from_secs(1))
+            .unwrap_err();
+        let second = broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .unwrap_err();
+
+        assert!(format!("{first:#}").contains("command unavailable"));
+        assert!(format!("{second:#}").contains("command unavailable"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
     }
 
     #[cfg(windows)]
@@ -2109,19 +3073,34 @@ mod tests {
 
     #[test]
     #[ignore = "requires a locally installed and logged-in Codex Desktop or CLI"]
-    fn live_codex_app_server_round_trip() {
-        let response = codex_account_rate_limits_response(Duration::from_secs(5)).unwrap();
-        let value: Value = serde_json::from_str(&response).unwrap();
+    fn live_codex_persistent_app_server_reuses_one_connection_for_rate_and_activity() {
+        set_codex_app_server_enabled(true).unwrap();
+        let first = codex_account_rate_limits_response(Duration::from_secs(5)).unwrap();
+        let usage = codex_account_usage_response(Duration::from_secs(5)).unwrap();
+        let second = codex_account_rate_limits_response(Duration::from_secs(5)).unwrap();
+        let first_value: Value = serde_json::from_str(&first).unwrap();
+        let usage_value: Value = serde_json::from_str(&usage).unwrap();
+        let second_value: Value = serde_json::from_str(&second).unwrap();
         let status = crate::adapters::codex::parse_account_rate_limits_response(
-            &response,
+            &first,
             "LIVE",
             "2026-07-13T00:00:00Z",
         )
         .unwrap();
 
-        assert_eq!(value.get("id").and_then(Value::as_i64), Some(2));
-        assert!(value.pointer("/result/rateLimits").is_some());
+        let first_id = first_value.get("id").and_then(Value::as_i64).unwrap();
+        assert_eq!(
+            usage_value.get("id").and_then(Value::as_i64),
+            Some(first_id + 1)
+        );
+        assert_eq!(
+            second_value.get("id").and_then(Value::as_i64),
+            Some(first_id + 2)
+        );
+        assert!(first_value.pointer("/result/rateLimits").is_some());
+        assert!(usage_value.pointer("/result/dailyUsageBuckets").is_some());
         assert!(status.primary.is_some() || status.secondary.is_some());
+        begin_codex_app_server_shutdown();
     }
 
     #[cfg(windows)]
