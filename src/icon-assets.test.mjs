@@ -186,12 +186,16 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /Grok defaults to \*\*off\*\*/);
   assert.match(readme, /calls only `initialize` followed by `_x\.ai\/billing`/);
   assert.match(readme, /weekly ACP period appears as one `Weekly` limit and a monthly period as one `Monthly` limit/);
-  assert.match(readme, /Cursor Agent 사용량 자동 수집/);
+  assert.match(readme, /Cursor 사용량과 토큰 활동 자동 수집/);
   assert.match(readme, /Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않도록 기본값이 \*\*꺼짐\*\*/);
   assert.match(readme, /`Auto`는 \*\*Cursor Models\*\*, `API`는 \*\*Other Models\*\*/);
-  assert.match(readme, /Automatic Cursor Agent usage collection/);
+  assert.match(readme, /Automatic Cursor usage and token activity collection/);
   assert.match(readme, /Cursor defaults to \*\*off\*\*/);
   assert.match(readme, /`\/usage` Auto maps to \*\*Cursor Models\*\* and API maps to \*\*Other Models\*\*/);
+  assert.match(readme, /Cursor GUI의 로컬 로그인으로 같은 계정 usage를 자동 조회합니다/);
+  assert.match(readme, /Cursor 계정 사용량/);
+  assert.match(readme, /local Cursor GUI login for the same account usage/);
+  assert.match(readme, /Cursor account usage/);
   assert.match(readme, /4가지 바 모드/);
   assert.match(readme, /four bar modes/);
   assert.match(readme, /원·바 표현 스타일/);
@@ -218,7 +222,7 @@ test("README uses current Tauri panel and taskbar capture assets", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
   const assets = new Map([
     ["juice-v014-panel-overview.png", [1240, 1696]],
-    ["juice-v014-panel-activity.png", [1240, 726]],
+    ["juice-v014-panel-activity.png", [1240, 674]],
     ["juice-v014-panel-appearance.png", [1240, 1668]],
     ["juice-v014-panel-taskbar.png", [1240, 1412]],
     ["juice-v014-panel-collection.png", [1240, 1416]],
@@ -279,7 +283,7 @@ tool_colors = [
     [(215, 154, 50), (211, 107, 134)],
     [(47, 172, 125), (77, 134, 214)],
     [(217, 87, 139), (138, 111, 209)],
-    [(59, 130, 246), (6, 182, 212)],
+    [(114, 113, 109), (8, 145, 178)],
 ]
 rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
 columns = [(224, 990), (990, 1756)]
@@ -332,7 +336,7 @@ tool_colors = [
     [(215, 154, 50), (211, 107, 134)],
     [(47, 172, 125), (77, 134, 214)],
     [(217, 87, 139), (138, 111, 209)],
-    [(59, 130, 246), (6, 182, 212)],
+    [(114, 113, 109), (8, 145, 178)],
 ]
 rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
 columns = [(224, 990), (990, 1756)]

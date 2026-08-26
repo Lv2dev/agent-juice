@@ -119,21 +119,60 @@ pub fn parse_usage_status(
     captured_at: &str,
 ) -> anyhow::Result<AgentStatus> {
     let snapshot = parse_usage_output(raw)?;
-    Ok(AgentStatus {
+    Ok(status_from_values(
+        pc_id,
+        captured_at,
+        "cursor-agent-usage",
+        snapshot.cursor_models_used_percent,
+        snapshot.other_models_used_percent,
+        snapshot.reset_date,
+    ))
+}
+
+pub fn dashboard_usage_status(
+    pc_id: &str,
+    captured_at: &str,
+    cursor_models_used_percent: f32,
+    other_models_used_percent: f32,
+    reset_at: String,
+) -> anyhow::Result<AgentStatus> {
+    let cursor_models_used_percent = normalized_percent(cursor_models_used_percent)
+        .ok_or_else(|| anyhow::anyhow!("invalid Cursor Models usage"))?;
+    let other_models_used_percent = normalized_percent(other_models_used_percent)
+        .ok_or_else(|| anyhow::anyhow!("invalid Cursor Other Models usage"))?;
+    Ok(status_from_values(
+        pc_id,
+        captured_at,
+        "cursor-gui-usage",
+        cursor_models_used_percent,
+        other_models_used_percent,
+        Some(reset_at),
+    ))
+}
+
+fn status_from_values(
+    pc_id: &str,
+    captured_at: &str,
+    session_id: &str,
+    cursor_models_used_percent: f32,
+    other_models_used_percent: f32,
+    reset_at: Option<String>,
+) -> AgentStatus {
+    AgentStatus {
         schema_version: SCHEMA_VERSION.into(),
         pc_id: pc_id.into(),
         tool: Tool::Cursor,
-        session_id: "cursor-agent-usage".into(),
+        session_id: session_id.into(),
         captured_at: captured_at.into(),
         primary: Some(AccountLimit {
             label: "cursor_models".into(),
-            used_percent: Some(snapshot.cursor_models_used_percent),
-            resets_at: snapshot.reset_date.clone(),
+            used_percent: Some(cursor_models_used_percent),
+            resets_at: reset_at.clone(),
         }),
         secondary: Some(AccountLimit {
             label: "other_models".into(),
-            used_percent: Some(snapshot.other_models_used_percent),
-            resets_at: snapshot.reset_date,
+            used_percent: Some(other_models_used_percent),
+            resets_at: reset_at,
         }),
         session: SessionInfo {
             active: true,
@@ -141,7 +180,7 @@ pub fn parse_usage_status(
         },
         cost_estimate_usd: None,
         approx: false,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -205,5 +244,23 @@ mod tests {
         ] {
             assert!(parse_usage_output(output).is_err());
         }
+    }
+
+    #[test]
+    fn builds_exact_dashboard_status_with_full_reset_timestamp() {
+        let status = dashboard_usage_status(
+            "LOCAL",
+            "2026-08-25T00:00:00Z",
+            12.5,
+            3.0,
+            "2026-09-21T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert_eq!(status.session_id, "cursor-gui-usage");
+        assert_eq!(status.primary.unwrap().used_percent, Some(12.5));
+        assert_eq!(
+            status.secondary.unwrap().resets_at.as_deref(),
+            Some("2026-09-21T00:00:00Z")
+        );
     }
 }

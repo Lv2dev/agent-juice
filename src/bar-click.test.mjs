@@ -1152,6 +1152,65 @@ test("bar render can show weekly limits before 5h without changing semantic limi
   delete global.document;
 });
 
+test("bar render promotes a weekly-only Codex limit into the single visible indicator", async () => {
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tools = { claude: toolStub(), codex: toolStub() };
+
+  global.window = {
+    location: { search: "?tool=codex" },
+    __TAURI__: {
+      core: {
+        async invoke(command) {
+          if (command === "get_settings") {
+            return {
+              show_claude: false,
+              show_codex: true,
+              bar_mode: "quad",
+              indicator_style: "bar",
+              limit_order: "primary_first",
+              language: "ko",
+            };
+          }
+          if (command === "get_status") {
+            return [{
+              tool: "codex",
+              captured_at: "2026-08-26T00:00:00Z",
+              primary: null,
+              secondary: { used_percent: 2, resets_at: null },
+              session: { active: true },
+              approx: false,
+            }];
+          }
+          return null;
+        },
+      },
+      event: { async listen() {} },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="claude"]') return tools.claude;
+      if (selector === '[data-tool="codex"]') return tools.codex;
+      return null;
+    },
+  };
+
+  await import(`./bar.js?test=${Date.now()}-weekly-only`);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(tools.codex.dataset.limitCount, "1");
+  assert.equal(tools.codex.textContentFor(".primary-text"), "주간 98%");
+  assert.equal(tools.codex.textContentFor(".secondary-text"), "");
+  assert.equal(tools.codex.textContentFor(".quad-primary-number"), "98");
+  assert.equal(tools.codex.style.getPropertyValue("--primary-color"), "#4d86d6");
+  assert.equal(tools.codex.querySelector(".secondary-limit").hidden, true);
+  assert.equal(tools.codex.getAttribute("aria-label"), "Codex, 주간 98%");
+  delete global.window;
+  delete global.document;
+});
+
 test("bar click does not open or focus the panel window", async () => {
   const listeners = {};
   const calls = [];

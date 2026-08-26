@@ -1,7 +1,10 @@
 pub mod activity;
 pub mod adapters;
+pub mod codex_activity;
 pub mod collector;
 pub mod config;
+pub mod cursor_activity;
+pub mod cursor_dashboard;
 pub mod cursor_pty;
 pub mod model;
 pub mod paths;
@@ -58,9 +61,14 @@ const GROK_BILLING_CACHE_MIN_SECS: i64 = 60;
 const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
 const CURSOR_USAGE_CACHE_MIN_SECS: i64 = 5 * 60;
 const CURSOR_USAGE_TIMEOUT_SECS: u64 = 20;
+const CURSOR_GUI_RESERVE_SECS: u64 = 5;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
 const ACTIVITY_BACKFILL_MAX_PASSES: usize = 16;
 const ACTIVITY_BACKFILL_MAX_SECS: u64 = 30;
+const CODEX_ACTIVITY_TIMEOUT_SECS: u64 = 5;
+const CURSOR_ACTIVITY_MAX_PASSES: usize = 4;
+const CURSOR_ACTIVITY_PASS_SECS: u64 = 8;
+const CURSOR_ACTIVITY_MAX_SECS: u64 = 30;
 const CLAUDE_FALLBACK_RESERVE_SECS: u64 = 2;
 const CLAUDE_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
 const GROK_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
@@ -271,6 +279,21 @@ struct CachedStatusAttempt {
     retry_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
+enum CursorStatusSource {
+    Agent,
+    Dashboard(cursor_dashboard::AccountScope),
+}
+
+#[derive(Clone)]
+struct CursorCachedStatusAttempt {
+    attempted_at: DateTime<Utc>,
+    last_good: Option<AgentStatus>,
+    source: Option<CursorStatusSource>,
+    error: Option<CollectionErrorKind>,
+    retry_at: DateTime<Utc>,
+}
+
 #[derive(Default)]
 struct CollectionFlight {
     in_flight: bool,
@@ -409,7 +432,7 @@ static CLAUDE_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static GROK_BILLING_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
-static CURSOR_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
+static CURSOR_USAGE_CACHE: Lazy<Mutex<Option<CursorCachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static CODEX_ROLLOUT_CACHE: Lazy<Mutex<collector::RolloutCache>> =
     Lazy::new(|| Mutex::new(collector::RolloutCache::default()));
@@ -422,6 +445,10 @@ static TASKBAR_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static CURSOR_ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static CURSOR_ACTIVITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static LAST_LOCAL_ACTIVITY: Lazy<Mutex<Option<activity::ActivitySnapshot>>> =
+    Lazy::new(|| Mutex::new(None));
 
 struct ForceRefreshGuard;
 
@@ -451,6 +478,24 @@ fn try_begin_activity_refresh() -> Option<ActivityRefreshGuard> {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .ok()
         .map(|_| ActivityRefreshGuard)
+}
+
+struct CursorActivityRefreshGuard;
+
+impl Drop for CursorActivityRefreshGuard {
+    fn drop(&mut self) {
+        CURSOR_ACTIVITY_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+fn try_begin_cursor_activity_refresh() -> Option<(CursorActivityRefreshGuard, u64)> {
+    CURSOR_ACTIVITY_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| {
+            let generation = CURSOR_ACTIVITY_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+            (CursorActivityRefreshGuard, generation)
+        })
 }
 
 fn mark_taskbar_settings_changed() -> u64 {
@@ -675,20 +720,50 @@ async fn collect_representatives_off_thread(settings: Settings, force: bool) -> 
 
 async fn collect_activity_off_thread(
     settings: Settings,
+    force_codex: bool,
 ) -> Result<activity::ActivitySnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        activity::refresh(
-            settings.show_claude,
-            settings.show_codex,
-            settings.show_grok,
-        )
+        let (local, codex) = std::thread::scope(|scope| {
+            let codex_worker = settings.show_codex.then(|| {
+                scope.spawn(|| {
+                    codex_activity::collect(
+                        force_codex,
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs(CODEX_ACTIVITY_TIMEOUT_SECS),
+                    )
+                })
+            });
+            let local = activity::refresh(settings.show_claude, settings.show_grok);
+            let codex = codex_worker.and_then(|worker| worker.join().ok());
+            (local, codex)
+        });
+        let local = local?;
+        let local = activity::merge_codex_activity(local, codex.as_ref(), settings.show_codex);
+        *LAST_LOCAL_ACTIVITY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(local.clone());
+        let cursor = if settings.show_cursor {
+            cursor_activity::cached_view(
+                settings.activity_weeks,
+                Utc::now(),
+                std::time::Instant::now() + std::time::Duration::from_millis(500),
+            )
+            .ok()
+        } else {
+            None
+        };
+        Ok(activity::merge_cursor_activity(
+            local,
+            cursor.as_ref(),
+            settings.show_cursor,
+        ))
     })
     .await
     .map_err(|err| format!("activity collection task failed: {err}"))?
-    .map_err(|err| err.to_string())
+    .map_err(|err: anyhow::Error| err.to_string())
 }
 
-fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings) {
+fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings, force_codex: bool) {
     let Some(guard) = try_begin_activity_refresh() else {
         return;
     };
@@ -696,10 +771,12 @@ fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings) {
         let _guard = guard;
         let started = std::time::Instant::now();
         for pass in 0..ACTIVITY_BACKFILL_MAX_PASSES {
-            match collect_activity_off_thread(settings.clone()).await {
+            match collect_activity_off_thread(settings.clone(), force_codex && pass == 0).await {
                 Ok(snapshot) => {
-                    let backfill_pending = snapshot.backfill_pending;
-                    let _ = app.emit("activity-updated", snapshot);
+                    let backfill_pending = snapshot.local_backfill_pending;
+                    if !CURSOR_ACTIVITY_REFRESH_IN_FLIGHT.load(Ordering::Acquire) {
+                        let _ = app.emit("activity-updated", snapshot);
+                    }
                     if !backfill_pending {
                         break;
                     }
@@ -715,6 +792,113 @@ fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        }
+    });
+}
+
+fn spawn_cursor_activity_refresh(app: tauri::AppHandle, settings: Settings, force: bool) {
+    if !settings.show_cursor {
+        return;
+    }
+    let Some((guard, generation)) = try_begin_cursor_activity_refresh() else {
+        return;
+    };
+    let settings_generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
+    tauri::async_runtime::spawn(async move {
+        let _guard = guard;
+        let weeks = settings.activity_weeks;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let mut force_current = force;
+            let mut latest = None;
+            for _ in 0..CURSOR_ACTIVITY_MAX_PASSES {
+                if started.elapsed() >= std::time::Duration::from_secs(CURSOR_ACTIVITY_MAX_SECS) {
+                    break;
+                }
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(CURSOR_ACTIVITY_PASS_SECS);
+                let step = cursor_activity::refresh_step(
+                    weeks,
+                    Utc::now(),
+                    force_current,
+                    deadline,
+                    || {
+                        TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == settings_generation
+                            && CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) == generation
+                    },
+                )?;
+                force_current = false;
+                let complete = step.kind == cursor_activity::RefreshStepKind::Complete;
+                latest = Some(step.view);
+                if complete {
+                    break;
+                }
+            }
+            Ok::<_, cursor_activity::ActivityError>(latest)
+        })
+        .await;
+        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != settings_generation
+            || CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) != generation
+        {
+            return;
+        }
+        let current_settings = match Settings::try_load() {
+            Ok(settings) if settings.show_cursor => settings,
+            _ => return,
+        };
+        let local = LAST_LOCAL_ACTIVITY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(local) = local else {
+            return;
+        };
+        let cursor = match result {
+            Ok(Ok(Some(view))) => Some(view),
+            Ok(Ok(None)) => cursor_activity::cached_view(
+                current_settings.activity_weeks,
+                Utc::now(),
+                std::time::Instant::now() + std::time::Duration::from_millis(500),
+            )
+            .ok(),
+            Ok(Err(error)) => {
+                eprintln!("[activity] Cursor refresh failed: {error}");
+                if matches!(
+                    error.kind,
+                    cursor_dashboard::DashboardErrorKind::Deadline
+                        | cursor_dashboard::DashboardErrorKind::Transport
+                ) {
+                    cursor_activity::cached_view(
+                        current_settings.activity_weeks,
+                        Utc::now(),
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    )
+                    .ok()
+                    .map(|mut view| {
+                        view.partial = true;
+                        view
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(error) => {
+                eprintln!("[activity] Cursor task failed: {error}");
+                None
+            }
+        };
+        let mut snapshot =
+            activity::merge_cursor_activity(local, cursor.as_ref(), current_settings.show_cursor);
+        if cursor.is_none() {
+            snapshot.cursor_partial = true;
+            snapshot.cursor_backfill_pending = false;
+            snapshot.partial = snapshot.local_partial || snapshot.cursor_partial;
+            snapshot.backfill_pending = snapshot.local_backfill_pending;
+        }
+        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == settings_generation
+            && CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) == generation
+        {
+            let _ = app.emit("activity-updated", snapshot);
         }
     });
 }
@@ -1338,12 +1522,35 @@ fn cached_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> Colle
     }
 }
 
+fn cursor_collection_health() -> CollectionHealth {
+    let cache = CURSOR_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
+        Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
+        Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(
+            CollectionErrorKind::Deadline
+            | CollectionErrorKind::Transport
+            | CollectionErrorKind::Parse,
+        ) => CollectionHealth::TransientError,
+        None if cache
+            .as_ref()
+            .and_then(|attempt| attempt.last_good.as_ref())
+            .is_some() =>
+        {
+            CollectionHealth::Ready
+        }
+        None => CollectionHealth::Unavailable,
+    }
+}
+
 fn collection_health_snapshot() -> CollectionHealthSnapshot {
     CollectionHealthSnapshot {
         claude: cached_collection_health(&CLAUDE_USAGE_CACHE),
         codex: cached_collection_health(&CODEX_ACCOUNT_CACHE),
         grok: cached_collection_health(&GROK_BILLING_CACHE),
-        cursor: cached_collection_health(&CURSOR_USAGE_CACHE),
+        cursor: cursor_collection_health(),
     }
 }
 
@@ -1519,35 +1726,195 @@ fn collect_cursor_usage_status(
     force: bool,
     deadline: std::time::Instant,
 ) -> Option<AgentStatus> {
-    let mut status = cached_status_attempt(
-        &CURSOR_USAGE_CACHE,
-        now,
-        CURSOR_USAGE_CACHE_MIN_SECS,
-        force,
-        || {
-            let _timeout = remaining_refresh_budget(
-                deadline,
-                std::time::Duration::from_secs(CURSOR_USAGE_TIMEOUT_SECS),
-            )?;
-            let workspace = paths::data_dir()
-                .ok_or(CollectionErrorKind::Unavailable)?
-                .join("cursor-usage-workspace");
-            let raw =
-                cursor_pty::capture_cursor_usage_until(&workspace, deadline).map_err(|error| {
-                    if std::time::Instant::now() >= deadline
-                        || format!("{error:#}")
-                            .to_ascii_lowercase()
-                            .contains("timed out")
-                    {
-                        CollectionErrorKind::Deadline
-                    } else {
-                        classify_collection_error(&error)
+    if !force {
+        let cached = CURSOR_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        if let Some(cached) = cached.as_ref() {
+            let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
+            let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
+            if now >= cached.attempted_at && (retry_backoff_active || success_cache_fresh) {
+                cached.last_good.as_ref()?;
+                let scope_matches = match cached.source {
+                    Some(CursorStatusSource::Dashboard(scope)) => {
+                        cursor_dashboard::read_credentials(
+                            std::time::Instant::now() + std::time::Duration::from_millis(300),
+                        )
+                        .is_ok_and(|credentials| credentials.scope == scope)
                     }
-                })?;
-            adapters::cursor::parse_usage_status(&raw, pc_id, &now.to_rfc3339())
-                .map_err(|_| CollectionErrorKind::Parse)
-        },
-    )?;
+                    Some(CursorStatusSource::Agent) => true,
+                    None => false,
+                };
+                if scope_matches {
+                    let mut status = cached.last_good.clone()?;
+                    derive_active(&mut status, cursor_stale_after_secs(settings), now);
+                    return Some(status);
+                }
+                *CURSOR_USAGE_CACHE
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = None;
+            }
+        }
+    }
+
+    let previous = CURSOR_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let captured_at = now.to_rfc3339();
+    let agent_deadline = deadline
+        .checked_sub(std::time::Duration::from_secs(CURSOR_GUI_RESERVE_SECS))
+        .unwrap_or_else(std::time::Instant::now);
+    let workspace = paths::data_dir().map(|path| path.join("cursor-usage-workspace"));
+    let agent_outcome = if std::time::Instant::now() >= agent_deadline {
+        Err(CollectionErrorKind::Deadline)
+    } else if let Some(workspace) = workspace {
+        cursor_pty::capture_cursor_usage_until(&workspace, agent_deadline)
+            .map_err(|error| {
+                if std::time::Instant::now() >= agent_deadline
+                    || format!("{error:#}")
+                        .to_ascii_lowercase()
+                        .contains("timed out")
+                {
+                    CollectionErrorKind::Deadline
+                } else {
+                    classify_collection_error(&error)
+                }
+            })
+            .and_then(|raw| {
+                adapters::cursor::parse_usage_status(&raw, pc_id, &captured_at)
+                    .map_err(|_| CollectionErrorKind::Parse)
+            })
+    } else {
+        Err(CollectionErrorKind::Unavailable)
+    };
+
+    let outcome = match agent_outcome {
+        Ok(status) => Ok((status, CursorStatusSource::Agent)),
+        Err(agent_error) => {
+            let credentials = cursor_dashboard::read_credentials(deadline)
+                .map_err(|error| dashboard_collection_error(error.kind));
+            match credentials {
+                Ok(credentials) => {
+                    let scope = credentials.scope;
+                    match cursor_dashboard::current_period_usage(&credentials, deadline) {
+                        Ok(usage) => {
+                            let reset_at =
+                                DateTime::<Utc>::from_timestamp_millis(usage.billing_cycle_end_ms)
+                                    .ok_or(CollectionErrorKind::Parse)
+                                    .and_then(|reset| {
+                                        adapters::cursor::dashboard_usage_status(
+                                            pc_id,
+                                            &captured_at,
+                                            usage.cursor_models_used_percent,
+                                            usage.other_models_used_percent,
+                                            reset.to_rfc3339(),
+                                        )
+                                        .map_err(|_| CollectionErrorKind::Parse)
+                                    });
+                            reset_at.map(|status| (status, CursorStatusSource::Dashboard(scope)))
+                        }
+                        Err(error) => {
+                            let dashboard_error = dashboard_collection_error(error.kind);
+                            let combined = combine_cursor_collection_errors(
+                                agent_error,
+                                dashboard_error.clone(),
+                            );
+                            let same_scope_last_good = matches!(
+                                previous.as_ref().and_then(|cached| cached.source.as_ref()),
+                                Some(CursorStatusSource::Dashboard(previous_scope))
+                                    if *previous_scope == scope
+                            ) && matches!(
+                                dashboard_error,
+                                CollectionErrorKind::Deadline | CollectionErrorKind::Transport
+                            );
+                            if same_scope_last_good {
+                                if let Some(status) = previous
+                                    .as_ref()
+                                    .and_then(|cached| cached.last_good.clone())
+                                {
+                                    return cache_cursor_status(
+                                        now,
+                                        Some(status),
+                                        Some(CursorStatusSource::Dashboard(scope)),
+                                        Some(combined),
+                                        settings,
+                                    );
+                                }
+                            }
+                            Err(combined)
+                        }
+                    }
+                }
+                Err(dashboard_error) => Err(combine_cursor_collection_errors(
+                    agent_error,
+                    dashboard_error,
+                )),
+            }
+        }
+    };
+
+    let (last_good, source, error) = match outcome {
+        Ok((status, source)) => (Some(status), Some(source), None),
+        Err(error) => (None, None, Some(error)),
+    };
+    cache_cursor_status(now, last_good, source, error, settings)
+}
+
+fn dashboard_collection_error(kind: cursor_dashboard::DashboardErrorKind) -> CollectionErrorKind {
+    match kind {
+        cursor_dashboard::DashboardErrorKind::Deadline => CollectionErrorKind::Deadline,
+        cursor_dashboard::DashboardErrorKind::Transport => CollectionErrorKind::Transport,
+        cursor_dashboard::DashboardErrorKind::Parse
+        | cursor_dashboard::DashboardErrorKind::Oversized => CollectionErrorKind::Parse,
+        cursor_dashboard::DashboardErrorKind::LoginRequired => CollectionErrorKind::LoginRequired,
+        cursor_dashboard::DashboardErrorKind::Unavailable => CollectionErrorKind::Unavailable,
+        cursor_dashboard::DashboardErrorKind::ScopeChanged => CollectionErrorKind::Transport,
+    }
+}
+
+fn combine_cursor_collection_errors(
+    agent: CollectionErrorKind,
+    dashboard: CollectionErrorKind,
+) -> CollectionErrorKind {
+    if matches!(dashboard, CollectionErrorKind::LoginRequired) {
+        return CollectionErrorKind::LoginRequired;
+    }
+    if matches!(
+        agent,
+        CollectionErrorKind::Deadline | CollectionErrorKind::Transport | CollectionErrorKind::Parse
+    ) || matches!(
+        dashboard,
+        CollectionErrorKind::Deadline | CollectionErrorKind::Transport | CollectionErrorKind::Parse
+    ) {
+        return CollectionErrorKind::Transport;
+    }
+    if matches!(agent, CollectionErrorKind::LoginRequired) {
+        CollectionErrorKind::LoginRequired
+    } else {
+        CollectionErrorKind::Unavailable
+    }
+}
+
+fn cache_cursor_status(
+    now: DateTime<Utc>,
+    last_good: Option<AgentStatus>,
+    source: Option<CursorStatusSource>,
+    error: Option<CollectionErrorKind>,
+    settings: &Settings,
+) -> Option<AgentStatus> {
+    let retry_at = now + chrono::Duration::seconds(CURSOR_USAGE_CACHE_MIN_SECS);
+    *CURSOR_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(CursorCachedStatusAttempt {
+        attempted_at: now,
+        last_good: last_good.clone(),
+        source,
+        error,
+        retry_at,
+    });
+    let mut status = last_good?;
     derive_active(&mut status, cursor_stale_after_secs(settings), now);
     Some(status)
 }
@@ -1763,11 +2130,14 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
                     let Ok(settings) = Settings::try_load() else {
                         return;
                     };
+                    let activity_settings = settings.clone();
                     let (statuses, collected) =
                         collect_force_refresh_off_thread(settings, Some(app.clone())).await;
                     if collected {
                         emit_collection_snapshot(&app, &statuses);
                     }
+                    spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
+                    spawn_cursor_activity_refresh(app, activity_settings, true);
                 });
             }
             id if id == tray_pause_bar_menu_id() => {
@@ -3488,10 +3858,11 @@ async fn get_activity(
     ensure_panel_command(window.label())?;
     drop(window);
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
-    let snapshot = collect_activity_off_thread(settings.clone()).await?;
-    if snapshot.backfill_pending {
-        spawn_activity_refresh(app, settings);
+    let snapshot = collect_activity_off_thread(settings.clone(), false).await?;
+    if snapshot.local_backfill_pending {
+        spawn_activity_refresh(app.clone(), settings.clone(), false);
     }
+    spawn_cursor_activity_refresh(app, settings, false);
     Ok(snapshot)
 }
 
@@ -3507,7 +3878,8 @@ async fn refresh_status(
     if collected {
         emit_collection_snapshot(&app, &statuses);
     }
-    spawn_activity_refresh(app, activity_settings);
+    spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
+    spawn_cursor_activity_refresh(app, activity_settings, true);
     Ok(statuses)
 }
 
@@ -4054,6 +4426,9 @@ async fn save_settings(
     let codex_enabled_now = !baseline.show_codex && requested.show_codex;
     let grok_enabled_now = !baseline.show_grok && requested.show_grok;
     let cursor_enabled_now = !baseline.show_cursor && requested.show_cursor;
+    let cursor_activity_range_changed = baseline.show_cursor
+        && requested.show_cursor
+        && baseline.activity_weeks != requested.activity_weeks;
     let tool_collection_changed = baseline.show_claude != requested.show_claude
         || baseline.show_codex != requested.show_codex
         || baseline.show_grok != requested.show_grok
@@ -4147,9 +4522,15 @@ async fn save_settings(
                 emit_collection_snapshot(&refresh_app, &statuses);
             });
             if claude_enabled_now || codex_enabled_now || grok_enabled_now {
-                spawn_activity_refresh(app.clone(), settings.clone());
+                spawn_activity_refresh(app.clone(), settings.clone(), codex_enabled_now);
+            }
+            if cursor_enabled_now {
+                spawn_cursor_activity_refresh(app.clone(), settings.clone(), true);
             }
         }
+    }
+    if cursor_activity_range_changed {
+        spawn_cursor_activity_refresh(app.clone(), settings.clone(), false);
     }
     let report = settings_apply_report(settings, taskbar_result, autostart_result);
     retry_settings_side_effects(app, !report.taskbar_applied, !report.autostart_applied);
@@ -5831,6 +6212,28 @@ mod tests {
         taskbar,
     };
 
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let original = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     #[test]
     fn forced_taskbar_hover_requires_an_isolated_runtime() {
         assert_eq!(
@@ -6343,6 +6746,37 @@ mod tests {
             super::collection_health_snapshot().cursor,
             super::CollectionHealth::Ready
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "uses the locally logged-in Cursor GUI account"]
+    fn live_cursor_gui_fallback_works_without_a_cursor_agent_runtime() {
+        let isolated = std::env::temp_dir().join(format!(
+            "agent-juice-cursor-gui-fallback-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&isolated).unwrap();
+        let environment = EnvVarGuard::set("LOCALAPPDATA", isolated.as_os_str());
+        *super::CURSOR_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        let settings = Settings {
+            show_cursor: true,
+            ..Settings::default()
+        };
+        let status = super::collect_cursor_usage_status(
+            &settings,
+            "LOCAL",
+            chrono::Utc::now(),
+            true,
+            std::time::Instant::now() + std::time::Duration::from_secs(8),
+        )
+        .unwrap();
+        drop(environment);
+        std::fs::remove_dir_all(isolated).unwrap();
+        assert_eq!(status.session_id, "cursor-gui-usage");
+        assert_eq!(status.tool, Tool::Cursor);
     }
 
     #[test]
@@ -6917,6 +7351,14 @@ mod tests {
         assert!(super::try_begin_activity_refresh().is_none());
         drop(activity_guard);
         assert!(super::try_begin_activity_refresh().is_some());
+
+        let (cursor_guard, generation) =
+            super::try_begin_cursor_activity_refresh().expect("first Cursor refresh starts");
+        assert!(super::try_begin_cursor_activity_refresh().is_none());
+        drop(cursor_guard);
+        let (_, next_generation) =
+            super::try_begin_cursor_activity_refresh().expect("Cursor refresh restarts");
+        assert!(next_generation > generation);
     }
 
     #[test]

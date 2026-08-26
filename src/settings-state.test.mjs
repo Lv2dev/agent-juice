@@ -420,6 +420,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#d36b86");
   assert.equal(formStateFromSettings({}).codexPrimaryColor, "#2fac7d");
   assert.equal(formStateFromSettings({}).codexSecondaryColor, "#4d86d6");
+  assert.equal(formStateFromSettings({}).cursorPrimaryColor, "#72716d");
+  assert.equal(formStateFromSettings({}).cursorSecondaryColor, "#0891b2");
   assert.equal(formStateFromSettings({}).toolWarningColor, "#f59e0b");
   assert.equal(formStateFromSettings({}).toolDangerColor, "#ef4444");
   assert.equal(formStateFromSettings({}).toolWarningColorOn, true);
@@ -428,6 +430,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).claudeTextColorOn, false);
   assert.equal(formStateFromSettings({}).codexTextColor, "#2fac7d");
   assert.equal(formStateFromSettings({}).codexTextColorOn, false);
+  assert.equal(formStateFromSettings({}).cursorTextColor, "#72716d");
+  assert.equal(formStateFromSettings({}).cursorTextColorOn, false);
   assert.equal(formStateFromSettings({}).infoTextColor, "#6b7280");
   assert.equal(formStateFromSettings({}).infoTextColorOn, false);
   assert.equal(formStateFromSettings({}).ringTextColor, "#6b7280");

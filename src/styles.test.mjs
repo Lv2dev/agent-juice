@@ -153,7 +153,7 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.match(claudeCard, /--tool-brand: #d79a32/);
   assert.match(codexCard, /--tool-brand: #2fac7d/);
   assert.match(grokCard, /--tool-brand: #d9578b/);
-  assert.match(cursorCard, /--tool-brand: #3b82f6/);
+  assert.match(cursorCard, /--tool-brand: #72716d/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
   assert.doesNotMatch(grokCard, /--tool-glow/);
@@ -375,6 +375,8 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.match(cardMarkup, /data-activity-filter="all"/);
   assert.match(cardMarkup, /data-activity-filter="claude"/);
   assert.match(cardMarkup, /data-activity-filter="codex"/);
+  assert.match(cardMarkup, /data-activity-filter="cursor"/);
+  assert.match(cardMarkup, /data-activity-tooltip-detail/);
   assert.equal((cardMarkup.match(/role="tooltip"/g) ?? []).length, 1);
   assert.doesNotMatch(cardMarkup, /\stitle=/);
   assert.match(card, /background: var\(--surface\)/);
@@ -384,6 +386,13 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.match(panelJs, /invoke\("get_activity"\)/);
   assert.match(panelJs, /"activity-updated"/);
   assert.match(panelJs, /formatActivityTokens\(cell\.tokens/);
+  assert.match(panelJs, /activity\.cursorAccountRecord/);
+  assert.match(panelJs, /activity\.mixedRecord/);
+  assert.match(panelJs, /cell\.cursorTokens/);
+  assert.match(rustLib, /baseline\.activity_weeks != requested\.activity_weeks/);
+  assert.match(rustLib, /spawn_cursor_activity_refresh\(app\.clone\(\), settings\.clone\(\), false\)/);
+  assert.match(css, /\.activity-card\[data-filter="cursor"\]/);
+  assert.match(cssBlock(".activity-filter"), /display: inline-flex/);
   assert.match(css, /\.activity-card,\s*\n\s*\.settings-layout/);
   assert.match(settingsJs, /tokenField\.readOnly = !editable/);
   assert.doesNotMatch(settingsJs, /tokenField\.disabled = !editable/);
@@ -1716,7 +1725,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.14"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.15"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

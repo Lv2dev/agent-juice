@@ -180,16 +180,20 @@ function tooltipCopy(cell) {
   const total = formatActivityTokens(cell.tokens, language);
   const title = `${formatActivityDate(cell.date, language)} · ${total} ${tokens}`;
   const details = [];
-  if (settings.show_claude !== false) {
+  const includes = (tool) => activityFilter === "all" || activityFilter === tool;
+  if (settings.show_claude !== false && includes("claude")) {
     details.push(`Claude ${formatActivityTokens(cell.claudeTokens, language)}`);
   }
-  if (settings.show_codex !== false) {
+  if (settings.show_codex !== false && includes("codex")) {
     details.push(`Codex ${formatActivityTokens(cell.codexTokens, language)}`);
   }
-  if (settings.show_grok === true) {
+  if (settings.show_grok === true && includes("grok")) {
     details.push(`Grok ${formatActivityTokens(cell.grokTokens, language)}`);
   }
-  return { title, detail: details.join(" · ") };
+  if (settings.show_cursor === true && includes("cursor")) {
+    details.push(`Cursor ${formatActivityTokens(cell.cursorTokens, language)}`);
+  }
+  return { title, details };
 }
 
 function hideActivityTooltip() {
@@ -204,7 +208,13 @@ function showActivityTooltip(cellElement, cell) {
   if (!card || !tooltip) return;
   const copy = tooltipCopy(cell);
   setText(tooltip, "[data-activity-tooltip-title]", copy.title);
-  setText(tooltip, "[data-activity-tooltip-detail]", copy.detail);
+  const details = tooltip.querySelector("[data-activity-tooltip-detail]");
+  details?.replaceChildren?.();
+  for (const detail of copy.details) {
+    const row = document.createElement("span");
+    row.textContent = detail;
+    details?.append(row);
+  }
   tooltip.hidden = false;
   const cardRect = card.getBoundingClientRect();
   const chartRect = card.querySelector("[data-activity-chart]").getBoundingClientRect();
@@ -217,16 +227,17 @@ function showActivityTooltip(cellElement, cell) {
 
 function activityCellLabel(cell) {
   const copy = tooltipCopy(cell);
-  return copy.detail ? `${copy.title}. ${copy.detail}` : copy.title;
+  return copy.details.length ? `${copy.title}. ${copy.details.join(". ")}` : copy.title;
 }
 
 function renderActivity(now = new Date()) {
   const card = document.querySelector("#activity-card");
   if (!card) return;
   if (
-    settings.show_claude === false
-    && settings.show_codex === false
-    && settings.show_grok !== true
+      settings.show_claude === false
+      && settings.show_codex === false
+      && settings.show_grok !== true
+      && settings.show_cursor !== true
   ) {
     card.hidden = true;
     return;
@@ -241,10 +252,12 @@ function renderActivity(now = new Date()) {
     settings.show_claude,
     settings.show_codex,
     settings.show_grok,
+    settings.show_cursor,
     settings.language,
     toolBrandColor("claude", settings),
     toolBrandColor("codex", settings),
     toolBrandColor("grok", settings),
+    toolBrandColor("cursor", settings),
     `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`,
   ]);
   if (renderSignature === lastActivityRenderSignature) return;
@@ -266,12 +279,14 @@ function renderActivity(now = new Date()) {
   card.style.setProperty("--activity-color-claude", toolBrandColor("claude", settings));
   card.style.setProperty("--activity-color-codex", toolBrandColor("codex", settings));
   card.style.setProperty("--activity-color-grok", toolBrandColor("grok", settings));
+  card.style.setProperty("--activity-color-cursor", toolBrandColor("cursor", settings));
 
   for (const button of card.querySelectorAll("[data-activity-filter]")) {
     const filter = button.dataset.activityFilter;
-    button.hidden = (filter === "claude" && settings.show_claude === false)
-      || (filter === "codex" && settings.show_codex === false)
-      || (filter === "grok" && settings.show_grok !== true);
+      button.hidden = (filter === "claude" && settings.show_claude === false)
+        || (filter === "codex" && settings.show_codex === false)
+        || (filter === "grok" && settings.show_grok !== true)
+        || (filter === "cursor" && settings.show_cursor !== true);
     button.setAttribute("aria-pressed", String(filter === view.filter));
   }
 
@@ -320,7 +335,13 @@ function renderActivity(now = new Date()) {
   if (empty) {
     empty.hidden = !view.empty;
     empty.textContent = t(
-      view.backfillPending ? "activity.emptyCollecting" : "activity.empty",
+      view.backfillPending
+        ? "activity.emptyCollecting"
+        : view.scope === "codex_account"
+          ? "activity.emptyCodex"
+          : view.scope === "cursor_account"
+            ? "activity.emptyCursor"
+            : "activity.empty",
       settings,
     );
   }
@@ -331,9 +352,18 @@ function renderActivity(now = new Date()) {
       : view.partial
         ? t("activity.partial", settings)
         : "";
+    const scopeKey = view.scope === "cursor_account"
+      ? "activity.cursorAccountRecord"
+      : view.scope === "codex_account"
+        ? "activity.codexAccountRecord"
+        : view.scope === "account_mixed"
+          ? "activity.accountRecord"
+          : view.scope === "mixed"
+            ? "activity.mixedRecord"
+            : "activity.localRecord";
     scope.textContent = suffix
-      ? `${t("activity.localRecord", settings)} · ${suffix}`
-      : t("activity.localRecord", settings);
+      ? `${t(scopeKey, settings)} · ${suffix}`
+      : t(scopeKey, settings);
   }
 }
 

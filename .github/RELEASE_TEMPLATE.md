@@ -25,7 +25,7 @@
 
 ### 알려진 제한
 
-- v1은 로컬 전용입니다. 다른 PC의 사용량을 보려면 그 PC에도 Juice와 사용할 Claude Code, Codex, Grok Build, Cursor Agent의 로컬 로그인이 필요합니다.
+- v1은 Juice 서버 없이 동작합니다. 다른 PC의 한도를 보려면 그 PC에도 Juice와 사용할 도구 로그인이 필요합니다. Codex·Cursor 토큰 활동은 각 공급자의 계정 범위입니다.
 
 ## English
 
@@ -49,4 +49,4 @@
 
 ### Known Limitations
 
-- v1 is local-only. To view usage on another PC, install Juice there and sign in locally to the Claude Code, Codex, Grok Build, and Cursor Agent providers you use.
+- v1 runs without a Juice server. To view limits on another PC, install Juice there and sign in to the providers you use. Codex and Cursor token activity use provider account scope.

@@ -111,12 +111,12 @@ test("barToolViewModel is null-safe and marks stale or empty tools", () => {
   const vm = barToolViewModel([stale], "codex", settings);
   assert.equal(vm.state, "stale");
   assert.equal(vm.severity, "stale");
-  assert.equal(vm.primary.text, "5h –");
+  assert.equal(vm.primary.text, "");
   assert.equal(vm.primary.arc, "0deg");
   assert.equal(vm.secondary.text, "주간 –");
   assert.equal(vm.worst, "–");
-  assert.equal(vm.tooltip, "Codex\n5h –\n주간 –");
-  assert.equal(vm.ariaLabel, "Codex, 5h –, 주간 –, 오래됨");
+  assert.equal(vm.tooltip, "Codex\n주간 –");
+  assert.equal(vm.ariaLabel, "Codex, 주간 –, 오래됨");
 
   const empty = barToolViewModel([], "claude", settings);
   assert.equal(empty.state, "empty");
@@ -175,12 +175,68 @@ test("barToolViewModel keeps a weekly-only Codex limit in the weekly slot", () =
     new Date("2026-07-13T00:00:00Z"),
   );
 
-  assert.equal(vm.primary.text, "5h –");
+  assert.equal(vm.primary.text, "");
   assert.equal(vm.primary.percent, null);
+  assert.equal(vm.primary.visible, false);
   assert.equal(vm.secondary.text, "주간 84%");
   assert.equal(vm.secondary.percent, 84);
+  assert.equal(vm.secondary.visible, true);
   assert.equal(vm.worst, "84");
-  assert.equal(vm.ariaLabel, "Codex, 5h –, 주간 84%");
+  assert.equal(vm.tooltip, "Codex\n주간 리셋 7일 0시간");
+  assert.equal(vm.ariaLabel, "Codex, 주간 84%");
+});
+
+test("barToolViewModel keeps a 5h-only Codex limit without a weekly placeholder", () => {
+  const vm = barToolViewModel(
+    [{
+      tool: "codex",
+      captured_at: "2026-07-13T00:00:00Z",
+      primary: { used_percent: 16, resets_at: "2026-07-13T05:00:00Z" },
+      secondary: null,
+      session: { active: true },
+    }],
+    "codex",
+    settings,
+    new Date("2026-07-13T00:00:00Z"),
+  );
+
+  assert.equal(vm.primary.text, "5h 84%");
+  assert.equal(vm.primary.visible, true);
+  assert.equal(vm.secondary.text, "");
+  assert.equal(vm.secondary.visible, false);
+  assert.equal(vm.tooltip, "Codex\n5h 리셋 5시간 0분");
+  assert.equal(vm.ariaLabel, "Codex, 5h 84%");
+});
+
+test("barViewModel preserves a single weekly Codex limit in every mode and indicator", () => {
+  const weeklyOnly = [{
+    tool: "codex",
+    captured_at: "2026-07-13T00:00:00Z",
+    primary: null,
+    secondary: { used_percent: 16, resets_at: null },
+    session: { active: true },
+  }];
+
+  for (const bar_mode of ["full", "compact", "dual", "quad"]) {
+    for (const indicator_style of ["ring", "bar"]) {
+      const vm = barViewModel(weeklyOnly, {
+        ...settings,
+        show_claude: false,
+        show_codex: true,
+        bar_mode,
+        indicator_style,
+      });
+      const codex = vm.tools[0];
+      assert.equal(vm.mode, bar_mode);
+      assert.equal(vm.indicatorStyle, indicator_style);
+      assert.deepEqual(
+        [codex.primary, codex.secondary]
+          .filter((limit) => limit.visible)
+          .map((limit) => limit.text),
+        ["주간 84%"],
+      );
+    }
+  }
 });
 
 test("barToolViewModel treats missing active flag as stale", () => {
@@ -292,7 +348,7 @@ test("barToolViewModel localizes the weekly limit label", () => {
     { ...settings, language: "en" },
     new Date("2026-07-07T00:00:00Z"),
   );
-  assert.equal(past.tooltip, "Codex\n5h Waiting for refresh\nWeekly –");
+  assert.equal(past.tooltip, "Codex\n5h Waiting for refresh");
 });
 
 test("barViewModel normalizes mode and ring settings", () => {
@@ -384,6 +440,8 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(fallback.claudeTextColorOn, false);
   assert.equal(fallback.codexTextColor, "#2fac7d");
   assert.equal(fallback.codexTextColorOn, false);
+  assert.equal(fallback.cursorTextColor, "#72716d");
+  assert.equal(fallback.cursorTextColorOn, false);
   assert.equal(fallback.infoTextColor, "#6b7280");
   assert.equal(fallback.infoTextColorOn, false);
   assert.equal(fallback.ringTextColor, "#6b7280");
@@ -667,8 +725,8 @@ test("Cursor renders its two monthly pools and date-only reset without a fake co
   assert.equal(cursor.primary.text, "Cursor Models 99%");
   assert.equal(cursor.secondary.text, "Other Models 100%");
   assert.equal(cursor.primary.reset, "Sep 21");
-  assert.equal(cursor.primary.color, "#3b82f6");
-  assert.equal(cursor.secondary.color, "#06b6d4");
+  assert.equal(cursor.primary.color, "#72716d");
+  assert.equal(cursor.secondary.color, "#0891b2");
   assert.match(cursor.tooltip, /Cursor Models · Resets Sep 21/);
   assert.match(cursor.tooltip, /Other Models · Resets Sep 21/);
 });
