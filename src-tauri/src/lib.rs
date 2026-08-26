@@ -7652,6 +7652,30 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_codex_account_preserves_rollout_approximate_limits() {
+        let mut rollout = status_for_signature("rollout-fallback");
+        rollout.tool = Tool::Codex;
+        rollout.approx = true;
+        rollout.primary = Some(AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(18.0),
+            resets_at: Some("rollout-5h-reset".into()),
+        });
+        rollout.secondary = Some(AccountLimit {
+            label: "week".into(),
+            used_percent: Some(42.0),
+            resets_at: Some("rollout-week-reset".into()),
+        });
+
+        let merged = super::merge_codex_account_status(Some(rollout), None).unwrap();
+
+        assert_eq!(merged.session_id, "rollout-fallback");
+        assert_eq!(merged.primary.unwrap().used_percent, Some(18.0));
+        assert_eq!(merged.secondary.unwrap().used_percent, Some(42.0));
+        assert!(merged.approx);
+    }
+
+    #[test]
     fn codex_account_limits_clear_fallback_windows_absent_from_exact_response() {
         let mut rollout = status_for_signature("rollout-session");
         rollout.tool = Tool::Codex;
@@ -7868,6 +7892,12 @@ mod tests {
         );
         assert_eq!(
             super::classify_collection_error(&anyhow::anyhow!("Grok Build executable unavailable")),
+            super::CollectionErrorKind::Unavailable
+        );
+        assert_eq!(
+            super::classify_collection_error(&anyhow::anyhow!(
+                "Codex app-server command unavailable by platform safety policy"
+            )),
             super::CollectionErrorKind::Unavailable
         );
         assert_eq!(

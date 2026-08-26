@@ -28,6 +28,10 @@ const CODEX_RUNTIME_DIRECTORY_NAME_LEN: usize = 16;
 pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 
+fn codex_app_server_polling_enabled() -> bool {
+    !cfg!(windows)
+}
+
 pub fn text_requires_login(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     [
@@ -651,11 +655,29 @@ fn is_token_count_event(line: &str) -> bool {
 }
 
 pub fn codex_account_rate_limits_response(timeout: Duration) -> anyhow::Result<String> {
-    codex_account_rate_limits_response_with_command(codex_app_server_command()?, timeout)
+    let command = codex_app_server_command_with_policy(
+        codex_app_server_polling_enabled(),
+        codex_app_server_command,
+    )?;
+    codex_account_rate_limits_response_with_command(command, timeout)
 }
 
 pub fn codex_account_usage_response(timeout: Duration) -> anyhow::Result<String> {
-    codex_account_usage_response_with_command(codex_app_server_command()?, timeout)
+    let command = codex_app_server_command_with_policy(
+        codex_app_server_polling_enabled(),
+        codex_app_server_command,
+    )?;
+    codex_account_usage_response_with_command(command, timeout)
+}
+
+fn codex_app_server_command_with_policy(
+    enabled: bool,
+    command_factory: impl FnOnce() -> anyhow::Result<Command>,
+) -> anyhow::Result<Command> {
+    if !enabled {
+        anyhow::bail!("Codex app-server command unavailable by platform safety policy");
+    }
+    command_factory()
 }
 
 fn codex_account_rate_limits_response_with_command(
@@ -1740,6 +1762,37 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(30)
         );
+    }
+
+    #[test]
+    fn disabled_codex_app_server_policy_does_not_resolve_or_spawn_a_runtime() {
+        let command_factory_called = AtomicBool::new(false);
+        let error = codex_app_server_command_with_policy(false, || {
+            command_factory_called.store(true, Ordering::SeqCst);
+            Ok(test_process("collector::tests::fake_quick_child"))
+        })
+        .unwrap_err();
+
+        assert!(!command_factory_called.load(Ordering::SeqCst));
+        assert!(format!("{error:#}")
+            .to_ascii_lowercase()
+            .contains("command unavailable"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_rate_limit_and_activity_collectors_fail_closed() {
+        assert!(!codex_app_server_polling_enabled());
+
+        for result in [
+            codex_account_rate_limits_response(Duration::from_secs(1)),
+            codex_account_usage_response(Duration::from_secs(1)),
+        ] {
+            let error = result.unwrap_err();
+            assert!(format!("{error:#}")
+                .to_ascii_lowercase()
+                .contains("command unavailable"));
+        }
     }
 
     #[cfg(windows)]
