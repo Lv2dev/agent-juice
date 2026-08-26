@@ -198,6 +198,12 @@ function grokLimitLabel(limit) {
 function limitLabelKeys(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
+  if (tool === "codex" && status) {
+    return [
+      status.primary == null ? null : "limit.fiveHour",
+      status.secondary == null ? null : "limit.weekly",
+    ];
+  }
   return ["limit.fiveHour", "limit.weekly"];
 }
 
@@ -236,7 +242,8 @@ function toolTooltip(label, primary, secondary, language) {
 }
 
 function toolAriaLabel(label, primary, secondary, state, language) {
-  const parts = [label, primary.text];
+  const parts = [label];
+  if (primary.visible) parts.push(primary.text);
   if (secondary.visible) parts.push(secondary.text);
   if (state === "stale") parts.push(t("state.stale", language));
   return parts.join(", ");
@@ -271,6 +278,7 @@ export function barToolViewModel(
   if (options.collectionHealth?.[tool] === "login_required") {
     const primary = limitModel(primaryLabel, null, settings, now, language, tool, false);
     const secondary = limitModel(secondaryLabel, null, settings, now, language, tool, true);
+    primary.visible = true;
     secondary.visible = false;
     const loginText = t("state.loginRequired", language);
     return {
@@ -421,7 +429,7 @@ export function barViewModel(
     codexTextColorOn: taskbarTextColorOn(merged, "codex"),
     grokTextColor: taskbarTextColor(merged, "grok", "#d9578b"),
     grokTextColorOn: taskbarTextColorOn(merged, "grok"),
-    cursorTextColor: taskbarTextColor(merged, "cursor", "#3b82f6"),
+    cursorTextColor: taskbarTextColor(merged, "cursor", "#72716d"),
     cursorTextColorOn: taskbarTextColorOn(merged, "cursor"),
     infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
     infoTextColorOn: taskbarTextColorOn(merged, "info"),

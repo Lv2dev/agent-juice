@@ -50,6 +50,13 @@ function luminance(hex) {
   return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
 }
 
+function rgbDistance(left, right) {
+  const channels = (hex) => hex.match(/[0-9a-f]{2}/gi).map((value) => Number.parseInt(value, 16));
+  const a = channels(left);
+  const b = channels(right);
+  return Math.hypot(...a.map((value, index) => value - b[index]));
+}
+
 test("default tool colors are brighter than the legacy muted set", () => {
   const current = ["#d79a32", "#d36b86", "#2fac7d", "#4d86d6"];
   const legacy = ["#b7833a", "#a65f72", "#4f8a73", "#4f76a6"];
@@ -57,6 +64,11 @@ test("default tool colors are brighter than the legacy muted set", () => {
   current.forEach((color, index) => {
     assert.ok(luminance(color) > luminance(legacy[index]), `${color} must be brighter`);
   });
+});
+
+test("Cursor defaults stay visually distinct from the Codex blue limit", () => {
+  assert.equal(toolBrandColor("cursor", settings), "#72716d");
+  assert.ok(rgbDistance("#72716d", "#4d86d6") > 90);
 });
 
 test("colorForPercent uses thresholds and palette from settings", () => {
@@ -208,6 +220,36 @@ test("viewModelForTool can render canonical usage values", () => {
   assert.equal(vm.secondary.color, "#4d86d6");
 });
 
+test("viewModelForTool hides absent Codex account windows without changing semantic colors", () => {
+  const weekly = viewModelForTool([{
+    tool: "codex",
+    captured_at: "2026-08-26T00:00:00Z",
+    primary: null,
+    secondary: { used_percent: 2, resets_at: null },
+    session: { active: true },
+    approx: false,
+  }], "codex", { ...settings, display_basis: "used" });
+
+  assert.equal(weekly.primary.visible, false);
+  assert.equal(weekly.secondary.visible, true);
+  assert.equal(weekly.secondary.label, "주간");
+  assert.equal(weekly.secondary.value, "2%");
+  assert.equal(weekly.secondary.color, "#4d86d6");
+
+  const fiveHour = viewModelForTool([{
+    tool: "codex",
+    captured_at: "2026-08-26T00:00:00Z",
+    primary: { used_percent: 3, resets_at: null },
+    secondary: null,
+    session: { active: true },
+    approx: false,
+  }], "codex", { ...settings, display_basis: "used" });
+
+  assert.equal(fiveHour.primary.visible, true);
+  assert.equal(fiveHour.primary.label, "5h");
+  assert.equal(fiveHour.secondary.visible, false);
+});
+
 test("viewModelForTool is null-safe and marks stale sessions", () => {
   const status = {
     tool: "codex",
@@ -285,11 +327,11 @@ test("viewModelForTool maps Cursor Auto and API pools to two monthly indicators"
     new Date("2026-08-21T00:00:00Z"),
   );
 
-  assert.equal(vm.brandColor, "#3b82f6");
+  assert.equal(vm.brandColor, "#72716d");
   assert.equal(vm.primary.label, "Cursor Models");
   assert.equal(vm.primary.value, "99%");
   assert.equal(vm.primary.reset, "Resets Sep 21");
   assert.equal(vm.secondary.label, "Other Models");
   assert.equal(vm.secondary.value, "100%");
-  assert.equal(vm.secondary.color, "#06b6d4");
+  assert.equal(vm.secondary.color, "#0891b2");
 });

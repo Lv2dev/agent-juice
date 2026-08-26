@@ -32,6 +32,11 @@ pub struct ToolColors {
     pub danger_on: bool,
 }
 
+const V0_1_14_CURSOR_PRIMARY: [u8; 3] = [0x3b, 0x82, 0xf6];
+const V0_1_14_CURSOR_SECONDARY: [u8; 3] = [0x06, 0xb6, 0xd4];
+const DEFAULT_CURSOR_PRIMARY: [u8; 3] = [0x72, 0x71, 0x6d];
+const DEFAULT_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
+
 const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     claude_primary: [0xb7, 0x83, 0x3a],
     claude_secondary: [0xa6, 0x5f, 0x72],
@@ -39,8 +44,8 @@ const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     codex_secondary: [0x4f, 0x76, 0xa6],
     grok_primary: [0xd9, 0x57, 0x8b],
     grok_secondary: [0x8a, 0x6f, 0xd1],
-    cursor_primary: [0x3b, 0x82, 0xf6],
-    cursor_secondary: [0x06, 0xb6, 0xd4],
+    cursor_primary: DEFAULT_CURSOR_PRIMARY,
+    cursor_secondary: DEFAULT_CURSOR_SECONDARY,
     warning: [0xf5, 0x9e, 0x0b],
     danger: [0xef, 0x44, 0x44],
     warning_on: true,
@@ -56,8 +61,8 @@ impl Default for ToolColors {
             codex_secondary: [0x4d, 0x86, 0xd6],
             grok_primary: [0xd9, 0x57, 0x8b],
             grok_secondary: [0x8a, 0x6f, 0xd1],
-            cursor_primary: [0x3b, 0x82, 0xf6],
-            cursor_secondary: [0x06, 0xb6, 0xd4],
+            cursor_primary: DEFAULT_CURSOR_PRIMARY,
+            cursor_secondary: DEFAULT_CURSOR_SECONDARY,
             warning: [0xf5, 0x9e, 0x0b],
             danger: [0xef, 0x44, 0x44],
             warning_on: true,
@@ -92,7 +97,7 @@ impl Default for TaskbarTextColors {
             codex_on: false,
             grok: [0xd9, 0x57, 0x8b],
             grok_on: false,
-            cursor: [0x3b, 0x82, 0xf6],
+            cursor: DEFAULT_CURSOR_PRIMARY,
             cursor_on: false,
             info: [0x6b, 0x72, 0x80],
             info_on: false,
@@ -1279,8 +1284,29 @@ impl Settings {
         let Some(value) = value else {
             return;
         };
-        if json_has_field(value, "tool_colors") && self.tool_colors == LEGACY_DEFAULT_TOOL_COLORS {
-            self.tool_colors = ToolColors::default();
+        if json_has_field(value, "tool_colors") {
+            let legacy_with_previous_cursor = ToolColors {
+                cursor_primary: V0_1_14_CURSOR_PRIMARY,
+                cursor_secondary: V0_1_14_CURSOR_SECONDARY,
+                ..LEGACY_DEFAULT_TOOL_COLORS
+            };
+            let previous_cursor_defaults = self.tool_colors.cursor_primary
+                == V0_1_14_CURSOR_PRIMARY
+                && self.tool_colors.cursor_secondary == V0_1_14_CURSOR_SECONDARY;
+            if self.tool_colors == LEGACY_DEFAULT_TOOL_COLORS
+                || self.tool_colors == legacy_with_previous_cursor
+            {
+                self.tool_colors = ToolColors::default();
+            } else if previous_cursor_defaults {
+                self.tool_colors.cursor_primary = DEFAULT_CURSOR_PRIMARY;
+                self.tool_colors.cursor_secondary = DEFAULT_CURSOR_SECONDARY;
+            }
+        }
+        if json_has_field(value, "taskbar_text_colors")
+            && self.taskbar_text_colors.cursor == V0_1_14_CURSOR_PRIMARY
+            && !self.taskbar_text_colors.cursor_on
+        {
+            self.taskbar_text_colors.cursor = DEFAULT_CURSOR_PRIMARY;
         }
     }
 
@@ -2109,7 +2135,7 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 mod parser_tests {
     use super::{
         parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, TaskbarLayoutProfile,
-        TaskbarPlacement, ToolColors,
+        TaskbarPlacement, ToolColors, DEFAULT_CURSOR_PRIMARY, DEFAULT_CURSOR_SECONDARY,
     };
     use std::{
         fs,
@@ -2188,8 +2214,8 @@ mod parser_tests {
 
         let settings = Settings::from_input(SettingsInput {
             show_cursor: true,
-            cursor_primary_color: Some("#3b82f6".into()),
-            cursor_secondary_color: Some("#06b6d4".into()),
+            cursor_primary_color: Some("#72716d".into()),
+            cursor_secondary_color: Some("#0891b2".into()),
             cursor_text_color: Some("#5b9cff".into()),
             cursor_text_color_on: true,
             cursor_taskbar_offset_ratio: 0.45,
@@ -2197,8 +2223,11 @@ mod parser_tests {
             ..SettingsInput::default()
         });
         assert!(settings.show_cursor);
-        assert_eq!(settings.tool_colors.cursor_primary, [0x3b, 0x82, 0xf6]);
-        assert_eq!(settings.tool_colors.cursor_secondary, [0x06, 0xb6, 0xd4]);
+        assert_eq!(settings.tool_colors.cursor_primary, DEFAULT_CURSOR_PRIMARY);
+        assert_eq!(
+            settings.tool_colors.cursor_secondary,
+            DEFAULT_CURSOR_SECONDARY
+        );
         assert_eq!(settings.taskbar_text_colors.cursor, [0x5b, 0x9c, 0xff]);
         assert!(settings.taskbar_text_colors.cursor_on);
         assert_eq!(settings.cursor_taskbar_offset_ratio, 0.45);

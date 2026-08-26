@@ -196,6 +196,7 @@
             <button type="button" data-activity-filter="claude" aria-pressed="false" data-i18n="activity.filterClaude">Claude</button>
             <button type="button" data-activity-filter="codex" aria-pressed="false" data-i18n="activity.filterCodex">Codex</button>
             <button type="button" data-activity-filter="grok" aria-pressed="false" data-i18n="activity.filterGrok" hidden>Grok</button>
+            <button type="button" data-activity-filter="cursor" aria-pressed="false" data-i18n="activity.filterCursor" hidden>Cursor</button>
           </div>
         </header>
 
@@ -219,7 +220,7 @@
           </div>
           <div class="activity-tooltip" role="tooltip" data-activity-tooltip hidden>
             <strong data-activity-tooltip-title></strong>
-            <span data-activity-tooltip-detail></span>
+            <div data-activity-tooltip-detail></div>
           </div>
         </div>
 
@@ -398,11 +399,11 @@
                   </label>
                   <label>
                     <span data-i18n="field.cursorPrimaryColor">Cursor 모델</span>
-                    <input type="color" name="cursor_primary_color" value="#3b82f6" />
+                    <input type="color" name="cursor_primary_color" value="#72716d" />
                   </label>
                   <label>
                     <span data-i18n="field.cursorSecondaryColor">기타 모델</span>
-                    <input type="color" name="cursor_secondary_color" value="#06b6d4" />
+                    <input type="color" name="cursor_secondary_color" value="#0891b2" />
                   </label>
                 </div>
                 <div class="tool-threshold-grid">
@@ -465,7 +466,7 @@
                     </label>
                     <label class="taskbar-text-color-picker">
                       <span data-i18n="field.textColorValue">색상</span>
-                      <input type="color" name="cursor_text_color" value="#3b82f6" />
+                      <input type="color" name="cursor_text_color" value="#72716d" />
                     </label>
                   </div>
                   <div class="taskbar-text-color-item" data-taskbar-text-color="info">
@@ -600,7 +601,7 @@
               <section class="settings-subgroup activity-settings" data-activity-settings>
                 <div class="activity-settings-head">
                   <h3 data-i18n="activity.settingsTitle">토큰 활동</h3>
-                  <span data-i18n="activity.localScope">이 PC의 로컬 세션 로그</span>
+                  <span data-i18n="activity.localScope">도구별 토큰 기록</span>
                 </div>
                 <div class="settings-subgroup-grid">
                   <label class="field-row activity-number-row">

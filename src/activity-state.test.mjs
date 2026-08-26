@@ -109,6 +109,84 @@ test("activity totals and filters include Grok only when it is enabled", () => {
   assert.equal(disabled.totalTokens, 400);
 });
 
+test("Cursor activity is account-scoped and does not change local filter state", () => {
+  const snapshot = {
+    local_partial: false,
+    cursor_partial: true,
+    cursor_backfill_pending: true,
+    cursor_account_scope: true,
+    days: [{
+      date: "2026-07-18",
+      claude_tokens: 100,
+      codex_tokens: 300,
+      cursor_tokens: 2_000,
+    }],
+  };
+  const settings = { activity_weeks: 4, show_cursor: true };
+  const cursor = buildActivityView(snapshot, settings, "cursor", NOW);
+  assert.equal(cursor.totalTokens, 2_000);
+  assert.equal(cursor.scope, "cursor_account");
+  assert.equal(cursor.partial, true);
+  assert.equal(cursor.backfillPending, true);
+  assert.equal(cursor.cursorAccountScope, true);
+
+  const claude = buildActivityView(snapshot, settings, "claude", NOW);
+  assert.equal(claude.totalTokens, 100);
+  assert.equal(claude.scope, "local");
+  assert.equal(claude.partial, false);
+
+  const all = buildActivityView(snapshot, settings, "all", NOW);
+  assert.equal(all.totalTokens, 2_400);
+  assert.equal(all.scope, "mixed");
+});
+
+test("Codex account activity has independent scope and partial state", () => {
+  const snapshot = {
+    local_partial: false,
+    local_backfill_pending: false,
+    codex_partial: true,
+    codex_backfill_pending: false,
+    codex_account_scope: true,
+    cursor_partial: false,
+    cursor_backfill_pending: false,
+    cursor_account_scope: true,
+    days: [{
+      date: "2026-07-18",
+      claude_tokens: 100,
+      codex_tokens: 300,
+      cursor_tokens: 2_000,
+    }],
+  };
+  const accountOnly = {
+    activity_weeks: 4,
+    show_claude: false,
+    show_codex: true,
+    show_grok: false,
+    show_cursor: true,
+  };
+
+  const codex = buildActivityView(snapshot, accountOnly, "codex", NOW);
+  assert.equal(codex.totalTokens, 300);
+  assert.equal(codex.scope, "codex_account");
+  assert.equal(codex.partial, true);
+  assert.equal(codex.codexAccountScope, true);
+
+  const allAccounts = buildActivityView(snapshot, accountOnly, "all", NOW);
+  assert.equal(allAccounts.totalTokens, 2_300);
+  assert.equal(allAccounts.scope, "account_mixed");
+  assert.equal(allAccounts.partial, true);
+
+  const mixed = buildActivityView(
+    snapshot,
+    { ...accountOnly, show_claude: true },
+    "all",
+    NOW,
+  );
+  assert.equal(mixed.totalTokens, 2_400);
+  assert.equal(mixed.scope, "mixed");
+  assert.equal(mixed.partial, true);
+});
+
 test("activity formatters return localized compact and exact labels", () => {
   assert.match(formatActivityTokens(1_250_000, "en", true), /1\.3M/);
   assert.equal(formatActivityTokens(1250, "en"), "1,250");

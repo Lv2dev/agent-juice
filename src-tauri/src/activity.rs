@@ -34,6 +34,8 @@ pub struct ActivityDay {
     pub codex_tokens: u64,
     #[serde(default)]
     pub grok_tokens: u64,
+    #[serde(default)]
+    pub cursor_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +45,22 @@ pub struct ActivitySnapshot {
     pub timezone_offset_minutes: i32,
     pub partial: bool,
     pub backfill_pending: bool,
+    #[serde(default)]
+    pub local_partial: bool,
+    #[serde(default)]
+    pub local_backfill_pending: bool,
+    #[serde(default)]
+    pub codex_partial: bool,
+    #[serde(default)]
+    pub codex_backfill_pending: bool,
+    #[serde(default)]
+    pub codex_account_scope: bool,
+    #[serde(default)]
+    pub cursor_partial: bool,
+    #[serde(default)]
+    pub cursor_backfill_pending: bool,
+    #[serde(default)]
+    pub cursor_account_scope: bool,
     pub days: Vec<ActivityDay>,
 }
 
@@ -193,24 +211,24 @@ pub fn local_roots() -> ActivityRoots {
     }
 }
 
-pub fn refresh(
-    show_claude: bool,
-    show_codex: bool,
-    show_grok: bool,
-) -> anyhow::Result<ActivitySnapshot> {
+pub fn refresh(show_claude: bool, show_grok: bool) -> anyhow::Result<ActivitySnapshot> {
     let _guard = SCAN_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let path = index_path().ok_or_else(|| anyhow::anyhow!("activity data path unavailable"))?;
     let timezone = Local::now().offset().fix();
-    refresh_at(
+    let mut snapshot = refresh_at(
         &path,
         &local_roots(),
         show_claude,
-        show_codex,
+        false,
         show_grok,
         Utc::now(),
         timezone,
         ScanOptions::default(),
-    )
+    )?;
+    for day in &mut snapshot.days {
+        day.codex_tokens = 0;
+    }
+    Ok(snapshot)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,7 +310,19 @@ pub fn refresh_at(
         checkpoint.prune(&cutoff);
         seen_files.contains(key) || !checkpoint.days.is_empty()
     });
-    progress.lossy |= index.files.values().any(|checkpoint| checkpoint.lossy);
+    if !show_codex {
+        index
+            .files
+            .retain(|_, checkpoint| checkpoint.tool != ActivityTool::Codex);
+    }
+    progress.lossy |= index.files.values().any(|checkpoint| {
+        checkpoint.lossy
+            && match checkpoint.tool {
+                ActivityTool::Claude => show_claude,
+                ActivityTool::Codex => show_codex,
+                ActivityTool::Grok => show_grok,
+            }
+    });
 
     if rebuilt || index != original {
         save_index(index_path, &index)?;
@@ -875,8 +905,88 @@ fn snapshot_from_index(
         timezone_offset_minutes: offset_minutes,
         partial: incomplete || lossy,
         backfill_pending: incomplete,
+        local_partial: incomplete || lossy,
+        local_backfill_pending: incomplete,
+        codex_partial: false,
+        codex_backfill_pending: false,
+        codex_account_scope: false,
+        cursor_partial: false,
+        cursor_backfill_pending: false,
+        cursor_account_scope: false,
         days: days.into_values().collect(),
     }
+}
+
+pub fn merge_codex_activity(
+    mut snapshot: ActivitySnapshot,
+    codex: Option<&crate::codex_activity::CodexActivityView>,
+    codex_enabled: bool,
+) -> ActivitySnapshot {
+    let mut days = snapshot
+        .days
+        .into_iter()
+        .map(|mut day| {
+            day.codex_tokens = 0;
+            (day.date.clone(), day)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(codex) = codex.filter(|_| codex_enabled) {
+        for (date, tokens) in &codex.days {
+            days.entry(date.clone())
+                .or_insert_with(|| ActivityDay {
+                    date: date.clone(),
+                    ..ActivityDay::default()
+                })
+                .codex_tokens = *tokens;
+        }
+        snapshot.codex_partial = codex.partial;
+        snapshot.codex_account_scope = true;
+    } else {
+        snapshot.codex_partial = codex_enabled;
+        snapshot.codex_account_scope = codex_enabled;
+    }
+    snapshot.codex_backfill_pending = false;
+    snapshot.partial = snapshot.local_partial || snapshot.codex_partial || snapshot.cursor_partial;
+    snapshot.backfill_pending = snapshot.local_backfill_pending
+        || snapshot.codex_backfill_pending
+        || snapshot.cursor_backfill_pending;
+    snapshot.days = days.into_values().collect();
+    snapshot
+}
+
+pub fn merge_cursor_activity(
+    mut snapshot: ActivitySnapshot,
+    cursor: Option<&crate::cursor_activity::CursorActivityView>,
+    cursor_enabled: bool,
+) -> ActivitySnapshot {
+    let mut days = snapshot
+        .days
+        .into_iter()
+        .map(|day| (day.date.clone(), day))
+        .collect::<BTreeMap<_, _>>();
+    if let Some(cursor) = cursor.filter(|_| cursor_enabled) {
+        for (date, tokens) in &cursor.days {
+            days.entry(date.clone())
+                .or_insert_with(|| ActivityDay {
+                    date: date.clone(),
+                    ..ActivityDay::default()
+                })
+                .cursor_tokens = *tokens;
+        }
+        snapshot.cursor_partial = cursor.partial;
+        snapshot.cursor_backfill_pending = cursor.backfill_pending;
+        snapshot.cursor_account_scope = true;
+    } else {
+        snapshot.cursor_partial = cursor_enabled;
+        snapshot.cursor_backfill_pending = cursor_enabled;
+        snapshot.cursor_account_scope = false;
+    }
+    snapshot.partial = snapshot.local_partial || snapshot.codex_partial || snapshot.cursor_partial;
+    snapshot.backfill_pending = snapshot.local_backfill_pending
+        || snapshot.codex_backfill_pending
+        || snapshot.cursor_backfill_pending;
+    snapshot.days = days.into_values().collect();
+    snapshot
 }
 
 fn fingerprint_before(path: &Path, offset: u64) -> std::io::Result<u64> {
@@ -1305,6 +1415,148 @@ mod tests {
         .unwrap();
 
         assert_eq!(day.grok_tokens, 0);
+        assert_eq!(day.cursor_tokens, 0);
+    }
+
+    #[test]
+    fn cursor_account_activity_merges_without_changing_local_source_state() {
+        let local = ActivitySnapshot {
+            schema_version: SCHEMA_VERSION.into(),
+            generated_at: now().to_rfc3339(),
+            timezone_offset_minutes: 540,
+            partial: false,
+            backfill_pending: false,
+            local_partial: false,
+            local_backfill_pending: false,
+            codex_partial: false,
+            codex_backfill_pending: false,
+            codex_account_scope: false,
+            cursor_partial: false,
+            cursor_backfill_pending: false,
+            cursor_account_scope: false,
+            days: vec![ActivityDay {
+                date: "2026-07-19".into(),
+                claude_tokens: 10,
+                ..ActivityDay::default()
+            }],
+        };
+        let cursor = crate::cursor_activity::CursorActivityView {
+            days: BTreeMap::from([("2026-07-19".into(), 90), ("2026-07-20".into(), 50)]),
+            partial: true,
+            backfill_pending: false,
+            scope: crate::cursor_dashboard::AccountScope {
+                user_id: 1,
+                team_id: None,
+            },
+        };
+        let merged = merge_cursor_activity(local, Some(&cursor), true);
+        assert_eq!(merged.days[0].claude_tokens, 10);
+        assert_eq!(merged.days[0].cursor_tokens, 90);
+        assert_eq!(merged.days[1].cursor_tokens, 50);
+        assert!(!merged.local_partial);
+        assert!(merged.cursor_partial);
+        assert!(merged.partial);
+        assert!(merged.cursor_account_scope);
+    }
+
+    #[test]
+    fn codex_account_activity_replaces_stale_local_checkpoint_values() {
+        let local = ActivitySnapshot {
+            schema_version: SCHEMA_VERSION.into(),
+            generated_at: now().to_rfc3339(),
+            timezone_offset_minutes: 540,
+            partial: false,
+            backfill_pending: false,
+            local_partial: false,
+            local_backfill_pending: false,
+            codex_partial: false,
+            codex_backfill_pending: false,
+            codex_account_scope: false,
+            cursor_partial: false,
+            cursor_backfill_pending: false,
+            cursor_account_scope: false,
+            days: vec![ActivityDay {
+                date: "2026-07-19".into(),
+                claude_tokens: 10,
+                codex_tokens: 999,
+                ..ActivityDay::default()
+            }],
+        };
+        let codex = crate::codex_activity::CodexActivityView {
+            days: BTreeMap::from([("2026-07-19".into(), 20), ("2026-07-20".into(), 30)]),
+            partial: false,
+        };
+
+        let merged = merge_codex_activity(local, Some(&codex), true);
+        assert_eq!(merged.days[0].claude_tokens, 10);
+        assert_eq!(merged.days[0].codex_tokens, 20);
+        assert_eq!(merged.days[1].codex_tokens, 30);
+        assert!(merged.codex_account_scope);
+        assert!(!merged.codex_partial);
+        assert!(!merged.partial);
+    }
+
+    #[test]
+    fn unavailable_codex_account_activity_never_falls_back_to_local_rollout_tokens() {
+        let local = ActivitySnapshot {
+            schema_version: SCHEMA_VERSION.into(),
+            generated_at: now().to_rfc3339(),
+            timezone_offset_minutes: 540,
+            partial: false,
+            backfill_pending: false,
+            local_partial: false,
+            local_backfill_pending: false,
+            codex_partial: false,
+            codex_backfill_pending: false,
+            codex_account_scope: false,
+            cursor_partial: false,
+            cursor_backfill_pending: false,
+            cursor_account_scope: false,
+            days: vec![ActivityDay {
+                date: "2026-07-19".into(),
+                codex_tokens: 999,
+                ..ActivityDay::default()
+            }],
+        };
+
+        let merged = merge_codex_activity(local, None, true);
+        assert_eq!(merged.days[0].codex_tokens, 0);
+        assert!(merged.codex_account_scope);
+        assert!(merged.codex_partial);
+        assert!(merged.partial);
+    }
+
+    #[test]
+    fn disabling_the_retired_local_codex_source_removes_stored_checkpoints() {
+        let root = temp_root("retired-codex-source");
+        let index_path = root.join("index.json");
+        let mut index = ActivityIndex::new(9 * 60);
+        let mut codex = FileCheckpoint::new(ActivityTool::Codex);
+        codex.days.insert("2026-07-19".into(), 999);
+        index.files.insert("old-codex-rollout".into(), codex);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let snapshot = refresh_at(
+            &index_path,
+            &ActivityRoots {
+                claude: None,
+                codex: None,
+                grok: None,
+            },
+            false,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        let saved: ActivityIndex = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+
+        assert!(saved.files.is_empty());
+        assert!(snapshot.days.iter().all(|day| day.codex_tokens == 0));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

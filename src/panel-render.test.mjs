@@ -71,7 +71,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
                 tool: "codex",
                 pc_id: "DESKTOP",
                 captured_at: "2026-07-07T00:00:00Z",
-                primary: { used_percent: 18, resets_at: null },
+                primary: null,
                 secondary: { used_percent: 42, resets_at: null },
                 session: { active: true },
               },
@@ -135,7 +135,9 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   assert.equal(cards.codex.hidden, false);
   assert.equal(cards.cursor.hidden, false);
   assert.equal(cards.codex.style.getPropertyValue("--tool-brand"), "#2fac7d");
-  assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#3b82f6");
+  assert.equal(cards.codex.querySelector(".p5h").hidden, true);
+  assert.equal(cards.codex.querySelector(".pweek").hidden, false);
+  assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#72716d");
   assert.equal(focusListenerCount, 0);
   let prevented = false;
   listeners.contextmenu?.({ preventDefault() { prevented = true; } });

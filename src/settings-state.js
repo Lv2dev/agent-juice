@@ -11,8 +11,8 @@ const DEFAULT_TOOL_COLORS = {
   codexSecondary: "#4d86d6",
   grokPrimary: "#d9578b",
   grokSecondary: "#8a6fd1",
-  cursorPrimary: "#3b82f6",
-  cursorSecondary: "#06b6d4",
+  cursorPrimary: "#72716d",
+  cursorSecondary: "#0891b2",
   warning: "#f59e0b",
   danger: "#ef4444",
 };
@@ -21,7 +21,7 @@ const DEFAULT_TASKBAR_TEXT_COLORS = {
   claude: "#d79a32",
   codex: "#2fac7d",
   grok: "#d9578b",
-  cursor: "#3b82f6",
+  cursor: "#72716d",
   info: "#6b7280",
   ring: "#6b7280",
 };

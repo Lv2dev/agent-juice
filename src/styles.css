@@ -429,7 +429,7 @@ h1::before {
 }
 
 .tool-card[data-tool="cursor"] {
-  --tool-brand: #3b82f6;
+  --tool-brand: #72716d;
 }
 
 .tool-card[data-state="stale"],
@@ -585,6 +585,7 @@ h2 {
   --activity-color-claude: #d79a32;
   --activity-color-codex: #2fac7d;
   --activity-color-grok: #d9578b;
+  --activity-color-cursor: #72716d;
   --activity-cell-size: 9px;
   --activity-chart-width: 570px;
   position: relative;
@@ -623,6 +624,10 @@ h2 {
   --activity-color: var(--activity-color-grok);
 }
 
+.activity-card[data-filter="cursor"] {
+  --activity-color: var(--activity-color-cursor);
+}
+
 .activity-head,
 .activity-summary,
 .activity-foot,
@@ -659,8 +664,7 @@ h2 {
   padding: 2px;
   border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
   border-radius: var(--radius-sm);
-  display: inline-grid;
-  grid-template-columns: repeat(3, minmax(0, auto));
+  display: inline-flex;
   gap: 2px;
   background: color-mix(in srgb, var(--surface-2) 64%, transparent);
 }
@@ -842,7 +846,8 @@ h2 {
 }
 
 .activity-tooltip strong,
-.activity-tooltip span {
+.activity-tooltip span,
+.activity-tooltip [data-activity-tooltip-detail] {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -850,6 +855,11 @@ h2 {
 
 .activity-tooltip span {
   color: var(--text-muted);
+}
+
+.activity-tooltip [data-activity-tooltip-detail] {
+  display: grid;
+  gap: 1px;
 }
 
 .activity-empty {
@@ -904,7 +914,7 @@ h2 {
   --claude-text-color: #d79a32;
   --codex-text-color: #2fac7d;
   --grok-text-color: #d9578b;
-  --cursor-text-color: #3b82f6;
+  --cursor-text-color: #72716d;
   --info-text-color: #6b7280;
   --ring-text-color: #6b7280;
   --bar-text-font-size: 11px;
@@ -1008,7 +1018,7 @@ html[data-panel-visible="false"] * {
 }
 
 .bar-tool[data-tool="cursor"] {
-  --tool-brand: #3b82f6;
+  --tool-brand: #72716d;
 }
 
 .bar-tool[data-state="stale"],

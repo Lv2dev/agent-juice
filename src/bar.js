@@ -252,8 +252,13 @@ function setText(scope, selector, value) {
 }
 
 function orderedLimits(vm, limitOrder) {
-  if (!vm.secondary.visible) return [vm.primary, vm.secondary];
-  return limitOrder === "secondary_first" ? [vm.secondary, vm.primary] : [vm.primary, vm.secondary];
+  const semanticOrder = limitOrder === "secondary_first"
+    ? [vm.secondary, vm.primary]
+    : [vm.primary, vm.secondary];
+  return [
+    ...semanticOrder.filter((limit) => limit.visible),
+    ...semanticOrder.filter((limit) => !limit.visible),
+  ];
 }
 
 function setDisplayLimitVars(scope, first, second) {
@@ -300,8 +305,11 @@ function renderTool(vm, limitOrder) {
   item.hidden = false;
   item.dataset.state = vm.state;
   item.dataset.severity = vm.severity;
-  item.dataset.limitCount = vm.secondary.visible ? "2" : "1";
-  const singleLimit = !vm.secondary.visible;
+  const visibleLimitCount = [vm.primary, vm.secondary]
+    .filter((limit) => limit.visible)
+    .length;
+  item.dataset.limitCount = String(Math.max(1, visibleLimitCount));
+  const singleLimit = visibleLimitCount < 2;
   for (const selector of [
     ".inner-track",
     ".inner-effect",

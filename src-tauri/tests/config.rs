@@ -194,8 +194,8 @@ fn settings_roundtrip_and_legacy_defaults() {
             codex_secondary: [0xaa, 0xbb, 0xcc],
             grok_primary: [0xd1, 0x52, 0x88],
             grok_secondary: [0x82, 0x69, 0xc8],
-            cursor_primary: [0x3b, 0x82, 0xf6],
-            cursor_secondary: [0x06, 0xb6, 0xd4],
+            cursor_primary: [0x31, 0x54, 0xa1],
+            cursor_secondary: [0x07, 0x92, 0xa8],
             warning: [0xde, 0xad, 0x01],
             danger: [0xbe, 0xef, 0x02],
             warning_on: false,
@@ -208,7 +208,7 @@ fn settings_roundtrip_and_legacy_defaults() {
             codex_on: false,
             grok: [0xd1, 0x52, 0x88],
             grok_on: true,
-            cursor: [0x3b, 0x82, 0xf6],
+            cursor: [0x5b, 0x9c, 0xff],
             cursor_on: false,
             info: [0x34, 0x56, 0x78],
             info_on: true,
@@ -444,6 +444,25 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
     let migrated = Settings::load_from(&path);
     assert_eq!(migrated.tool_colors, ToolColors::default());
 
+    fs::write(
+        &path,
+        r##"{"tool_colors":{"cursor_primary":[59,130,246],"cursor_secondary":[6,182,212]},"taskbar_text_colors":{"cursor":[59,130,246],"cursor_on":false}}"##,
+    )
+    .unwrap();
+    let cursor_defaults = Settings::load_from(&path);
+    assert_eq!(
+        cursor_defaults.tool_colors.cursor_primary,
+        [0x72, 0x71, 0x6d]
+    );
+    assert_eq!(
+        cursor_defaults.tool_colors.cursor_secondary,
+        [0x08, 0x91, 0xb2]
+    );
+    assert_eq!(
+        cursor_defaults.taskbar_text_colors.cursor,
+        [0x72, 0x71, 0x6d]
+    );
+
     let custom = ToolColors {
         claude_primary: [0xb7, 0x83, 0x3a],
         claude_secondary: [0xa6, 0x5f, 0x72],
@@ -458,6 +477,30 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
     .unwrap();
 
     assert_eq!(Settings::load_from(&path).tool_colors, custom);
+
+    fs::write(
+        &path,
+        r##"{"tool_colors":{"codex_primary":[18,52,86],"cursor_primary":[59,130,246],"cursor_secondary":[6,182,212]},"taskbar_text_colors":{"cursor":[59,130,246],"cursor_on":true}}"##,
+    )
+    .unwrap();
+    let mixed = Settings::load_from(&path);
+    assert_eq!(mixed.tool_colors.codex_primary, [0x12, 0x34, 0x56]);
+    assert_eq!(mixed.tool_colors.cursor_primary, [0x72, 0x71, 0x6d]);
+    assert_eq!(mixed.tool_colors.cursor_secondary, [0x08, 0x91, 0xb2]);
+    assert_eq!(mixed.taskbar_text_colors.cursor, [0x3b, 0x82, 0xf6]);
+    assert!(mixed.taskbar_text_colors.cursor_on);
+
+    fs::write(
+        &path,
+        r##"{"tool_colors":{"cursor_primary":[18,52,86],"cursor_secondary":[6,182,212]}}"##,
+    )
+    .unwrap();
+    let custom_cursor = Settings::load_from(&path);
+    assert_eq!(custom_cursor.tool_colors.cursor_primary, [0x12, 0x34, 0x56]);
+    assert_eq!(
+        custom_cursor.tool_colors.cursor_secondary,
+        [0x06, 0xb6, 0xd4]
+    );
 }
 
 #[test]

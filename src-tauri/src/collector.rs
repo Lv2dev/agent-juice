@@ -10,6 +10,7 @@ use serde_json::Value;
 
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 const CODEX_ACCOUNT_RESPONSE_ID: i64 = 2;
+const CODEX_USAGE_RESPONSE_ID: i64 = 3;
 const GROK_BILLING_RESPONSE_ID: i64 = 2;
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -20,6 +21,10 @@ const TASKKILL_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_ROLLOUT_DEPTH: usize = 4;
 const MAX_ROLLOUT_CANDIDATES: usize = 16_384;
 const MAX_ROLLOUT_ENTRIES: usize = 65_536;
+#[cfg(windows)]
+const MAX_CODEX_DESKTOP_BIN_ENTRIES: usize = 64;
+#[cfg(windows)]
+const CODEX_RUNTIME_DIRECTORY_NAME_LEN: usize = 16;
 pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 
@@ -646,12 +651,42 @@ fn is_token_count_event(line: &str) -> bool {
 }
 
 pub fn codex_account_rate_limits_response(timeout: Duration) -> anyhow::Result<String> {
-    codex_account_rate_limits_response_with_command(codex_app_server_command(), timeout)
+    codex_account_rate_limits_response_with_command(codex_app_server_command()?, timeout)
+}
+
+pub fn codex_account_usage_response(timeout: Duration) -> anyhow::Result<String> {
+    codex_account_usage_response_with_command(codex_app_server_command()?, timeout)
 }
 
 fn codex_account_rate_limits_response_with_command(
     command: Command,
     timeout: Duration,
+) -> anyhow::Result<String> {
+    codex_account_method_response_with_command(
+        command,
+        timeout,
+        "account/rateLimits/read",
+        CODEX_ACCOUNT_RESPONSE_ID,
+    )
+}
+
+fn codex_account_usage_response_with_command(
+    command: Command,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    codex_account_method_response_with_command(
+        command,
+        timeout,
+        "account/usage/read",
+        CODEX_USAGE_RESPONSE_ID,
+    )
+}
+
+fn codex_account_method_response_with_command(
+    command: Command,
+    timeout: Duration,
+    method: &str,
+    response_id: i64,
 ) -> anyhow::Result<String> {
     let requests = [
         serde_json::json!({
@@ -673,18 +708,12 @@ fn codex_account_rate_limits_response_with_command(
         }),
         serde_json::json!({
             "jsonrpc": "2.0",
-            "id": CODEX_ACCOUNT_RESPONSE_ID,
-            "method": "account/rateLimits/read",
+            "id": response_id,
+            "method": method,
             "params": {}
         }),
     ];
-    json_rpc_response_with_command(
-        command,
-        &requests,
-        CODEX_ACCOUNT_RESPONSE_ID,
-        timeout,
-        "codex app-server",
-    )
+    json_rpc_response_with_command(command, &requests, response_id, timeout, "codex app-server")
 }
 
 pub fn grok_billing_response(timeout: Duration) -> anyhow::Result<String> {
@@ -937,11 +966,32 @@ fn claude_usage_output_with_command(command: Command, timeout: Duration) -> anyh
 }
 
 pub(crate) fn command_output_with_input(
-    mut command: Command,
+    command: Command,
     input: Option<&[u8]>,
     timeout: Duration,
     label: &str,
 ) -> anyhow::Result<String> {
+    command_output_with_input_caps(
+        command,
+        input,
+        timeout,
+        label,
+        MAX_COMMAND_OUTPUT_BYTES,
+        MAX_COMMAND_ERROR_BYTES,
+    )
+}
+
+pub(crate) fn command_output_with_input_caps(
+    mut command: Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    label: &str,
+    stdout_cap: usize,
+    stderr_cap: usize,
+) -> anyhow::Result<String> {
+    if stdout_cap == 0 || stderr_cap == 0 {
+        anyhow::bail!("{label} output cap unavailable");
+    }
     let deadline = Instant::now() + timeout;
     let hard_deadline = deadline + PROCESS_CLEANUP_GRACE;
     command
@@ -979,20 +1029,12 @@ pub(crate) fn command_output_with_input(
     };
     let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = read_bounded_to_end(
-            BufReader::new(stdout),
-            MAX_COMMAND_OUTPUT_BYTES,
-            "command stdout",
-        );
+        let result = read_bounded_to_end(BufReader::new(stdout), stdout_cap, "command stdout");
         let _ = stdout_tx.send(result);
     });
     let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = read_bounded_to_end(
-            BufReader::new(stderr),
-            MAX_COMMAND_ERROR_BYTES,
-            "command stderr",
-        );
+        let result = read_bounded_to_end(BufReader::new(stderr), stderr_cap, "command stderr");
         let _ = stderr_tx.send(result);
     });
 
@@ -1045,22 +1087,193 @@ pub(crate) fn command_output_with_input(
     anyhow::bail!("{label} command failed: {}", message.trim());
 }
 
-fn codex_app_server_command() -> Command {
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsCodexRuntime {
+    Native(PathBuf),
+    CommandShim(PathBuf),
+}
+
+#[cfg(windows)]
+fn windows_metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(windows)]
+fn safe_codex_directory(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || windows_metadata_is_reparse(&metadata)
+    {
+        anyhow::bail!("Codex Desktop runtime directory rejected");
+    }
+    Ok(Some(metadata))
+}
+
+#[cfg(windows)]
+fn safe_codex_executable(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || windows_metadata_is_reparse(&metadata)
+    {
+        anyhow::bail!("Codex Desktop runtime executable rejected");
+    }
+    Ok(Some(metadata))
+}
+
+#[cfg(windows)]
+fn is_codex_runtime_directory_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.len() == CODEX_RUNTIME_DIRECTORY_NAME_LEN
+        && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(windows)]
+fn find_codex_desktop_executable(local_app_data: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(local_app_data) = local_app_data else {
+        return Ok(None);
+    };
+    let bin = local_app_data.join("OpenAI").join("Codex").join("bin");
+    if safe_codex_directory(&bin)?.is_none() {
+        return Ok(None);
+    }
+
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    let mut entries_seen = 0usize;
+    for entry in std::fs::read_dir(&bin)? {
+        entries_seen = entries_seen.saturating_add(1);
+        if entries_seen > MAX_CODEX_DESKTOP_BIN_ENTRIES {
+            anyhow::bail!("Codex Desktop runtime directory entry limit exceeded");
+        }
+        let entry = entry?;
+        if !is_codex_runtime_directory_name(&entry.file_name()) {
+            continue;
+        }
+        let directory = entry.path();
+        if safe_codex_directory(&directory)?.is_none() {
+            continue;
+        }
+        let executable = directory.join("codex.exe");
+        let Some(metadata) = safe_codex_executable(&executable)? else {
+            continue;
+        };
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if latest
+            .as_ref()
+            .is_none_or(|(current, path)| (modified, &executable) > (*current, path))
+        {
+            latest = Some((modified, executable));
+        }
+    }
+
+    if let Some((_, executable)) = latest {
+        return Ok(Some(executable));
+    }
+    let fallback = bin.join("codex.exe");
+    Ok(safe_codex_executable(&fallback)?.map(|_| fallback))
+}
+
+#[cfg(windows)]
+fn find_codex_path_runtime(path: Option<&std::ffi::OsStr>) -> Option<WindowsCodexRuntime> {
+    const NATIVE_NAMES: [&str; 2] = ["codex.exe", "codex.com"];
+    const SHIM_NAMES: [&str; 2] = ["codex.cmd", "codex.bat"];
+
+    for directory in std::env::split_paths(path?) {
+        if directory.as_os_str().is_empty() {
+            continue;
+        }
+        for name in NATIVE_NAMES {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(WindowsCodexRuntime::Native(candidate));
+            }
+        }
+        for name in SHIM_NAMES {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(WindowsCodexRuntime::CommandShim(candidate));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn resolve_codex_runtime_from(
+    local_app_data: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> anyhow::Result<Option<WindowsCodexRuntime>> {
+    if let Some(executable) = find_codex_desktop_executable(local_app_data)? {
+        return Ok(Some(WindowsCodexRuntime::Native(executable)));
+    }
+    Ok(find_codex_path_runtime(path))
+}
+
+#[cfg(windows)]
+fn codex_app_server_command_for(runtime: WindowsCodexRuntime) -> anyhow::Result<Command> {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = match runtime {
+        WindowsCodexRuntime::Native(executable) => {
+            let mut native = Command::new(executable);
+            native.args(["app-server", "--listen", "stdio://"]);
+            native
+        }
+        WindowsCodexRuntime::CommandShim(shim) => {
+            let shim_text = shim
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Codex command shim path rejected"))?;
+            if shim_text
+                .chars()
+                .any(|character| matches!(character, '"' | '&' | '|' | '<' | '>' | '^' | '%' | '!'))
+            {
+                anyhow::bail!("Codex command shim path rejected");
+            }
+            let system_root = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            let mut shell = Command::new(system_root.join("System32").join("cmd.exe"));
+            shell.args(["/D", "/C"]);
+            shell.arg(shim);
+            shell.args(["app-server", "--listen", "stdio://"]);
+            shell
+        }
+    };
+    command.creation_flags(0x08000000);
+    Ok(command)
+}
+
+fn codex_app_server_command() -> anyhow::Result<Command> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
-        let mut command = Command::new("cmd");
-        command.args(["/C", "codex", "app-server", "--listen", "stdio://"]);
-        command.creation_flags(0x08000000);
-        command
+        let runtime = resolve_codex_runtime_from(
+            dirs::data_local_dir().as_deref(),
+            std::env::var_os("PATH").as_deref(),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Codex executable unavailable"))?;
+        codex_app_server_command_for(runtime)
     }
 
     #[cfg(not(windows))]
     {
         let mut command = Command::new("codex");
         command.args(["app-server", "--listen", "stdio://"]);
-        command
+        Ok(command)
     }
 }
 
@@ -1180,10 +1393,20 @@ mod tests {
     use std::{
         io::BufRead,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
     };
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agent-juice-{label}-{}-{}",
+            std::process::id(),
+            TEST_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     fn test_process(exact_test: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -1426,9 +1649,21 @@ mod tests {
 
         let stdin = std::io::stdin();
         let mut reader = BufReader::new(stdin.lock());
+        let mut account_method = None;
         for _ in 0..3 {
             let mut request = String::new();
             assert!(reader.read_line(&mut request).unwrap() > 0);
+            let value: Value = serde_json::from_str(&request).unwrap();
+            if value
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some_and(|method| method.starts_with("account/"))
+            {
+                account_method = value
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
         }
         drop(reader);
 
@@ -1445,8 +1680,21 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(200));
         if !eof_seen.load(Ordering::SeqCst) {
-            println!(
-                "{}",
+            let response = if account_method.as_deref() == Some("account/usage/read") {
+                serde_json::json!({
+                    "id": CODEX_USAGE_RESPONSE_ID,
+                    "result": {
+                        "summary": {
+                            "lifetimeTokens": 30,
+                            "peakDailyTokens": 20
+                        },
+                        "dailyUsageBuckets": [
+                            {"startDate": "2026-08-25", "tokens": 10},
+                            {"startDate": "2026-08-26", "tokens": 20}
+                        ]
+                    }
+                })
+            } else {
                 serde_json::json!({
                     "id": CODEX_ACCOUNT_RESPONSE_ID,
                     "result": {
@@ -1456,7 +1704,8 @@ mod tests {
                         }
                     }
                 })
-            );
+            };
+            println!("{response}");
             std::io::stdout().flush().unwrap();
         }
         std::process::exit(0);
@@ -1473,6 +1722,147 @@ mod tests {
         let value: Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(value.get("id").and_then(Value::as_i64), Some(2));
+    }
+
+    #[test]
+    fn codex_account_usage_uses_the_same_bounded_app_server_lifecycle() {
+        let mut command = test_process("collector::tests::fake_app_server_child");
+        command.env("AGENT_JUICE_FAKE_APP_SERVER", "1");
+
+        let response =
+            codex_account_usage_response_with_command(command, Duration::from_secs(2)).unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(value.get("id").and_then(Value::as_i64), Some(3));
+        assert_eq!(
+            value
+                .pointer("/result/summary/lifetimeTokens")
+                .and_then(Value::as_u64),
+            Some(30)
+        );
+    }
+
+    #[cfg(windows)]
+    fn write_codex_runtime_fixture(path: &Path, modified_secs: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs)),
+        )
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_desktop_runtime_prefers_the_newest_versioned_binary_then_unversioned() {
+        let root = unique_test_root("codex-desktop-runtime");
+        let bin = root.join("OpenAI").join("Codex").join("bin");
+        let unversioned = bin.join("codex.exe");
+        let older = bin.join("1111111111111111").join("codex.exe");
+        let newer = bin.join("2222222222222222").join("codex.exe");
+        write_codex_runtime_fixture(&unversioned, 30);
+        write_codex_runtime_fixture(&older, 10);
+        write_codex_runtime_fixture(&newer, 20);
+
+        assert_eq!(
+            find_codex_desktop_executable(Some(&root)).unwrap(),
+            Some(newer.clone())
+        );
+        std::fs::remove_file(newer).unwrap();
+        assert_eq!(
+            find_codex_desktop_executable(Some(&root)).unwrap(),
+            Some(older.clone())
+        );
+        std::fs::remove_file(older).unwrap();
+        assert_eq!(
+            find_codex_desktop_executable(Some(&root)).unwrap(),
+            Some(unversioned)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_runtime_falls_back_to_a_path_cli_shim_and_reports_missing() {
+        let root = unique_test_root("codex-path-runtime");
+        let path_dir = root.join("path with spaces");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let native = path_dir.join("codex.exe");
+        let shim = path_dir.join("codex.cmd");
+        std::fs::write(&native, b"fixture").unwrap();
+        std::fs::write(&shim, b"@exit /b 0\r\n").unwrap();
+        let path = std::env::join_paths([&path_dir]).unwrap();
+
+        assert_eq!(
+            resolve_codex_runtime_from(Some(&root.join("missing")), Some(&path)).unwrap(),
+            Some(WindowsCodexRuntime::Native(native.clone()))
+        );
+        std::fs::remove_file(native).unwrap();
+        let runtime = resolve_codex_runtime_from(Some(&root.join("missing")), Some(&path))
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime, WindowsCodexRuntime::CommandShim(shim.clone()));
+        let command = codex_app_server_command_for(runtime).unwrap();
+        assert!(command
+            .get_program()
+            .to_string_lossy()
+            .ends_with("System32\\cmd.exe"));
+        assert!(command.get_args().any(|argument| argument
+            .to_string_lossy()
+            .contains(shim.to_string_lossy().as_ref())));
+        assert!(
+            codex_app_server_command_for(WindowsCodexRuntime::CommandShim(shim))
+                .unwrap()
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            resolve_codex_runtime_from(Some(&root.join("missing")), None).unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_desktop_runtime_scan_is_bounded() {
+        let root = unique_test_root("codex-runtime-bound");
+        let bin = root.join("OpenAI").join("Codex").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for index in 0..=MAX_CODEX_DESKTOP_BIN_ENTRIES {
+            std::fs::write(bin.join(format!("entry-{index:03}")), b"fixture").unwrap();
+        }
+
+        let error = find_codex_desktop_executable(Some(&root)).unwrap_err();
+        assert!(error.to_string().contains("entry limit"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_desktop_runtime_rejects_a_version_directory_reparse_point() {
+        let root = unique_test_root("codex-runtime-reparse");
+        let bin = root.join("OpenAI").join("Codex").join("bin");
+        let real = root.join("real-runtime");
+        let junction = bin.join("aaaaaaaaaaaaaaaa");
+        write_codex_runtime_fixture(&real.join("codex.exe"), 1);
+        std::fs::create_dir_all(&bin).unwrap();
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let status = Command::new(system_root.join("System32").join("cmd.exe"))
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&real)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(find_codex_desktop_executable(Some(&root)).is_err());
+        std::fs::remove_dir(&junction).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1665,7 +2055,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a locally installed and logged-in Codex CLI"]
+    #[ignore = "requires a locally installed and logged-in Codex Desktop or CLI"]
     fn live_codex_app_server_round_trip() {
         let response = codex_account_rate_limits_response(Duration::from_secs(5)).unwrap();
         let value: Value = serde_json::from_str(&response).unwrap();
@@ -1679,6 +2069,46 @@ mod tests {
         assert_eq!(value.get("id").and_then(Value::as_i64), Some(2));
         assert!(value.pointer("/result/rateLimits").is_some());
         assert!(status.primary.is_some() || status.secondary.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a locally installed and logged-in Codex Desktop"]
+    fn live_codex_desktop_app_server_round_trip_without_path_cli() {
+        let runtime = resolve_codex_runtime_from(dirs::data_local_dir().as_deref(), None)
+            .unwrap()
+            .expect("Codex Desktop runtime");
+        assert!(matches!(runtime, WindowsCodexRuntime::Native(_)));
+        let response = codex_account_rate_limits_response_with_command(
+            codex_app_server_command_for(runtime).unwrap(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let status = crate::adapters::codex::parse_account_rate_limits_response(
+            &response,
+            "LIVE",
+            "2026-08-26T00:00:00Z",
+        )
+        .unwrap();
+
+        assert!(status.primary.is_some() || status.secondary.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a current locally installed and logged-in Codex Desktop"]
+    fn live_codex_account_usage_round_trip_without_path_cli() {
+        let runtime = resolve_codex_runtime_from(dirs::data_local_dir().as_deref(), None)
+            .unwrap()
+            .expect("Codex Desktop runtime");
+        let response = codex_account_usage_response_with_command(
+            codex_app_server_command_for(runtime).unwrap(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+
+        assert!(value.pointer("/result/dailyUsageBuckets").is_some());
     }
 
     #[test]

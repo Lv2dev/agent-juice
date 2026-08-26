@@ -14,7 +14,7 @@ export const DEFAULT_SETTINGS = {
     codex_on: false,
     grok: [0xd9, 0x57, 0x8b],
     grok_on: false,
-    cursor: [0x3b, 0x82, 0xf6],
+    cursor: [0x72, 0x71, 0x6d],
     cursor_on: false,
     info: [0x6b, 0x72, 0x80],
     info_on: false,
@@ -80,7 +80,7 @@ const TOOL_SAFE = {
   claude: ["#d79a32", "#d36b86"],
   codex: ["#2fac7d", "#4d86d6"],
   grok: ["#d9578b", "#8a6fd1"],
-  cursor: ["#3b82f6", "#06b6d4"],
+  cursor: ["#72716d", "#0891b2"],
 };
 
 function rgbColor(value, fallback) {
@@ -306,6 +306,12 @@ function grokLimitLabel(limit) {
 function limitLabels(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
+  if (tool === "codex" && status) {
+    return [
+      status.primary == null ? null : "limit.fiveHour",
+      status.secondary == null ? null : "limit.weekly",
+    ];
+  }
   return ["limit.fiveHour", "limit.weekly"];
 }
 

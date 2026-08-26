@@ -34,18 +34,83 @@ function tokensForFilter(day, filter, settings) {
   const claude = settings?.show_claude === false ? 0 : finiteInteger(day?.claude_tokens);
   const codex = settings?.show_codex === false ? 0 : finiteInteger(day?.codex_tokens);
   const grok = settings?.show_grok === true ? finiteInteger(day?.grok_tokens) : 0;
+  const cursor = settings?.show_cursor === true ? finiteInteger(day?.cursor_tokens) : 0;
   if (filter === "claude") return claude;
   if (filter === "codex") return codex;
   if (filter === "grok") return grok;
-  return Math.min(Number.MAX_SAFE_INTEGER, claude + codex + grok);
+  if (filter === "cursor") return cursor;
+  return Math.min(Number.MAX_SAFE_INTEGER, claude + codex + grok + cursor);
 }
 
 function normalizedFilter(value, settings) {
-  const filter = ["claude", "codex", "grok"].includes(value) ? value : "all";
+  const filter = ["claude", "codex", "grok", "cursor"].includes(value) ? value : "all";
   if (filter === "claude" && settings?.show_claude === false) return "all";
   if (filter === "codex" && settings?.show_codex === false) return "all";
   if (filter === "grok" && settings?.show_grok === false) return "all";
+  if (filter === "cursor" && settings?.show_cursor === false) return "all";
   return filter;
+}
+
+function sourceState(snapshot, filter, settings) {
+  const legacyPartial = snapshot?.partial === true;
+  const legacyBackfill = snapshot?.backfill_pending === true;
+  const localPartial = snapshot?.local_partial ?? legacyPartial;
+  const localBackfill = snapshot?.local_backfill_pending ?? legacyBackfill;
+  const codexAccountScope = snapshot?.codex_account_scope === true;
+  const codexPartial = codexAccountScope
+    ? snapshot?.codex_partial === true
+    : localPartial;
+  const codexBackfill = codexAccountScope
+    ? snapshot?.codex_backfill_pending === true
+    : localBackfill;
+  const cursorAccountScope = snapshot?.cursor_account_scope === true;
+  const cursorPartial = snapshot?.cursor_partial === true;
+  const cursorBackfill = snapshot?.cursor_backfill_pending === true;
+  if (filter === "codex") {
+    return {
+      partial: codexPartial,
+      backfillPending: codexBackfill,
+      scope: codexAccountScope ? "codex_account" : "local",
+    };
+  }
+  if (filter === "cursor") {
+    return {
+      partial: cursorPartial,
+      backfillPending: cursorBackfill,
+      scope: cursorAccountScope ? "cursor_account" : "local",
+    };
+  }
+  if (filter !== "all") {
+    return { partial: localPartial, backfillPending: localBackfill, scope: "local" };
+  }
+
+  const codexEnabled = settings?.show_codex !== false;
+  const cursorEnabled = settings?.show_cursor === true;
+  const localEnabled = settings?.show_claude !== false
+    || settings?.show_grok === true
+    || (codexEnabled && !codexAccountScope)
+    || (cursorEnabled && !cursorAccountScope);
+  const codexAccountEnabled = codexEnabled && codexAccountScope;
+  const cursorAccountEnabled = cursorEnabled && cursorAccountScope;
+  const accountEnabled = codexAccountEnabled || cursorAccountEnabled;
+  const scope = localEnabled && accountEnabled
+    ? "mixed"
+    : codexAccountEnabled && cursorAccountEnabled
+      ? "account_mixed"
+      : codexAccountEnabled
+        ? "codex_account"
+        : cursorAccountEnabled
+          ? "cursor_account"
+          : "local";
+  return {
+    partial: (localEnabled && localPartial)
+      || (codexAccountEnabled && codexPartial)
+      || (cursorAccountEnabled && cursorPartial),
+    backfillPending: (localEnabled && localBackfill)
+      || (codexAccountEnabled && codexBackfill)
+      || (cursorAccountEnabled && cursorBackfill),
+    scope,
+  };
 }
 
 function fixedLevel(tokens, unit) {
@@ -105,6 +170,7 @@ export function buildActivityView(
       claudeTokens: finiteInteger(source?.claude_tokens),
       codexTokens: finiteInteger(source?.codex_tokens),
       grokTokens: finiteInteger(source?.grok_tokens),
+      cursorTokens: finiteInteger(source?.cursor_tokens),
       tokens: tokensForFilter(source, filter, settings),
       level: 0,
     });
@@ -120,6 +186,7 @@ export function buildActivityView(
   for (const cell of visibleCells) {
     cell.level = fixed ? fixedLevel(cell.tokens, unit) : autoLevel(cell.tokens, maximum);
   }
+  const source = sourceState(snapshot, filter, settings);
 
   return {
     weeks,
@@ -131,8 +198,11 @@ export function buildActivityView(
       0,
     ),
     activeDays: visibleCells.filter((cell) => cell.tokens > 0).length,
-    partial: snapshot?.partial === true,
-    backfillPending: snapshot?.backfill_pending === true,
+    partial: source.partial,
+    backfillPending: source.backfillPending,
+    scope: source.scope,
+    codexAccountScope: snapshot?.codex_account_scope === true,
+    cursorAccountScope: snapshot?.cursor_account_scope === true,
     empty: visibleCells.every((cell) => cell.tokens === 0),
     scaleMode: fixed ? "fixed" : "auto",
     tokensPerLevel: unit,
