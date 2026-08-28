@@ -1,11 +1,12 @@
+use crate::http_transport::{self, HttpErrorKind, HttpMethod};
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
     fmt,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -14,11 +15,11 @@ const DASHBOARD_BASE_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardSe
 const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 const APPLICATION_USER_KEY: &str =
     "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
-const MAX_DB_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
 const MAX_APPLICATION_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CLI_AUTH_FILE_BYTES: u64 = 64 * 1024;
+const MAX_CLI_CONFIG_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
-const TRANSPORT_CLEANUP_RESERVE: Duration = Duration::from_millis(750);
 pub const STATUS_RESPONSE_CAP: usize = 256 * 1024;
 pub const ACTIVITY_RESPONSE_CAP: usize = 1024 * 1024;
 static VALIDATED_SCOPES: LazyLock<Mutex<BTreeSet<AccountScope>>> =
@@ -185,6 +186,18 @@ pub fn state_db_path() -> Result<PathBuf, DashboardError> {
         .ok_or_else(|| DashboardError::unavailable("Cursor configuration directory unavailable"))
 }
 
+fn cli_auth_path() -> Result<PathBuf, DashboardError> {
+    dirs::config_dir()
+        .map(|root| root.join("Cursor").join("auth.json"))
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI auth path unavailable"))
+}
+
+fn cli_config_path() -> Result<PathBuf, DashboardError> {
+    dirs::home_dir()
+        .map(|root| root.join(".cursor").join("cli-config.json"))
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI config path unavailable"))
+}
+
 fn metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -242,6 +255,20 @@ struct LockedStateFile {
 impl Drop for LockedStateFile {
     fn drop(&mut self) {
         let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+impl LockedStateFile {
+    fn revalidate(&self) -> Result<(), DashboardError> {
+        let current = lock_state_file(&self.path)?;
+        if current.identity != self.identity {
+            return Err(DashboardError::new(
+                DashboardErrorKind::ScopeChanged,
+                "Cursor credential file identity changed",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -333,13 +360,7 @@ impl StateFilesGuard {
             ));
         }
         for file in &self.files {
-            let current = lock_state_file(&file.path)?;
-            if current.identity != file.identity {
-                return Err(DashboardError::new(
-                    DashboardErrorKind::ScopeChanged,
-                    "Cursor state file identity changed",
-                ));
-            }
+            file.revalidate()?;
         }
         Ok(())
     }
@@ -363,7 +384,7 @@ fn validate_state_files(path: &Path) -> Result<(), DashboardError> {
     validate_path_components(path)?;
     let metadata = std::fs::metadata(path)
         .map_err(|_| DashboardError::unavailable("Cursor state database unavailable"))?;
-    if !metadata.is_file() || metadata.len() > MAX_DB_BYTES {
+    if !metadata.is_file() {
         return Err(DashboardError::unavailable(
             "Cursor state database rejected",
         ));
@@ -373,7 +394,7 @@ fn validate_state_files(path: &Path) -> Result<(), DashboardError> {
             validate_path_components(&sidecar)?;
             let metadata = std::fs::metadata(&sidecar)
                 .map_err(|_| DashboardError::unavailable("Cursor state sidecar unavailable"))?;
-            if !metadata.is_file() || metadata.len() > MAX_DB_BYTES {
+            if !metadata.is_file() {
                 return Err(DashboardError::unavailable("Cursor state sidecar rejected"));
             }
         }
@@ -412,10 +433,136 @@ fn positive_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
+fn validate_access_token(value: String) -> Result<String, DashboardError> {
+    if value.is_empty()
+        || value.len() > MAX_TOKEN_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~'))
+    {
+        return Err(DashboardError::login("Cursor login required"));
+    }
+    Ok(value)
+}
+
+fn read_bounded_credential_file(
+    path: &Path,
+    max_bytes: u64,
+    deadline: Instant,
+) -> Result<Vec<u8>, DashboardError> {
+    remaining(deadline, "Cursor credentials deadline exceeded")?;
+    validate_path_components(path)?;
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            DashboardError::login("Cursor login required")
+        } else {
+            DashboardError::unavailable("Cursor credential file unavailable")
+        }
+    })?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(DashboardError::login("Cursor login required"));
+    }
+    #[cfg(windows)]
+    let identity = lock_state_file(path)?;
+    let mut bytes = Vec::with_capacity((metadata.len() as usize).min(64 * 1024));
+    std::fs::File::open(path)
+        .map_err(|_| DashboardError::unavailable("Cursor credential file unavailable"))?
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DashboardError::unavailable("Cursor credential file read failed"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(DashboardError::login("Cursor login required"));
+    }
+    validate_path_components(path)?;
+    #[cfg(windows)]
+    identity.revalidate()?;
+    remaining(deadline, "Cursor credentials deadline exceeded")?;
+    Ok(bytes)
+}
+
+#[derive(Deserialize)]
+struct CursorCliAuth {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+}
+
+#[derive(Deserialize)]
+struct CursorCliConfig {
+    #[serde(rename = "authInfo")]
+    auth_info: Option<CursorCliAuthInfo>,
+}
+
+#[derive(Deserialize)]
+struct CursorCliAuthInfo {
+    #[serde(rename = "userId")]
+    user_id: Value,
+}
+
 pub fn read_credentials(deadline: Instant) -> Result<DashboardCredentials, DashboardError> {
     remaining(deadline, "Cursor credentials deadline exceeded")?;
-    let path = state_db_path()?;
-    read_credentials_from(&path, deadline)
+    let gui = state_db_path().and_then(|path| read_credentials_from(&path, deadline));
+    resolve_credential_sources(gui, || {
+        cli_auth_path().and_then(|auth| {
+            cli_config_path().and_then(|config| read_cli_credentials_from(&auth, &config, deadline))
+        })
+    })
+}
+
+fn resolve_credential_sources(
+    gui: Result<DashboardCredentials, DashboardError>,
+    cli: impl FnOnce() -> Result<DashboardCredentials, DashboardError>,
+) -> Result<DashboardCredentials, DashboardError> {
+    match gui {
+        Ok(credentials) => Ok(credentials),
+        Err(gui_error) => {
+            cli().map_err(|cli_error| preferred_credential_error(gui_error, cli_error))
+        }
+    }
+}
+
+fn preferred_credential_error(gui: DashboardError, cli: DashboardError) -> DashboardError {
+    fn priority(kind: DashboardErrorKind) -> u8 {
+        match kind {
+            DashboardErrorKind::Deadline => 5,
+            DashboardErrorKind::ScopeChanged => 4,
+            DashboardErrorKind::Parse | DashboardErrorKind::Oversized => 3,
+            DashboardErrorKind::LoginRequired => 2,
+            DashboardErrorKind::Unavailable => 1,
+            DashboardErrorKind::Transport => 0,
+        }
+    }
+
+    if priority(gui.kind) >= priority(cli.kind) {
+        gui
+    } else {
+        cli
+    }
+}
+
+fn read_cli_credentials_from(
+    auth_path: &Path,
+    config_path: &Path,
+    deadline: Instant,
+) -> Result<DashboardCredentials, DashboardError> {
+    let auth = read_bounded_credential_file(auth_path, MAX_CLI_AUTH_FILE_BYTES, deadline)?;
+    let auth: CursorCliAuth = serde_json::from_slice(&auth)
+        .map_err(|_| DashboardError::parse("Cursor CLI auth was not recognized"))?;
+    let access_token = validate_access_token(auth.access_token)?;
+    let config = read_bounded_credential_file(config_path, MAX_CLI_CONFIG_FILE_BYTES, deadline)?;
+    let config: CursorCliConfig = serde_json::from_slice(&config)
+        .map_err(|_| DashboardError::parse("Cursor CLI config was not recognized"))?;
+    let user_id = config
+        .auth_info
+        .as_ref()
+        .and_then(|auth| positive_u64(Some(&auth.user_id)))
+        .ok_or_else(|| DashboardError::login("Cursor account identity unavailable"))?;
+    Ok(DashboardCredentials {
+        access_token,
+        scope: AccountScope {
+            user_id,
+            team_id: None,
+        },
+    })
 }
 
 fn read_credentials_from(
@@ -450,15 +597,8 @@ fn read_credentials_from(
     remaining(deadline, "Cursor credentials deadline exceeded")?;
 
     let access_token = String::from_utf8(token)
-        .ok()
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= MAX_TOKEN_BYTES
-                && value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~')
-                })
-        })
-        .ok_or_else(|| DashboardError::login("Cursor login required"))?;
+        .map_err(|_| DashboardError::login("Cursor login required"))
+        .and_then(validate_access_token)?;
     let application: Value = serde_json::from_slice(&application)
         .map_err(|_| DashboardError::parse("Cursor account identity was not recognized"))?;
     let user_id = positive_u64(application.get("dashboardUserId"))
@@ -476,83 +616,15 @@ struct ConnectErrorBody {
     code: Option<String>,
 }
 
-fn curl_command() -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let path = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join("System32")
-            .join("curl.exe");
-        let mut command = Command::new(path);
-        command.args(["--config", "-"]);
-        command.creation_flags(0x08000000);
-        command
+fn dashboard_url(method: &'static str) -> Result<String, DashboardError> {
+    match method {
+        "GetCurrentPeriodUsage" | "GetFilteredUsageEvents" | "GetAggregatedUsageEvents" => {
+            Ok(format!("{DASHBOARD_BASE_URL}/{method}"))
+        }
+        _ => Err(DashboardError::parse(
+            "Cursor Dashboard method was not recognized",
+        )),
     }
-    #[cfg(not(windows))]
-    {
-        let mut command = Command::new("curl");
-        command.args(["--config", "-"]);
-        command
-    }
-}
-
-fn config_value(value: &str) -> Result<String, DashboardError> {
-    if value.contains(['\r', '\n', '\0']) {
-        return Err(DashboardError::parse(
-            "Cursor Dashboard request value rejected",
-        ));
-    }
-    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn curl_config(
-    credentials: &DashboardCredentials,
-    method: &'static str,
-    body: &str,
-    timeout: Duration,
-) -> Result<String, DashboardError> {
-    let url = format!("{DASHBOARD_BASE_URL}/{method}");
-    let token = config_value(credentials.access_token())?;
-    let body = config_value(body)?;
-    Ok(format!(
-        "silent\nshow-error\nrequest = \"POST\"\nmax-time = \"{:.3}\"\nconnect-timeout = \"{:.3}\"\nurl = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Connect-Protocol-Version: 1\"\nheader = \"Content-Type: application/json\"\ndata-binary = \"{}\"\nwrite-out = \"\\n__AJ_CURSOR_HTTP__:%{{http_code}}:%{{content_type}}\"\n",
-        timeout.as_secs_f64(),
-        timeout.min(Duration::from_secs(3)).as_secs_f64(),
-        url,
-        token,
-        body,
-    ))
-}
-
-fn parse_transport_output(
-    output: String,
-    cap: usize,
-) -> Result<(u16, String, Vec<u8>), DashboardError> {
-    const MARKER: &str = "\n__AJ_CURSOR_HTTP__:";
-    let (body, metadata) = output
-        .rsplit_once(MARKER)
-        .ok_or_else(|| DashboardError::parse("Cursor Dashboard metadata unavailable"))?;
-    if body.len() > cap {
-        return Err(DashboardError::new(
-            DashboardErrorKind::Oversized,
-            "Cursor Dashboard response exceeded its limit",
-        ));
-    }
-    let (status, content_type) = metadata
-        .split_once(':')
-        .ok_or_else(|| DashboardError::parse("Cursor Dashboard metadata rejected"))?;
-    let status = status
-        .parse::<u16>()
-        .ok()
-        .filter(|value| (100..=599).contains(value))
-        .ok_or_else(|| DashboardError::parse("Cursor Dashboard status rejected"))?;
-    Ok((
-        status,
-        content_type.to_ascii_lowercase(),
-        body.as_bytes().to_vec(),
-    ))
 }
 
 fn post_json<Request: Serialize, Output: DeserializeOwned>(
@@ -562,36 +634,37 @@ fn post_json<Request: Serialize, Output: DeserializeOwned>(
     deadline: Instant,
     cap: usize,
 ) -> Result<Output, DashboardError> {
-    let remaining = remaining(deadline, "Cursor Dashboard deadline exceeded")?;
-    let timeout = remaining
-        .checked_sub(TRANSPORT_CLEANUP_RESERVE)
-        .filter(|value| !value.is_zero())
-        .ok_or_else(|| DashboardError::deadline("Cursor Dashboard cleanup reserve unavailable"))?;
+    remaining(deadline, "Cursor Dashboard deadline exceeded")?;
     let body = serde_json::to_string(request)
         .map_err(|_| DashboardError::parse("Cursor Dashboard request was not recognized"))?;
-    let config = curl_config(credentials, method, &body, timeout)?;
-    let output = crate::collector::command_output_with_input_caps(
-        curl_command(),
-        Some(config.as_bytes()),
-        timeout,
-        "Cursor Dashboard",
-        cap.saturating_add(256),
-        64 * 1024,
+    let authorization = format!("Bearer {}", credentials.access_token());
+    let response = http_transport::execute(
+        HttpMethod::PostRead,
+        &dashboard_url(method)?,
+        &[
+            ("authorization", authorization.as_str()),
+            ("connect-protocol-version", "1"),
+            ("content-type", "application/json"),
+        ],
+        Some(body.as_bytes()),
+        deadline,
+        cap,
+        "Cursor Dashboard request failed",
     )
-    .map_err(|error| {
-        if error.to_string().contains("exceeded") {
-            return DashboardError::new(
-                DashboardErrorKind::Oversized,
-                "Cursor Dashboard response exceeded its limit",
-            );
+    .map_err(|error| match error.kind {
+        HttpErrorKind::Deadline => DashboardError::deadline("Cursor Dashboard request timed out"),
+        HttpErrorKind::Oversized => DashboardError::new(
+            DashboardErrorKind::Oversized,
+            "Cursor Dashboard response exceeded its limit",
+        ),
+        HttpErrorKind::InvalidRequest => {
+            DashboardError::parse("Cursor Dashboard request was not recognized")
         }
-        if Instant::now() >= deadline {
-            DashboardError::deadline("Cursor Dashboard request timed out")
-        } else {
-            DashboardError::transport("Cursor Dashboard request failed")
-        }
+        HttpErrorKind::Transport => DashboardError::transport("Cursor Dashboard request failed"),
     })?;
-    let (status, content_type, body) = parse_transport_output(output, cap)?;
+    let status = response.status;
+    let content_type = response.content_type;
+    let body = response.body;
     if !(200..=299).contains(&status) {
         let code = serde_json::from_slice::<ConnectErrorBody>(&body)
             .ok()
@@ -901,6 +974,43 @@ mod tests {
         connection
     }
 
+    fn create_cli_credentials_fixture(
+        name: &str,
+        token: &str,
+        user_id: u64,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-cursor-cli-{name}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let auth = root.join("Cursor").join("auth.json");
+        let config = root.join(".cursor").join("cli-config.json");
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &auth,
+            serde_json::json!({
+                "accessToken": token,
+                "refreshToken": "fixture-refresh-token-must-be-ignored"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &config,
+            serde_json::json!({
+                "authInfo": {
+                    "userId": user_id,
+                    "email": "fixture@example.invalid"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (root, auth, config)
+    }
+
     #[test]
     fn token_usage_sums_all_four_components() {
         let usage = TokenUsage {
@@ -956,43 +1066,20 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_transport_keeps_token_out_of_process_arguments_and_parses_status() {
-        let credentials = DashboardCredentials {
-            access_token: "secret.token".into(),
-            scope: AccountScope {
-                user_id: 1,
-                team_id: None,
-            },
-        };
-        let config = curl_config(
-            &credentials,
+    fn dashboard_transport_accepts_only_known_constant_methods() {
+        for method in [
             "GetCurrentPeriodUsage",
-            "{}",
-            Duration::from_secs(2),
-        )
-        .unwrap();
-        assert!(config.contains("Authorization: Bearer secret.token"));
-        assert!(!format!("{:?}", curl_command()).contains("secret.token"));
-
-        let (status, content_type, body) = parse_transport_output(
-            "{\"ok\":true}\n__AJ_CURSOR_HTTP__:200:application/json".into(),
-            1024,
-        )
-        .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(content_type, "application/json");
-        assert_eq!(body, br#"{"ok":true}"#);
-    }
-
-    #[test]
-    fn dashboard_transport_rejects_body_past_the_call_cap() {
-        let output = format!(
-            "{}\n__AJ_CURSOR_HTTP__:200:application/json",
-            "x".repeat(17)
-        );
+            "GetFilteredUsageEvents",
+            "GetAggregatedUsageEvents",
+        ] {
+            assert_eq!(
+                dashboard_url(method).unwrap(),
+                format!("{DASHBOARD_BASE_URL}/{method}")
+            );
+        }
         assert_eq!(
-            parse_transport_output(output, 16).unwrap_err().kind,
-            DashboardErrorKind::Oversized
+            dashboard_url("https://example.invalid").unwrap_err().kind,
+            DashboardErrorKind::Parse
         );
     }
 
@@ -1010,6 +1097,59 @@ mod tests {
                 team_id: Some(7)
             }
         );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn credential_sources_prefer_gui_without_reading_cli() {
+        let path = fixture_path("gui-preferred");
+        let connection = create_credentials_fixture(&path, false);
+        drop(connection);
+        let gui = read_credentials_from(&path, Instant::now() + Duration::from_secs(2));
+        let credentials = resolve_credential_sources(gui, || {
+            panic!("CLI source must not be read when GUI credentials are valid")
+        })
+        .unwrap();
+        assert_eq!(credentials.scope.user_id, 42);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn credential_sources_fall_back_to_cli_access_token_and_user_id() {
+        let (root, auth, config) =
+            create_cli_credentials_fixture("fallback", "header.payload.signature", 77);
+        let credentials = resolve_credential_sources(
+            Err(DashboardError::login("Cursor GUI login unavailable")),
+            || read_cli_credentials_from(&auth, &config, Instant::now() + Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert_eq!(credentials.access_token(), "header.payload.signature");
+        assert_eq!(credentials.scope.user_id, 77);
+        assert_eq!(credentials.scope.team_id, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn credentials_ignore_unrelated_large_cursor_disk_kv_content() {
+        const LEGACY_DB_REJECTION_BYTES: u64 = 64 * 1024 * 1024;
+
+        let path = fixture_path("large-cursor-disk-kv");
+        let connection = create_credentials_fixture(&path, false);
+        connection
+            .execute("CREATE TABLE cursorDiskKV (key TEXT, value BLOB)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV(key, value) VALUES ('large', zeroblob(?1))",
+                [i64::try_from(LEGACY_DB_REJECTION_BYTES + 1024 * 1024).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(std::fs::metadata(&path).unwrap().len() > LEGACY_DB_REJECTION_BYTES);
+
+        let credentials =
+            read_credentials_from(&path, Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(credentials.scope.user_id, 42);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -1036,21 +1176,64 @@ mod tests {
 
     #[test]
     fn credentials_reject_oversized_values_before_loading_them() {
-        let path = fixture_path("oversized-token");
-        let connection = create_credentials_fixture(&path, false);
-        connection
-            .execute(
-                "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
-                ("x".repeat(MAX_TOKEN_BYTES + 1), ACCESS_TOKEN_KEY),
-            )
-            .unwrap();
-        drop(connection);
-        let error = match read_credentials_from(&path, Instant::now() + Duration::from_secs(2)) {
-            Ok(_) => panic!("oversized token was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind, DashboardErrorKind::LoginRequired);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        for (label, key, value) in [
+            (
+                "oversized-token",
+                ACCESS_TOKEN_KEY,
+                "x".repeat(MAX_TOKEN_BYTES + 1),
+            ),
+            (
+                "oversized-application",
+                APPLICATION_USER_KEY,
+                "x".repeat(MAX_APPLICATION_BYTES + 1),
+            ),
+        ] {
+            let path = fixture_path(label);
+            let connection = create_credentials_fixture(&path, false);
+            connection
+                .execute(
+                    "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+                    (&value, key),
+                )
+                .unwrap();
+            drop(connection);
+            let error = match read_credentials_from(&path, Instant::now() + Duration::from_secs(2))
+            {
+                Ok(_) => panic!("oversized Cursor credential value was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind, DashboardErrorKind::LoginRequired);
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn cli_credentials_reject_oversized_files_and_invalid_identity() {
+        let (root, auth, config) =
+            create_cli_credentials_fixture("oversized", "header.payload.signature", 77);
+        std::fs::write(&auth, vec![b'x'; MAX_CLI_AUTH_FILE_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            read_cli_credentials_from(&auth, &config, Instant::now() + Duration::from_secs(2))
+                .err()
+                .unwrap()
+                .kind,
+            DashboardErrorKind::LoginRequired
+        );
+
+        std::fs::write(
+            &auth,
+            r#"{"accessToken":"header.payload.signature","refreshToken":"ignored"}"#,
+        )
+        .unwrap();
+        std::fs::write(&config, r#"{"authInfo":{"userId":0}}"#).unwrap();
+        assert_eq!(
+            read_cli_credentials_from(&auth, &config, Instant::now() + Duration::from_secs(2))
+                .err()
+                .unwrap()
+                .kind,
+            DashboardErrorKind::LoginRequired
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
@@ -1059,6 +1242,23 @@ mod tests {
     fn live_gui_credentials_and_current_period_round_trip() {
         let deadline = Instant::now() + Duration::from_secs(8);
         let credentials = read_credentials(deadline).unwrap();
+        let usage = current_period_usage(&credentials, deadline).unwrap();
+        assert!((0.0..=100.0).contains(&usage.cursor_models_used_percent));
+        assert!((0.0..=100.0).contains(&usage.other_models_used_percent));
+        assert!(usage.billing_cycle_end_ms > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "uses the locally logged-in Cursor CLI account"]
+    fn live_cli_credentials_and_current_period_round_trip() {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let credentials = read_cli_credentials_from(
+            &cli_auth_path().unwrap(),
+            &cli_config_path().unwrap(),
+            deadline,
+        )
+        .unwrap();
         let usage = current_period_usage(&credentials, deadline).unwrap();
         assert!((0.0..=100.0).contains(&usage.cursor_models_used_percent));
         assert!((0.0..=100.0).contains(&usage.other_models_used_percent));

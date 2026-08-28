@@ -52,6 +52,18 @@ const rustTaskbar = readFileSync(resolve(here, "../src-tauri/src/taskbar.rs"), "
   /\r\n?/g,
   "\n",
 );
+const rustCollector = readFileSync(resolve(here, "../src-tauri/src/collector.rs"), "utf8").replace(
+  /\r\n?/g,
+  "\n",
+);
+const rustCursorDashboard = readFileSync(
+  resolve(here, "../src-tauri/src/cursor_dashboard.rs"),
+  "utf8",
+).replace(/\r\n?/g, "\n");
+const rustHttpTransport = readFileSync(
+  resolve(here, "../src-tauri/src/http_transport.rs"),
+  "utf8",
+).replace(/\r\n?/g, "\n");
 const gitignore = readFileSync(resolve(here, "../.gitignore"), "utf8").replace(/\r\n?/g, "\n");
 function readOptional(path) {
   return existsSync(path) ? readFileSync(path, "utf8").replace(/\r\n?/g, "\n") : "";
@@ -1707,6 +1719,30 @@ test("tray quit flushes pending settings before native cleanup and exit", () => 
   assert.doesNotMatch(rustLib, /tray_quit_menu_id\(\)\s*=>\s*app\.exit/);
 });
 
+test("periodic providers reuse in-process transports and persistent RPC sessions", () => {
+  assert.doesNotMatch(`${rustCollector}\n${rustCursorDashboard}`, /curl\.exe|Command::new\("curl"\)/);
+  assert.match(rustHttpTransport, /static AGENT: LazyLock<Agent>/);
+  assert.match(rustHttpTransport, /max_redirects\(0\)/);
+  assert.match(rustCollector, /fn grok_billing_response[\s\S]*?grok_acp_broker\(\)\?\.request/);
+  assert.match(rustCollector, /persistent_grok_broker_reuses_one_initialized_child/);
+  assert.match(rustLib, /set_grok_acp_enabled\(settings\.show_grok\)/);
+  assert.match(rustLib, /begin_grok_acp_shutdown\(\)/);
+  assert.match(rustLib, /fn cursor_dashboard_success_never_starts_the_agent_fallback/);
+  const bootstrap = panelJs.match(/async function bootstrap\(\)[\s\S]*?\n}\n\nbootstrap\(\);/)?.[0] ?? "";
+  assert.doesNotMatch(bootstrap, /Promise\.all\(\[[^\]]*loadActivity/);
+  assert.match(panelJs, /if \(becameVisible\) void loadActivity\(\)/);
+});
+
+test("Cursor credentials allow large state databases and fall back to bounded CLI files", () => {
+  assert.doesNotMatch(rustCursorDashboard, /MAX_DB_BYTES/);
+  assert.match(rustCursorDashboard, /length\(value\) <= \?2/);
+  assert.match(rustCursorDashboard, /root\.join\("Cursor"\)\.join\("auth\.json"\)/);
+  assert.match(rustCursorDashboard, /root\.join\("\.cursor"\)\.join\("cli-config\.json"\)/);
+  assert.match(rustCursorDashboard, /fn resolve_credential_sources/);
+  assert.match(rustCursorDashboard, /credentials_ignore_unrelated_large_cursor_disk_kv_content/);
+  assert.match(rustCursorDashboard, /cli_credentials_reject_oversized_files_and_invalid_identity/);
+});
+
 test("release links use the Windows shell API instead of PATH executable lookup", () => {
   assert.match(rustLib, /ShellExecuteW/);
   assert.doesNotMatch(rustLib, /Command::new\("explorer\.exe"\)/);
@@ -1725,7 +1761,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.17"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.18"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
