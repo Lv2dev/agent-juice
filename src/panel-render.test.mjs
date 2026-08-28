@@ -57,7 +57,9 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   };
 
   global.window = {
-    addEventListener() {},
+    addEventListener(name, handler) {
+      listeners[`window:${name}`] = handler;
+    },
     __TAURI__: {
       core: {
         async invoke(command) {
@@ -159,6 +161,9 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(clickPrevented, true);
   assert.ok(invokedCommands.includes("toggle_panel_maximized"));
+  assert.ok(!invokedCommands.includes("get_activity"));
+  listeners["window:focus"]?.();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(invokedCommands.includes("get_activity"));
   let dragPrevented = false;
   listeners.pointerdown?.({

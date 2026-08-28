@@ -6,6 +6,7 @@ pub mod config;
 pub mod cursor_activity;
 pub mod cursor_dashboard;
 pub mod cursor_pty;
+pub(crate) mod http_transport;
 pub mod model;
 pub mod paths;
 pub mod render;
@@ -61,7 +62,7 @@ const GROK_BILLING_CACHE_MIN_SECS: i64 = 60;
 const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
 const CURSOR_USAGE_CACHE_MIN_SECS: i64 = 5 * 60;
 const CURSOR_USAGE_TIMEOUT_SECS: u64 = 20;
-const CURSOR_GUI_RESERVE_SECS: u64 = 5;
+const CURSOR_AGENT_FALLBACK_MAX_RESERVE_SECS: u64 = 10;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
 const ACTIVITY_BACKFILL_MAX_PASSES: usize = 16;
 const ACTIVITY_BACKFILL_MAX_SECS: u64 = 30;
@@ -72,6 +73,8 @@ const CURSOR_ACTIVITY_MAX_SECS: u64 = 30;
 const CLAUDE_FALLBACK_RESERVE_SECS: u64 = 2;
 const CLAUDE_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
 const GROK_COLLECTION_MIN_BUDGET_SECS: u64 = 2;
+const COLLECTION_MAX_BACKOFF_SECS: i64 = 30 * 60;
+const COLLECTION_STICKY_ERROR_MIN_BACKOFF_SECS: i64 = 5 * 60;
 const TRAY_ID: &str = "juice";
 const TRAY_ICON_IDS: [&str; 1] = [TRAY_ID];
 const UPDATE_START_DELAY_SECS: u64 = 15;
@@ -277,6 +280,7 @@ struct CachedStatusAttempt {
     last_good: Option<AgentStatus>,
     error: Option<CollectionErrorKind>,
     retry_at: DateTime<Utc>,
+    consecutive_failures: u32,
 }
 
 #[derive(Clone)]
@@ -292,6 +296,7 @@ struct CursorCachedStatusAttempt {
     source: Option<CursorStatusSource>,
     error: Option<CollectionErrorKind>,
     retry_at: DateTime<Utc>,
+    consecutive_failures: u32,
 }
 
 #[derive(Default)]
@@ -587,6 +592,7 @@ pub fn tray_quit_menu_id() -> &'static str {
 
 fn begin_native_shutdown(app: &tauri::AppHandle) {
     collector::begin_codex_app_server_shutdown();
+    collector::begin_grok_acp_shutdown();
     if let Some(state) = app.try_state::<TaskbarShutdownState>() {
         state.0.store(true, Ordering::Release);
     }
@@ -1461,22 +1467,57 @@ fn cached_status_attempt(
     let previous_last_good = cache_guard
         .as_ref()
         .and_then(|cached| cached.last_good.clone());
+    let previous_failures = cache_guard
+        .as_ref()
+        .map_or(0, |cached| cached.consecutive_failures);
     drop(cache_guard);
 
     let outcome = collect();
-    let (last_good, error) = match outcome {
-        Ok(status) => (Some(status), None),
-        Err(error) => (previous_last_good, Some(error)),
+    let (last_good, error, consecutive_failures, retry_secs) = match outcome {
+        Ok(status) => (Some(status), None, 0, minimum_interval_secs.max(1)),
+        Err(error) => {
+            let consecutive_failures = previous_failures.saturating_add(1);
+            let retry_secs =
+                collection_retry_delay_secs(&error, minimum_interval_secs, consecutive_failures);
+            (
+                previous_last_good,
+                Some(error),
+                consecutive_failures,
+                retry_secs,
+            )
+        }
     };
-    let retry_at = now + chrono::Duration::seconds(minimum_interval_secs);
+    let retry_at = now + chrono::Duration::seconds(retry_secs);
     let mut cache_guard = cache.lock().unwrap_or_else(|err| err.into_inner());
     *cache_guard = Some(CachedStatusAttempt {
         attempted_at: now,
         last_good: last_good.clone(),
         error,
         retry_at,
+        consecutive_failures,
     });
     last_good
+}
+
+fn collection_retry_delay_secs(
+    error: &CollectionErrorKind,
+    minimum_interval_secs: i64,
+    consecutive_failures: u32,
+) -> i64 {
+    let minimum = minimum_interval_secs.max(1);
+    let base = if matches!(
+        error,
+        CollectionErrorKind::Parse
+            | CollectionErrorKind::LoginRequired
+            | CollectionErrorKind::Unavailable
+    ) {
+        minimum.max(COLLECTION_STICKY_ERROR_MIN_BACKOFF_SECS)
+    } else {
+        minimum
+    };
+    let exponent = consecutive_failures.saturating_sub(1).min(4);
+    base.saturating_mul(1i64 << exponent)
+        .min(COLLECTION_MAX_BACKOFF_SECS)
 }
 
 fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
@@ -1659,6 +1700,10 @@ fn collect_claude_usage_status(
                 }
             }
 
+            if !claude_legacy_fallback_allowed(&oauth_error, force) {
+                return Err(oauth_error);
+            }
+
             let legacy_timeout = remaining_refresh_budget(
                 deadline,
                 std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
@@ -1682,6 +1727,11 @@ fn collect_claude_usage_status(
     )?;
     derive_active(&mut status, settings.stale_after_secs, now);
     Some(status)
+}
+
+fn claude_legacy_fallback_allowed(error: &CollectionErrorKind, force: bool) -> bool {
+    !matches!(error, CollectionErrorKind::LoginRequired)
+        && (force || matches!(error, CollectionErrorKind::Parse))
 }
 
 fn parse_claude_fallback_usage(
@@ -1764,103 +1814,131 @@ fn collect_cursor_usage_status(
         .unwrap_or_else(|err| err.into_inner())
         .clone();
     let captured_at = now.to_rfc3339();
-    let agent_deadline = deadline
-        .checked_sub(std::time::Duration::from_secs(CURSOR_GUI_RESERVE_SECS))
+    let cursor_budget = deadline.saturating_duration_since(std::time::Instant::now());
+    let fallback_reserve = std::time::Duration::from_secs(CURSOR_AGENT_FALLBACK_MAX_RESERVE_SECS)
+        .min(cursor_budget / 2);
+    let dashboard_deadline = deadline
+        .checked_sub(fallback_reserve)
         .unwrap_or_else(std::time::Instant::now);
-    let workspace = paths::data_dir().map(|path| path.join("cursor-usage-workspace"));
-    let agent_outcome = if std::time::Instant::now() >= agent_deadline {
-        Err(CollectionErrorKind::Deadline)
-    } else if let Some(workspace) = workspace {
-        cursor_pty::capture_cursor_usage_until(&workspace, agent_deadline)
-            .map_err(|error| {
-                if std::time::Instant::now() >= agent_deadline
-                    || format!("{error:#}")
-                        .to_ascii_lowercase()
-                        .contains("timed out")
-                {
-                    CollectionErrorKind::Deadline
-                } else {
-                    classify_collection_error(&error)
-                }
-            })
-            .and_then(|raw| {
-                adapters::cursor::parse_usage_status(&raw, pc_id, &captured_at)
-                    .map_err(|_| CollectionErrorKind::Parse)
-            })
-    } else {
-        Err(CollectionErrorKind::Unavailable)
-    };
-
-    let outcome = match agent_outcome {
-        Ok(status) => Ok((status, CursorStatusSource::Agent)),
-        Err(agent_error) => {
-            let credentials = cursor_dashboard::read_credentials(deadline)
-                .map_err(|error| dashboard_collection_error(error.kind));
-            match credentials {
-                Ok(credentials) => {
-                    let scope = credentials.scope;
-                    match cursor_dashboard::current_period_usage(&credentials, deadline) {
-                        Ok(usage) => {
-                            let reset_at =
-                                DateTime::<Utc>::from_timestamp_millis(usage.billing_cycle_end_ms)
-                                    .ok_or(CollectionErrorKind::Parse)
-                                    .and_then(|reset| {
-                                        adapters::cursor::dashboard_usage_status(
-                                            pc_id,
-                                            &captured_at,
-                                            usage.cursor_models_used_percent,
-                                            usage.other_models_used_percent,
-                                            reset.to_rfc3339(),
-                                        )
-                                        .map_err(|_| CollectionErrorKind::Parse)
-                                    });
-                            reset_at.map(|status| (status, CursorStatusSource::Dashboard(scope)))
-                        }
-                        Err(error) => {
-                            let dashboard_error = dashboard_collection_error(error.kind);
-                            let combined = combine_cursor_collection_errors(
-                                agent_error,
-                                dashboard_error.clone(),
-                            );
-                            let same_scope_last_good = matches!(
-                                previous.as_ref().and_then(|cached| cached.source.as_ref()),
-                                Some(CursorStatusSource::Dashboard(previous_scope))
-                                    if *previous_scope == scope
-                            ) && matches!(
-                                dashboard_error,
-                                CollectionErrorKind::Deadline | CollectionErrorKind::Transport
-                            );
-                            if same_scope_last_good {
-                                if let Some(status) = previous
-                                    .as_ref()
-                                    .and_then(|cached| cached.last_good.clone())
-                                {
-                                    return cache_cursor_status(
-                                        now,
-                                        Some(status),
-                                        Some(CursorStatusSource::Dashboard(scope)),
-                                        Some(combined),
-                                        settings,
-                                    );
-                                }
-                            }
-                            Err(combined)
-                        }
-                    }
-                }
-                Err(dashboard_error) => Err(combine_cursor_collection_errors(
-                    agent_error,
-                    dashboard_error,
-                )),
+    let dashboard_outcome =
+        collect_cursor_dashboard_status(pc_id, &captured_at, dashboard_deadline);
+    if let Err((dashboard_error, scope)) = &dashboard_outcome {
+        let same_scope_last_good = scope.is_some_and(|scope| {
+            matches!(
+                previous.as_ref().and_then(|cached| cached.source.as_ref()),
+                Some(CursorStatusSource::Dashboard(previous_scope)) if *previous_scope == scope
+            )
+        }) && matches!(
+            dashboard_error,
+            CollectionErrorKind::Deadline | CollectionErrorKind::Transport
+        );
+        if same_scope_last_good {
+            if let Some(status) = previous
+                .as_ref()
+                .and_then(|cached| cached.last_good.clone())
+            {
+                return cache_cursor_status(
+                    now,
+                    Some(status),
+                    scope.map(CursorStatusSource::Dashboard),
+                    Some(dashboard_error.clone()),
+                    settings,
+                );
             }
         }
-    };
+    }
+    let outcome = resolve_cursor_dashboard_first(dashboard_outcome, || {
+        collect_cursor_agent_status(pc_id, &captured_at, deadline)
+    });
 
     let (last_good, source, error) = match outcome {
         Ok((status, source)) => (Some(status), Some(source), None),
         Err(error) => (None, None, Some(error)),
     };
     cache_cursor_status(now, last_good, source, error, settings)
+}
+
+fn collect_cursor_dashboard_status(
+    pc_id: &str,
+    captured_at: &str,
+    deadline: std::time::Instant,
+) -> Result<
+    (AgentStatus, cursor_dashboard::AccountScope),
+    (CollectionErrorKind, Option<cursor_dashboard::AccountScope>),
+> {
+    let credentials = cursor_dashboard::read_credentials(deadline)
+        .map_err(|error| (dashboard_collection_error(error.kind), None))?;
+    let scope = credentials.scope;
+    let usage = cursor_dashboard::current_period_usage(&credentials, deadline)
+        .map_err(|error| (dashboard_collection_error(error.kind), Some(scope)))?;
+    let reset = DateTime::<Utc>::from_timestamp_millis(usage.billing_cycle_end_ms)
+        .ok_or((CollectionErrorKind::Parse, Some(scope)))?;
+    let status = adapters::cursor::dashboard_usage_status(
+        pc_id,
+        captured_at,
+        usage.cursor_models_used_percent,
+        usage.other_models_used_percent,
+        reset.to_rfc3339(),
+    )
+    .map_err(|_| (CollectionErrorKind::Parse, Some(scope)))?;
+    Ok((status, scope))
+}
+
+fn collect_cursor_agent_status(
+    pc_id: &str,
+    captured_at: &str,
+    deadline: std::time::Instant,
+) -> Result<AgentStatus, CollectionErrorKind> {
+    if std::time::Instant::now() >= deadline {
+        return Err(CollectionErrorKind::Deadline);
+    }
+    let workspace = paths::data_dir()
+        .map(|path| path.join("cursor-usage-workspace"))
+        .ok_or(CollectionErrorKind::Unavailable)?;
+    let raw = cursor_pty::capture_cursor_usage_until(&workspace, deadline).map_err(|error| {
+        if std::time::Instant::now() >= deadline
+            || format!("{error:#}")
+                .to_ascii_lowercase()
+                .contains("timed out")
+        {
+            CollectionErrorKind::Deadline
+        } else {
+            classify_collection_error(&error)
+        }
+    })?;
+    adapters::cursor::parse_usage_status(&raw, pc_id, captured_at)
+        .map_err(|_| CollectionErrorKind::Parse)
+}
+
+fn cursor_agent_fallback_allowed(error: &CollectionErrorKind) -> bool {
+    matches!(
+        error,
+        CollectionErrorKind::Parse
+            | CollectionErrorKind::LoginRequired
+            | CollectionErrorKind::Unavailable
+    )
+}
+
+fn resolve_cursor_dashboard_first(
+    dashboard: Result<
+        (AgentStatus, cursor_dashboard::AccountScope),
+        (CollectionErrorKind, Option<cursor_dashboard::AccountScope>),
+    >,
+    collect_agent: impl FnOnce() -> Result<AgentStatus, CollectionErrorKind>,
+) -> Result<(AgentStatus, CursorStatusSource), CollectionErrorKind> {
+    match dashboard {
+        Ok((status, scope)) => Ok((status, CursorStatusSource::Dashboard(scope))),
+        Err((dashboard_error, _)) if !cursor_agent_fallback_allowed(&dashboard_error) => {
+            Err(dashboard_error)
+        }
+        Err((dashboard_error, _)) => match collect_agent() {
+            Ok(status) => Ok((status, CursorStatusSource::Agent)),
+            Err(agent_error) => Err(combine_cursor_collection_errors(
+                agent_error,
+                dashboard_error,
+            )),
+        },
+    }
 }
 
 fn dashboard_collection_error(kind: cursor_dashboard::DashboardErrorKind) -> CollectionErrorKind {
@@ -1905,7 +1983,20 @@ fn cache_cursor_status(
     error: Option<CollectionErrorKind>,
     settings: &Settings,
 ) -> Option<AgentStatus> {
-    let retry_at = now + chrono::Duration::seconds(CURSOR_USAGE_CACHE_MIN_SECS);
+    let previous_failures = CURSOR_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .map_or(0, |cached| cached.consecutive_failures);
+    let consecutive_failures = if error.is_some() {
+        previous_failures.saturating_add(1)
+    } else {
+        0
+    };
+    let retry_secs = error.as_ref().map_or(CURSOR_USAGE_CACHE_MIN_SECS, |error| {
+        collection_retry_delay_secs(error, CURSOR_USAGE_CACHE_MIN_SECS, consecutive_failures)
+    });
+    let retry_at = now + chrono::Duration::seconds(retry_secs);
     *CURSOR_USAGE_CACHE
         .lock()
         .unwrap_or_else(|err| err.into_inner()) = Some(CursorCachedStatusAttempt {
@@ -1914,6 +2005,7 @@ fn cache_cursor_status(
         source,
         error,
         retry_at,
+        consecutive_failures,
     });
     let mut status = last_good?;
     derive_active(&mut status, cursor_stale_after_secs(settings), now);
@@ -4422,6 +4514,7 @@ async fn save_settings(
         .map_err(|err| err.to_string())?;
     let previous_show_claude = baseline.show_claude;
     let previous_show_codex = baseline.show_codex;
+    let previous_show_grok = baseline.show_grok;
     let claude_collection_transition =
         (baseline.show_claude != requested.show_claude).then_some(requested.show_claude);
     let claude_enabled_now = !baseline.show_claude && requested.show_claude;
@@ -4482,6 +4575,11 @@ async fn save_settings(
     if previous_show_codex != settings.show_codex {
         if let Err(error) = collector::set_codex_app_server_enabled(settings.show_codex) {
             eprintln!("[codex] app-server broker state update failed: {error}");
+        }
+    }
+    if previous_show_grok != settings.show_grok {
+        if let Err(error) = collector::set_grok_acp_enabled(settings.show_grok) {
+            eprintln!("[grok] ACP broker state update failed: {error}");
         }
     }
     if !taskbar_drag_active(&app) {
@@ -6176,6 +6274,11 @@ pub fn run() {
             ) {
                 eprintln!("[codex] app-server broker startup failed: {error}");
             }
+            if let Err(error) = collector::set_grok_acp_enabled(
+                settings.as_ref().is_some_and(|settings| settings.show_grok),
+            ) {
+                eprintln!("[grok] ACP broker startup failed: {error}");
+            }
             if let Some(settings) = settings.as_ref() {
                 set_taskbar_bars_paused(app, settings.taskbar_bars_paused);
                 let taskbar_retry = match try_setup_taskbar_dock(app, settings) {
@@ -6735,9 +6838,57 @@ mod tests {
         assert_eq!(super::cursor_stale_after_secs(&customized), 600);
     }
 
+    #[test]
+    fn cursor_dashboard_success_never_starts_the_agent_fallback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let result = super::resolve_cursor_dashboard_first(
+            Ok((status_for_signature("dashboard"), scope)),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(status_for_signature("agent"))
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.1,
+            super::CursorStatusSource::Dashboard(value) if value == scope
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let transport = super::resolve_cursor_dashboard_first(
+            Err((super::CollectionErrorKind::Transport, Some(scope))),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(status_for_signature("must-not-run"))
+            },
+        );
+        assert!(matches!(
+            transport,
+            Err(super::CollectionErrorKind::Transport)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let login = super::resolve_cursor_dashboard_first(
+            Err((super::CollectionErrorKind::LoginRequired, None)),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(status_for_signature("agent"))
+            },
+        )
+        .unwrap();
+        assert!(matches!(login.1, super::CursorStatusSource::Agent));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     #[cfg(windows)]
     #[test]
-    #[ignore = "requires a locally installed and logged-in Cursor Agent"]
+    #[ignore = "uses the locally logged-in Cursor GUI account or Agent fallback"]
     fn live_cursor_provider_collects_two_monthly_pools_without_a_prompt() {
         *super::CURSOR_USAGE_CACHE
             .lock()
@@ -7837,13 +7988,33 @@ mod tests {
         );
         assert_eq!(
             cached.as_ref().unwrap().retry_at,
-            now + Duration::seconds(32)
+            now + Duration::seconds(302)
         );
         assert_eq!(
             cached.as_ref().unwrap().error,
             Some(super::CollectionErrorKind::Parse)
         );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn provider_failure_backoff_is_class_aware_exponential_and_bounded() {
+        assert_eq!(
+            super::collection_retry_delay_secs(&super::CollectionErrorKind::Transport, 60, 1),
+            60
+        );
+        assert_eq!(
+            super::collection_retry_delay_secs(&super::CollectionErrorKind::Transport, 60, 3),
+            240
+        );
+        assert_eq!(
+            super::collection_retry_delay_secs(&super::CollectionErrorKind::LoginRequired, 60, 1),
+            300
+        );
+        assert_eq!(
+            super::collection_retry_delay_secs(&super::CollectionErrorKind::Unavailable, 300, 20),
+            super::COLLECTION_MAX_BACKOFF_SECS
+        );
     }
 
     #[test]
@@ -7857,6 +8028,7 @@ mod tests {
             last_good: Some(status_for_signature("last-good")),
             error: Some(super::CollectionErrorKind::LoginRequired),
             retry_at: now,
+            consecutive_failures: 1,
         }));
 
         assert_eq!(
@@ -7876,6 +8048,7 @@ mod tests {
             last_good: None,
             error: Some(super::CollectionErrorKind::LoginRequired),
             retry_at: now,
+            consecutive_failures: 1,
         }));
         let result = super::cached_status_attempt(&cache, now, 30, true, || {
             Ok(status_for_signature("recovered"))
@@ -7947,12 +8120,33 @@ mod tests {
     }
 
     #[test]
-    fn claude_fallback_valid_usage_recovers_from_oauth_login_failure() {
+    fn claude_login_failure_never_enters_the_legacy_cli_fallback() {
+        assert!(!super::claude_legacy_fallback_allowed(
+            &super::CollectionErrorKind::LoginRequired,
+            false
+        ));
+        assert!(!super::claude_legacy_fallback_allowed(
+            &super::CollectionErrorKind::LoginRequired,
+            true
+        ));
+        assert!(super::claude_legacy_fallback_allowed(
+            &super::CollectionErrorKind::Parse,
+            false
+        ));
+        assert!(!super::claude_legacy_fallback_allowed(
+            &super::CollectionErrorKind::Transport,
+            false
+        ));
+        assert!(super::claude_legacy_fallback_allowed(
+            &super::CollectionErrorKind::Transport,
+            true
+        ));
+
         let status = super::parse_claude_fallback_usage(
             r#"{"result":"Current session: 12%\nCurrent week (all models): 34%"}"#,
             "LOCAL",
             "2026-08-15T00:00:00Z",
-            super::CollectionErrorKind::LoginRequired,
+            super::CollectionErrorKind::Parse,
         )
         .unwrap();
 

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use crate::http_transport::{self, HttpErrorKind, HttpMethod};
 use serde_json::Value;
 
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
@@ -16,11 +17,14 @@ const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
 const CODEX_ACCOUNT_RESPONSE_ID: i64 = 2;
 #[cfg(test)]
 const CODEX_USAGE_RESPONSE_ID: i64 = 3;
+#[cfg(test)]
 const GROK_BILLING_RESPONSE_ID: i64 = 2;
 const PROCESS_CLEANUP_GRACE: Duration = Duration::from_millis(500);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_COMMAND_ERROR_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_LINE_BYTES: usize = 256 * 1024;
+const CLAUDE_OAUTH_RESPONSE_CAP: usize = 256 * 1024;
+const CLAUDE_OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_BROKER_QUEUE_CAPACITY: usize = 8;
 const CODEX_BROKER_STDOUT_CAPACITY: usize = 32;
 const CODEX_BROKER_MAX_SKIPPED_MESSAGES: usize = 64;
@@ -41,6 +45,8 @@ pub const MAX_ROLLOUT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 static CLAUDE_USER_AGENT: OnceLock<String> = OnceLock::new();
 // One worker owns the Codex child and serializes every account RPC.
 static CODEX_APP_SERVER_BROKER: OnceLock<Result<CodexAppServerBroker, String>> = OnceLock::new();
+// Grok uses the same bounded lifecycle engine with its own ACP handshake and child.
+static GROK_ACP_BROKER: OnceLock<Result<CodexAppServerBroker, String>> = OnceLock::new();
 
 pub fn text_requires_login(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
@@ -683,9 +689,21 @@ pub fn begin_codex_app_server_shutdown() {
     }
 }
 
+pub fn set_grok_acp_enabled(enabled: bool) -> anyhow::Result<()> {
+    grok_acp_broker()?.set_enabled(enabled);
+    Ok(())
+}
+
+pub fn begin_grok_acp_shutdown() {
+    if let Some(Ok(broker)) = GROK_ACP_BROKER.get() {
+        broker.begin_shutdown();
+    }
+}
+
 fn codex_app_server_broker() -> anyhow::Result<&'static CodexAppServerBroker> {
     match CODEX_APP_SERVER_BROKER.get_or_init(|| {
         CodexAppServerBroker::start(
+            BrokerProtocol::Codex,
             true,
             Arc::new(codex_app_server_command),
             CODEX_BROKER_MIN_BACKOFF,
@@ -694,6 +712,93 @@ fn codex_app_server_broker() -> anyhow::Result<&'static CodexAppServerBroker> {
     }) {
         Ok(broker) => Ok(broker),
         Err(error) => Err(anyhow::anyhow!(error.clone())),
+    }
+}
+
+fn grok_acp_broker() -> anyhow::Result<&'static CodexAppServerBroker> {
+    match GROK_ACP_BROKER.get_or_init(|| {
+        CodexAppServerBroker::start(
+            BrokerProtocol::Grok,
+            true,
+            Arc::new(grok_agent_command),
+            CODEX_BROKER_MIN_BACKOFF,
+            CODEX_BROKER_MAX_BACKOFF,
+        )
+    }) {
+        Ok(broker) => Ok(broker),
+        Err(error) => Err(anyhow::anyhow!(error.clone())),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrokerProtocol {
+    Codex,
+    Grok,
+}
+
+impl BrokerProtocol {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex app-server",
+            Self::Grok => "Grok ACP",
+        }
+    }
+
+    fn worker_name(self) -> &'static str {
+        match self {
+            Self::Codex => "juice-codex-app-server",
+            Self::Grok => "juice-grok-acp",
+        }
+    }
+
+    fn shutdown_name(self) -> &'static str {
+        match self {
+            Self::Codex => "juice-codex-shutdown",
+            Self::Grok => "juice-grok-shutdown",
+        }
+    }
+
+    fn reader_name(self, stream: &str) -> String {
+        let provider = match self {
+            Self::Codex => "codex",
+            Self::Grok => "grok",
+        };
+        format!("juice-{provider}-{stream}")
+    }
+
+    fn initialize(self) -> Value {
+        match self {
+            Self::Codex => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {
+                        "name": "agent-juice",
+                        "title": "Juice",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }
+            }),
+            Self::Grok => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "agent-juice",
+                        "title": "Juice",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }
+            }),
+        }
+    }
+
+    fn sends_initialized(self) -> bool {
+        self == Self::Codex
     }
 }
 
@@ -714,12 +819,14 @@ enum CodexBrokerMessage {
 struct CodexAppServerBroker {
     sender: mpsc::SyncSender<CodexBrokerMessage>,
     enabled: Arc<AtomicBool>,
+    protocol: BrokerProtocol,
     #[cfg(test)]
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CodexAppServerBroker {
     fn start(
+        protocol: BrokerProtocol,
         enabled: bool,
         command_factory: CodexCommandFactory,
         min_backoff: Duration,
@@ -729,19 +836,29 @@ impl CodexAppServerBroker {
         let enabled = Arc::new(AtomicBool::new(enabled));
         let worker_enabled = Arc::clone(&enabled);
         let worker = std::thread::Builder::new()
-            .name("juice-codex-app-server".into())
+            .name(protocol.worker_name().into())
             .spawn(move || {
-                CodexBrokerWorker::new(command_factory, worker_enabled, min_backoff, max_backoff)
-                    .run(receiver);
+                CodexBrokerWorker::new(
+                    protocol,
+                    command_factory,
+                    worker_enabled,
+                    min_backoff,
+                    max_backoff,
+                )
+                .run(receiver);
             })
             .map_err(|_| {
-                "Codex app-server command unavailable: broker thread failed".to_string()
+                format!(
+                    "{} command unavailable: broker thread failed",
+                    protocol.label()
+                )
             })?;
         #[cfg(not(test))]
         drop(worker);
         Ok(Self {
             sender,
             enabled,
+            protocol,
             #[cfg(test)]
             worker: Mutex::new(Some(worker)),
         })
@@ -749,13 +866,16 @@ impl CodexAppServerBroker {
 
     fn request(&self, method: &'static str, timeout: Duration) -> anyhow::Result<String> {
         if !self.enabled.load(Ordering::Acquire) {
-            anyhow::bail!("Codex app-server command unavailable by collection policy");
+            anyhow::bail!(
+                "{} command unavailable by collection policy",
+                self.protocol.label()
+            );
         }
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| anyhow::anyhow!("Codex app-server timed out"))?;
+            .ok_or_else(|| anyhow::anyhow!("{} timed out", self.protocol.label()))?;
         if timeout.is_zero() {
-            anyhow::bail!("Codex app-server timed out");
+            anyhow::bail!("{} timed out", self.protocol.label());
         }
         let (reply, response) = mpsc::sync_channel(1);
         self.send_until(
@@ -768,12 +888,12 @@ impl CodexAppServerBroker {
         )?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            anyhow::bail!("Codex app-server timed out");
+            anyhow::bail!("{} timed out", self.protocol.label());
         }
         match response.recv_timeout(remaining) {
             Ok(Ok(raw)) => Ok(raw),
             Ok(Err(error)) => Err(anyhow::anyhow!(error)),
-            Err(_) => Err(anyhow::anyhow!("Codex app-server timed out")),
+            Err(_) => Err(anyhow::anyhow!("{} timed out", self.protocol.label())),
         }
     }
 
@@ -787,8 +907,9 @@ impl CodexAppServerBroker {
     fn begin_shutdown(&self) {
         self.enabled.store(false, Ordering::Release);
         let sender = self.sender.clone();
+        let protocol = self.protocol;
         let _ = std::thread::Builder::new()
-            .name("juice-codex-shutdown".into())
+            .name(protocol.shutdown_name().into())
             .spawn(move || {
                 let deadline = Instant::now() + CODEX_BROKER_CONTROL_TIMEOUT;
                 let (reply, response) = mpsc::sync_channel(1);
@@ -796,6 +917,7 @@ impl CodexAppServerBroker {
                     &sender,
                     CodexBrokerMessage::Shutdown { reply },
                     deadline,
+                    protocol,
                 )
                 .is_ok()
                 {
@@ -829,7 +951,7 @@ impl CodexAppServerBroker {
     }
 
     fn send_until(&self, message: CodexBrokerMessage, deadline: Instant) -> anyhow::Result<()> {
-        send_codex_broker_message_until(&self.sender, message, deadline)
+        send_codex_broker_message_until(&self.sender, message, deadline, self.protocol)
     }
 }
 
@@ -837,6 +959,7 @@ fn send_codex_broker_message_until(
     sender: &mpsc::SyncSender<CodexBrokerMessage>,
     mut message: CodexBrokerMessage,
     deadline: Instant,
+    protocol: BrokerProtocol,
 ) -> anyhow::Result<()> {
     loop {
         match sender.try_send(message) {
@@ -846,16 +969,17 @@ fn send_codex_broker_message_until(
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(mpsc::TrySendError::Full(_)) => {
-                anyhow::bail!("Codex app-server timed out")
+                anyhow::bail!("{} timed out", protocol.label())
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                anyhow::bail!("Codex app-server command unavailable: broker stopped")
+                anyhow::bail!("{} command unavailable: broker stopped", protocol.label())
             }
         }
     }
 }
 
 struct CodexBrokerWorker {
+    protocol: BrokerProtocol,
     command_factory: CodexCommandFactory,
     enabled: Arc<AtomicBool>,
     session: Option<CodexAppServerSession>,
@@ -868,12 +992,14 @@ struct CodexBrokerWorker {
 
 impl CodexBrokerWorker {
     fn new(
+        protocol: BrokerProtocol,
         command_factory: CodexCommandFactory,
         enabled: Arc<AtomicBool>,
         min_backoff: Duration,
         max_backoff: Duration,
     ) -> Self {
         Self {
+            protocol,
             command_factory,
             enabled,
             session: None,
@@ -924,10 +1050,13 @@ impl CodexBrokerWorker {
     ) -> Result<String, String> {
         if !self.enabled.load(Ordering::Acquire) {
             self.reset();
-            return Err("Codex app-server command unavailable by collection policy".into());
+            return Err(format!(
+                "{} command unavailable by collection policy",
+                self.protocol.label()
+            ));
         }
         if Instant::now() >= deadline {
-            return Err("Codex app-server timed out".into());
+            return Err(format!("{} timed out", self.protocol.label()));
         }
         if self
             .retry_at
@@ -936,10 +1065,11 @@ impl CodexBrokerWorker {
             return Err(self
                 .retry_error
                 .clone()
-                .unwrap_or_else(|| "Codex app-server retry backoff active".into()));
+                .unwrap_or_else(|| format!("{} retry backoff active", self.protocol.label())));
         }
         if self.session.is_none() {
             match CodexAppServerSession::start(
+                self.protocol,
                 Arc::clone(&self.command_factory),
                 Arc::clone(&self.enabled),
                 deadline,
@@ -955,7 +1085,7 @@ impl CodexBrokerWorker {
         let result = self
             .session
             .as_mut()
-            .expect("Codex session must exist after successful start")
+            .expect("persistent RPC session must exist after successful start")
             .request(method, deadline);
         match result {
             Ok(raw) => {
@@ -987,12 +1117,13 @@ impl CodexBrokerWorker {
             .saturating_mul(1u32 << exponent)
             .min(self.max_backoff);
         self.retry_at = Instant::now().checked_add(backoff);
+        let label = self.protocol.label();
         self.retry_error = Some(if text_requires_login(error) {
-            "Codex app-server authentication required".into()
+            format!("{label} authentication required")
         } else if error.to_ascii_lowercase().contains("command unavailable") {
-            "Codex app-server command unavailable during retry backoff".into()
+            format!("{label} command unavailable during retry backoff")
         } else {
-            "Codex app-server retry backoff active".into()
+            format!("{label} retry backoff active")
         });
     }
 
@@ -1005,6 +1136,7 @@ impl CodexBrokerWorker {
 }
 
 struct CodexAppServerSession {
+    protocol: BrokerProtocol,
     child: Option<Child>,
     tree: Option<ProcessTree>,
     stdin: Option<ChildStdin>,
@@ -1018,15 +1150,19 @@ struct CodexAppServerSession {
 
 impl CodexAppServerSession {
     fn start(
+        protocol: BrokerProtocol,
         command_factory: CodexCommandFactory,
         enabled: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Self, String> {
         if !enabled.load(Ordering::Acquire) {
-            return Err("Codex app-server command unavailable by collection policy".into());
+            return Err(format!(
+                "{} command unavailable by collection policy",
+                protocol.label()
+            ));
         }
         let mut command =
-            command_factory().map_err(|_| "Codex app-server command unavailable".to_string())?;
+            command_factory().map_err(|_| format!("{} command unavailable", protocol.label()))?;
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1035,25 +1171,25 @@ impl CodexAppServerSession {
             .checked_add(PROCESS_CLEANUP_GRACE)
             .unwrap_or(deadline);
         let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline)
-            .map_err(|_| "Codex app-server transport failed".to_string())?;
+            .map_err(|_| format!("{} transport failed", protocol.label()))?;
         let setup = (|| {
             let stdout = child
                 .stdout
                 .take()
-                .ok_or_else(|| "Codex app-server stdout unavailable".to_string())?;
+                .ok_or_else(|| format!("{} stdout unavailable", protocol.label()))?;
             let stderr = child
                 .stderr
                 .take()
-                .ok_or_else(|| "Codex app-server stderr unavailable".to_string())?;
+                .ok_or_else(|| format!("{} stderr unavailable", protocol.label()))?;
             let stdin = child
                 .stdin
                 .take()
-                .ok_or_else(|| "Codex app-server stdin unavailable".to_string())?;
+                .ok_or_else(|| format!("{} stdin unavailable", protocol.label()))?;
 
             let (stdout_sender, stdout_receiver) = mpsc::sync_channel(CODEX_BROKER_STDOUT_CAPACITY);
             let (stdout_done_sender, stdout_done_receiver) = mpsc::sync_channel(1);
             std::thread::Builder::new()
-                .name("juice-codex-stdout".into())
+                .name(protocol.reader_name("stdout"))
                 .spawn(move || {
                     let mut reader = BufReader::new(stdout);
                     loop {
@@ -1073,18 +1209,18 @@ impl CodexAppServerSession {
                     }
                     let _ = stdout_done_sender.send(());
                 })
-                .map_err(|_| "Codex app-server stdout reader unavailable".to_string())?;
+                .map_err(|_| format!("{} stdout reader unavailable", protocol.label()))?;
 
             let stderr_tail = Arc::new(Mutex::new(Vec::new()));
             let stderr_reader_tail = Arc::clone(&stderr_tail);
             let (stderr_done_sender, stderr_done_receiver) = mpsc::sync_channel(1);
             std::thread::Builder::new()
-                .name("juice-codex-stderr".into())
+                .name(protocol.reader_name("stderr"))
                 .spawn(move || {
                     drain_bounded_tail(BufReader::new(stderr), &stderr_reader_tail);
                     let _ = stderr_done_sender.send(());
                 })
-                .map_err(|_| "Codex app-server stderr reader unavailable".to_string())?;
+                .map_err(|_| format!("{} stderr reader unavailable", protocol.label()))?;
             Ok::<_, String>((
                 stdin,
                 stdout_receiver,
@@ -1103,6 +1239,7 @@ impl CodexAppServerSession {
             };
 
         let mut session = Self {
+            protocol,
             child: Some(child),
             tree: Some(tree),
             stdin: Some(stdin),
@@ -1113,25 +1250,16 @@ impl CodexAppServerSession {
             enabled,
             next_request_id: 2,
         };
-        let initialize = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "agent-juice",
-                    "title": "Juice",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }
-        });
+        let initialize = protocol.initialize();
         session.write_message(&initialize)?;
         session.wait_for_response(1, deadline)?;
-        session.write_message(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "initialized",
-            "params": {}
-        }))?;
+        if protocol.sends_initialized() {
+            session.write_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            }))?;
+        }
         Ok(session)
     }
 
@@ -1140,7 +1268,7 @@ impl CodexAppServerSession {
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
-            .ok_or_else(|| "Codex app-server request id exhausted".to_string())?;
+            .ok_or_else(|| format!("{} request id exhausted", self.protocol.label()))?;
         self.write_message(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -1154,20 +1282,25 @@ impl CodexAppServerSession {
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| "Codex app-server stdin unavailable".to_string())?;
+            .ok_or_else(|| format!("{} stdin unavailable", self.protocol.label()))?;
         writeln!(stdin, "{message}")
             .and_then(|()| stdin.flush())
-            .map_err(|_| "Codex app-server transport failed".to_string())
+            .map_err(|_| format!("{} transport failed", self.protocol.label()))
     }
 
     fn wait_for_response(&mut self, response_id: i64, deadline: Instant) -> Result<String, String> {
         let mut skipped = 0usize;
         loop {
             if !self.enabled.load(Ordering::Acquire) {
-                return Err("Codex app-server command unavailable by collection policy".into());
+                return Err(format!(
+                    "{} command unavailable by collection policy",
+                    self.protocol.label()
+                ));
             }
             if Instant::now() >= deadline {
-                return Err(self.failure_with_stderr("Codex app-server timed out"));
+                return Err(
+                    self.failure_with_stderr(&format!("{} timed out", self.protocol.label()))
+                );
             }
             if self
                 .child
@@ -1175,16 +1308,17 @@ impl CodexAppServerSession {
                 .and_then(|child| child.try_wait().ok().flatten())
                 .is_some()
             {
-                return Err(self.failure_with_stderr("Codex app-server transport failed"));
+                return Err(self
+                    .failure_with_stderr(&format!("{} transport failed", self.protocol.label())));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let wait_for = remaining.min(Duration::from_millis(50));
             let Some(stdout) = self.stdout.as_ref() else {
-                return Err("Codex app-server stdout unavailable".into());
+                return Err(format!("{} stdout unavailable", self.protocol.label()));
             };
             match stdout.recv_timeout(wait_for) {
                 Ok(Ok(line)) => {
-                    let value = parse_codex_app_server_line(&line)?;
+                    let value = parse_app_server_line(self.protocol, &line)?;
                     if value
                         .as_ref()
                         .and_then(|value| value.get("id"))
@@ -1193,21 +1327,30 @@ impl CodexAppServerSession {
                     {
                         skipped = skipped.saturating_add(1);
                         if skipped > CODEX_BROKER_MAX_SKIPPED_MESSAGES {
-                            return Err("Codex app-server message limit exceeded".into());
+                            return Err(format!(
+                                "{} message limit exceeded",
+                                self.protocol.label()
+                            ));
                         }
                         continue;
                     }
                     let value = value.expect("matching response id requires a JSON object");
                     if let Some(error) = value.get("error") {
                         if text_requires_login(&error.to_string()) {
-                            return Err("Codex app-server authentication required".into());
+                            return Err(format!(
+                                "{} authentication required",
+                                self.protocol.label()
+                            ));
                         }
-                        return Err("Codex app-server returned an error".into());
+                        return Err(format!("{} returned an error", self.protocol.label()));
                     }
                     return Ok(line);
                 }
                 Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(self.failure_with_stderr("Codex app-server transport failed"));
+                    return Err(self.failure_with_stderr(&format!(
+                        "{} transport failed",
+                        self.protocol.label()
+                    )));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
             }
@@ -1221,23 +1364,28 @@ impl CodexAppServerSession {
             .and_then(|child| child.try_wait().ok().flatten())
             .is_some()
         {
-            return Err(self.failure_with_stderr("Codex app-server transport failed"));
+            return Err(
+                self.failure_with_stderr(&format!("{} transport failed", self.protocol.label()))
+            );
         }
         let Some(stdout) = self.stdout.as_ref() else {
-            return Err("Codex app-server stdout unavailable".into());
+            return Err(format!("{} stdout unavailable", self.protocol.label()));
         };
         for _ in 0..CODEX_BROKER_MAX_SKIPPED_MESSAGES {
             match stdout.try_recv() {
                 Ok(Ok(line)) => {
-                    parse_codex_app_server_line(&line)?;
+                    parse_app_server_line(self.protocol, &line)?;
                 }
                 Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(self.failure_with_stderr("Codex app-server transport failed"));
+                    return Err(self.failure_with_stderr(&format!(
+                        "{} transport failed",
+                        self.protocol.label()
+                    )));
                 }
                 Err(mpsc::TryRecvError::Empty) => return Ok(()),
             }
         }
-        Err("Codex app-server message limit exceeded".into())
+        Err(format!("{} message limit exceeded", self.protocol.label()))
     }
 
     fn failure_with_stderr(&self, fallback: &str) -> String {
@@ -1246,14 +1394,14 @@ impl CodexAppServerSession {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if text_requires_login(&String::from_utf8_lossy(&tail)) {
-            "Codex app-server authentication required".into()
+            format!("{} authentication required", self.protocol.label())
         } else {
             fallback.into()
         }
     }
 }
 
-fn parse_codex_app_server_line(line: &str) -> Result<Option<Value>, String> {
+fn parse_app_server_line(protocol: BrokerProtocol, line: &str) -> Result<Option<Value>, String> {
     let line = line.trim();
     // Bounded diagnostics are skipped, but malformed JSON-looking frames desync the session.
     if line.is_empty() || !line.starts_with('{') {
@@ -1261,7 +1409,7 @@ fn parse_codex_app_server_line(line: &str) -> Result<Option<Value>, String> {
     }
     serde_json::from_str::<Value>(line)
         .map(Some)
-        .map_err(|_| "Codex app-server returned malformed JSON".to_string())
+        .map_err(|_| format!("{} returned malformed JSON", protocol.label()))
 }
 
 impl Drop for CodexAppServerSession {
@@ -1368,10 +1516,10 @@ fn codex_account_method_response_with_command(
 }
 
 pub fn grok_billing_response(timeout: Duration) -> anyhow::Result<String> {
-    let command = grok_agent_command()?;
-    grok_billing_response_with_command(command, timeout)
+    grok_acp_broker()?.request("_x.ai/billing", timeout)
 }
 
+#[cfg(test)]
 fn grok_billing_response_with_command(
     command: Command,
     timeout: Duration,
@@ -1407,6 +1555,7 @@ fn grok_billing_response_with_command(
     )
 }
 
+#[cfg(test)]
 fn json_rpc_response_with_command(
     mut command: Command,
     requests: &[Value],
@@ -1550,14 +1699,13 @@ pub fn claude_oauth_usage_response(timeout: Duration) -> anyhow::Result<String> 
         })
         .ok_or_else(|| anyhow::anyhow!("Claude OAuth access token unavailable"))?;
     let remaining = remaining_until(deadline, "Claude OAuth usage")?;
-    let user_agent = claude_user_agent(remaining)?;
+    let user_agent = claude_user_agent(remaining);
     let remaining = remaining_until(deadline, "Claude OAuth usage")?;
-    let config = claude_oauth_curl_config(token, user_agent, remaining);
-    command_output_with_input(
-        claude_oauth_curl_command(),
-        Some(config.as_bytes()),
-        remaining,
-        "Claude OAuth usage",
+    claude_oauth_usage_response_from(
+        CLAUDE_OAUTH_USAGE_URL,
+        token,
+        user_agent,
+        Instant::now() + remaining,
     )
 }
 
@@ -1579,37 +1727,73 @@ fn remaining_until(deadline: Instant, label: &str) -> anyhow::Result<Duration> {
     Ok(remaining)
 }
 
-fn claude_user_agent(timeout: Duration) -> anyhow::Result<&'static str> {
-    if let Some(user_agent) = CLAUDE_USER_AGENT.get() {
-        return Ok(user_agent);
-    }
-
-    let output =
-        command_output_with_input(claude_version_command(), None, timeout, "Claude version")?;
-    let version = output
-        .split_whitespace()
-        .next()
-        .filter(|value| {
-            !value.is_empty()
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
-        })
-        .ok_or_else(|| anyhow::anyhow!("Claude version output was not recognized"))?;
-    let _ = CLAUDE_USER_AGENT.set(format!("claude-code/{version}"));
+fn claude_user_agent(timeout: Duration) -> &'static str {
     CLAUDE_USER_AGENT
-        .get()
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("Claude user agent unavailable"))
+        .get_or_init(|| {
+            command_output_with_input(claude_version_command(), None, timeout, "Claude version")
+                .ok()
+                .and_then(|output| {
+                    output
+                        .split_whitespace()
+                        .next()
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.bytes().all(|byte| {
+                                    byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+                                })
+                        })
+                        .map(|version| format!("claude-code/{version}"))
+                })
+                .unwrap_or_else(|| "claude-code/unknown".into())
+        })
+        .as_str()
 }
 
-fn claude_oauth_curl_config(token: &str, user_agent: &str, timeout: Duration) -> String {
-    format!(
-        "silent\nshow-error\nfail-with-body\nmax-time = \"{}\"\nurl = \"https://api.anthropic.com/api/oauth/usage\"\nheader = \"Authorization: Bearer {}\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\nheader = \"Content-Type: application/json\"\nuser-agent = \"{}\"\nheader = \"x-app: cli\"\n",
-        timeout.as_secs().max(1),
-        token,
-        user_agent,
+fn claude_oauth_usage_response_from(
+    url: &str,
+    token: &str,
+    user_agent: &str,
+    deadline: Instant,
+) -> anyhow::Result<String> {
+    let authorization = format!("Bearer {token}");
+    let response = http_transport::execute(
+        HttpMethod::Get,
+        url,
+        &[
+            ("authorization", authorization.as_str()),
+            ("anthropic-beta", "oauth-2025-04-20"),
+            ("content-type", "application/json"),
+            ("user-agent", user_agent),
+            ("x-app", "cli"),
+        ],
+        None,
+        deadline,
+        CLAUDE_OAUTH_RESPONSE_CAP,
+        "Claude OAuth usage request failed",
     )
+    .map_err(|error| match error.kind {
+        HttpErrorKind::Deadline => anyhow::anyhow!("Claude OAuth usage timed out"),
+        HttpErrorKind::Oversized => {
+            anyhow::anyhow!("Claude OAuth usage response exceeded its limit")
+        }
+        HttpErrorKind::InvalidRequest => {
+            anyhow::anyhow!("Claude OAuth usage request was not recognized")
+        }
+        HttpErrorKind::Transport => anyhow::anyhow!("Claude OAuth usage request failed"),
+    })?;
+    if matches!(response.status, 401 | 403)
+        || text_requires_login(&String::from_utf8_lossy(&response.body))
+    {
+        anyhow::bail!("Claude OAuth authentication required");
+    }
+    if !(200..=299).contains(&response.status) {
+        anyhow::bail!("Claude OAuth usage request was rejected");
+    }
+    if !response.content_type.starts_with("application/json") {
+        anyhow::bail!("Claude OAuth usage response type was not recognized");
+    }
+    String::from_utf8(response.body)
+        .map_err(|_| anyhow::anyhow!("Claude OAuth usage response was not recognized"))
 }
 
 fn claude_usage_output_with_command(command: Command, timeout: Duration) -> anyhow::Result<String> {
@@ -1978,8 +2162,13 @@ fn claude_usage_command() -> Command {
     {
         use std::os::windows::process::CommandExt;
 
-        let mut command = Command::new("cmd");
-        command.args(["/C", "claude"]);
+        let shell = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("cmd.exe");
+        let mut command = Command::new(shell);
+        command.args(["/D", "/C", "claude"]);
         command.args(ARGS);
         command.arg("");
         command.creation_flags(0x08000000);
@@ -1995,37 +2184,18 @@ fn claude_usage_command() -> Command {
     }
 }
 
-fn claude_oauth_curl_command() -> Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        let curl_path = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join("System32")
-            .join("curl.exe");
-        let mut command = Command::new(curl_path);
-        command.args(["-q", "--config", "-"]);
-        command.creation_flags(0x08000000);
-        command
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut command = Command::new("curl");
-        command.args(["-q", "--config", "-"]);
-        command
-    }
-}
-
 fn claude_version_command() -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
 
-        let mut command = Command::new("cmd");
-        command.args(["/C", "claude", "--version"]);
+        let shell = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("cmd.exe");
+        let mut command = Command::new(shell);
+        command.args(["/D", "/C", "claude", "--version"]);
         command.creation_flags(0x08000000);
         command
     }
@@ -2042,7 +2212,8 @@ fn claude_version_command() -> Command {
 mod tests {
     use super::*;
     use std::{
-        io::BufRead,
+        io::{BufRead, Read, Write},
+        net::TcpListener,
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, Barrier,
@@ -2261,26 +2432,36 @@ mod tests {
     }
 
     #[test]
-    fn oauth_secret_is_sent_over_stdin_instead_of_process_arguments() {
+    fn oauth_secret_is_sent_only_in_the_http_header() {
         let token = "fixture-secret";
-        let config = claude_oauth_curl_config(token, "claude-code/2.1.205", Duration::from_secs(5));
-        let command_line = format!("{:?}", claude_oauth_curl_command());
-        assert!(!command_line.contains(token));
-
-        let mut command = test_process("collector::tests::fake_stdin_reader_child");
-        command.env("AGENT_JUICE_FAKE_STDIN_READER", "1");
-        let output = command_output_with_input(
-            command,
-            Some(config.as_bytes()),
-            Duration::from_secs(2),
-            "test stdin",
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = br#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            request
+        });
+        let output = claude_oauth_usage_response_from(
+            &url,
+            token,
+            "claude-code/2.1.205",
+            Instant::now() + Duration::from_secs(2),
         )
         .unwrap();
-        let length = output
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("AJ_STDIN_LEN:"))
-            .and_then(|value| value.parse::<usize>().ok());
-        assert_eq!(length, Some(config.len()));
+        assert!(output.contains("five_hour"));
+        let request = worker.join().unwrap().to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer fixture-secret"));
+        assert!(!format!("{:?}", claude_version_command()).contains(token));
     }
 
     #[test]
@@ -2382,6 +2563,14 @@ mod tests {
             let id = value.get("id").and_then(Value::as_i64);
             match method {
                 Some("initialize") => {
+                    if std::env::var_os("AGENT_JUICE_FAKE_GROK_BROKER").is_some() {
+                        assert_eq!(
+                            value
+                                .pointer("/params/protocolVersion")
+                                .and_then(Value::as_i64),
+                            Some(1)
+                        );
+                    }
                     initialize_count += 1;
                     println!(
                         "{}",
@@ -2394,7 +2583,9 @@ mod tests {
                     std::io::stdout().flush().unwrap();
                 }
                 Some("initialized") => {}
-                Some("account/rateLimits/read") | Some("account/usage/read") => {
+                Some("account/rateLimits/read")
+                | Some("account/usage/read")
+                | Some("_x.ai/billing") => {
                     if std::env::var_os("AGENT_JUICE_FAKE_BROKER_HANG").is_some() {
                         std::thread::sleep(Duration::from_secs(30));
                         continue;
@@ -2435,6 +2626,13 @@ mod tests {
                             "fixturePid": std::process::id(),
                             "initializeCount": initialize_count
                         })
+                    } else if method == Some("_x.ai/billing") {
+                        serde_json::json!({
+                            "period": "weekly",
+                            "usedPercent": 18,
+                            "fixturePid": std::process::id(),
+                            "initializeCount": initialize_count
+                        })
                     } else {
                         serde_json::json!({
                             "rateLimits": {
@@ -2466,16 +2664,34 @@ mod tests {
         configure: impl Fn(&mut Command) + Send + Sync + 'static,
         min_backoff: Duration,
     ) -> CodexAppServerBroker {
+        fake_persistent_broker_for(BrokerProtocol::Codex, spawns, configure, min_backoff)
+    }
+
+    fn fake_persistent_broker_for(
+        protocol: BrokerProtocol,
+        spawns: Arc<AtomicUsize>,
+        configure: impl Fn(&mut Command) + Send + Sync + 'static,
+        min_backoff: Duration,
+    ) -> CodexAppServerBroker {
         let configure = Arc::new(configure);
         let command_factory: CodexCommandFactory = Arc::new(move || {
             spawns.fetch_add(1, Ordering::SeqCst);
             let mut command = test_process("collector::tests::fake_persistent_app_server_child");
             command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+            if protocol == BrokerProtocol::Grok {
+                command.env("AGENT_JUICE_FAKE_GROK_BROKER", "1");
+            }
             configure(&mut command);
             Ok(command)
         });
-        CodexAppServerBroker::start(true, command_factory, min_backoff, Duration::from_secs(1))
-            .unwrap()
+        CodexAppServerBroker::start(
+            protocol,
+            true,
+            command_factory,
+            min_backoff,
+            Duration::from_secs(1),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2529,6 +2745,36 @@ mod tests {
                 Some(1)
             );
             let pid = result.get("fixturePid").and_then(Value::as_u64);
+            assert!(pid.is_some());
+            assert!(fixture_pid.is_none() || fixture_pid == pid);
+            fixture_pid = pid;
+        }
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn persistent_grok_broker_reuses_one_initialized_child_for_one_hundred_requests() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker_for(
+            BrokerProtocol::Grok,
+            Arc::clone(&spawns),
+            |_| {},
+            Duration::from_millis(100),
+        );
+        let mut fixture_pid = None;
+        for _ in 0..100 {
+            let raw = broker
+                .request("_x.ai/billing", Duration::from_secs(2))
+                .unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                value
+                    .pointer("/result/initializeCount")
+                    .and_then(Value::as_u64),
+                Some(1)
+            );
+            let pid = value.pointer("/result/fixturePid").and_then(Value::as_u64);
             assert!(pid.is_some());
             assert!(fixture_pid.is_none() || fixture_pid == pid);
             fixture_pid = pid;
@@ -2707,6 +2953,42 @@ mod tests {
     }
 
     #[test]
+    fn disabling_an_active_grok_broker_closes_the_session_before_reenable() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker_for(
+            BrokerProtocol::Grok,
+            Arc::clone(&spawns),
+            |_| {},
+            Duration::from_millis(100),
+        );
+        let first: Value = serde_json::from_str(
+            &broker
+                .request("_x.ai/billing", Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+        broker.set_enabled(false);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(broker
+            .request("_x.ai/billing", Duration::from_millis(300))
+            .is_err());
+        broker.set_enabled(true);
+        let second: Value = serde_json::from_str(
+            &broker
+                .request("_x.ai/billing", Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(
+            first.pointer("/result/fixturePid").and_then(Value::as_u64),
+            second.pointer("/result/fixturePid").and_then(Value::as_u64)
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        broker.shutdown_for_test();
+    }
+
+    #[test]
     fn codex_broker_backoff_preserves_authentication_error_classification() {
         let spawns = Arc::new(AtomicUsize::new(0));
         let broker = fake_persistent_broker(
@@ -2739,6 +3021,7 @@ mod tests {
             anyhow::bail!("fixture runtime missing")
         });
         let broker = CodexAppServerBroker::start(
+            BrokerProtocol::Codex,
             true,
             command_factory,
             Duration::from_secs(1),

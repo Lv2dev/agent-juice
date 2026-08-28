@@ -29,7 +29,8 @@ let activityEventGeneration = 0;
 let settingsEventGeneration = 0;
 let snapshotFallbackTimer = null;
 let activityRefreshTimer = null;
-let panelVisible = true;
+let activityLoadPromise = null;
+let panelVisible = false;
 let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
 const activeUnlisteners = new Set();
@@ -37,8 +38,10 @@ const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 
 function setPanelVisible(visible) {
+  const becameVisible = visible && !panelVisible;
   panelVisible = visible;
   document.documentElement.dataset.panelVisible = visible ? "true" : "false";
+  if (becameVisible) void loadActivity();
 }
 
 document.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -423,6 +426,16 @@ async function loadStatus() {
 }
 
 async function loadActivity() {
+  if (activityLoadPromise) return activityLoadPromise;
+  activityLoadPromise = loadActivityOnce();
+  try {
+    return await activityLoadPromise;
+  } finally {
+    activityLoadPromise = null;
+  }
+}
+
+async function loadActivityOnce() {
   const requestGeneration = activityEventGeneration;
   try {
     const snapshot = await invoke("get_activity");
@@ -577,11 +590,13 @@ function bindStatusUpdates() {
 }
 
 async function bootstrap() {
-  setPanelVisible(!document.hidden);
+  setPanelVisible(false);
   window.addEventListener("focus", () => setPanelVisible(true));
   window.addEventListener("pagehide", cleanupListeners);
   window.addEventListener("beforeunload", cleanupListeners);
-  document.addEventListener("visibilitychange", () => setPanelVisible(!document.hidden));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) setPanelVisible(false);
+  });
   applyTranslations(settings);
   bindWindowControls();
   bindPanelDragFallback();
@@ -603,7 +618,7 @@ async function bootstrap() {
     cells.forEach((item, index) => { item.tabIndex = index === next ? 0 : -1; });
     cells[next]?.focus?.();
   });
-  await Promise.all([loadSettings(), loadStatus(), loadActivity()]);
+  await Promise.all([loadSettings(), loadStatus()]);
 }
 
 bootstrap();
