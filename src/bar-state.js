@@ -174,8 +174,10 @@ function shortReset(iso, now, language) {
 function limitModel(labelKey, limit, settings, now, language, tool, secondary = false) {
   const used = finiteNumber(limit?.used_percent);
   const displayed = displayPercentFromUsed(used, settings);
+  const compactCursor = tool === "cursor" && normalizeBarMode(settings?.bar_mode) === "compact";
+  const displayLabel = !compactCursor && labelKey ? t(labelKey, language) : "";
   return {
-    text: labelKey ? `${t(labelKey, language)} ${percentText(displayed)}` : "",
+    text: labelKey ? [displayLabel, percentText(displayed)].filter(Boolean).join(" ") : "",
     number: numberText(displayed),
     percent: displayed,
     reset: shortReset(limit?.resets_at, now, language),

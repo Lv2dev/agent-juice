@@ -730,3 +730,40 @@ test("Cursor renders its two monthly pools and date-only reset without a fake co
   assert.match(cursor.tooltip, /Cursor Models · Resets Sep 21/);
   assert.match(cursor.tooltip, /Other Models · Resets Sep 21/);
 });
+
+test("Cursor compact mode shows two percentages without labels and preserves full semantics", () => {
+  const statuses = [{
+    tool: "cursor",
+    captured_at: "2026-08-21T00:00:00Z",
+    primary: { label: "cursor_models", used_percent: 1, resets_at: "09-21" },
+    secondary: { label: "other_models", used_percent: 0, resets_at: "09-21" },
+    session: { active: true },
+    approx: false,
+  }];
+
+  const korean = barToolViewModel(
+    statuses,
+    "cursor",
+    { ...settings, bar_mode: "compact", language: "ko", show_cursor: true },
+    new Date("2026-08-21T00:00:00Z"),
+  );
+  assert.equal(korean.primary.text, "99%");
+  assert.equal(korean.secondary.text, "100%");
+  assert.equal(korean.primary.labelKey, "limit.cursorModels");
+  assert.equal(korean.secondary.labelKey, "limit.otherModels");
+  assert.equal(korean.ariaLabel, "Cursor, 99%, 100%");
+  assert.match(korean.tooltip, /Cursor 모델 · 초기화 9월 21일/);
+  assert.match(korean.tooltip, /기타 모델 · 초기화 9월 21일/);
+
+  const english = barToolViewModel(
+    statuses,
+    "cursor",
+    { ...settings, bar_mode: "compact", language: "en", show_cursor: true },
+    new Date("2026-08-21T00:00:00Z"),
+  );
+  assert.equal(english.primary.text, "99%");
+  assert.equal(english.secondary.text, "100%");
+  assert.equal(english.ariaLabel, "Cursor, 99%, 100%");
+  assert.match(english.tooltip, /Cursor Models · Resets Sep 21/);
+  assert.match(english.tooltip, /Other Models · Resets Sep 21/);
+});
