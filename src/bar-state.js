@@ -431,7 +431,7 @@ export function barViewModel(
     codexTextColorOn: taskbarTextColorOn(merged, "codex"),
     grokTextColor: taskbarTextColor(merged, "grok", "#d9578b"),
     grokTextColorOn: taskbarTextColorOn(merged, "grok"),
-    cursorTextColor: taskbarTextColor(merged, "cursor", "#72716d"),
+    cursorTextColor: taskbarTextColor(merged, "cursor", "#85847f"),
     cursorTextColorOn: taskbarTextColorOn(merged, "cursor"),
     infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
     infoTextColorOn: taskbarTextColorOn(merged, "info"),

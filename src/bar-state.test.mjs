@@ -440,7 +440,7 @@ test("barViewModel normalizes mode and ring settings", () => {
   assert.equal(fallback.claudeTextColorOn, false);
   assert.equal(fallback.codexTextColor, "#2fac7d");
   assert.equal(fallback.codexTextColorOn, false);
-  assert.equal(fallback.cursorTextColor, "#72716d");
+  assert.equal(fallback.cursorTextColor, "#85847f");
   assert.equal(fallback.cursorTextColorOn, false);
   assert.equal(fallback.infoTextColor, "#6b7280");
   assert.equal(fallback.infoTextColorOn, false);
@@ -725,7 +725,7 @@ test("Cursor renders its two monthly pools and date-only reset without a fake co
   assert.equal(cursor.primary.text, "Cursor Models 99%");
   assert.equal(cursor.secondary.text, "Other Models 100%");
   assert.equal(cursor.primary.reset, "Sep 21");
-  assert.equal(cursor.primary.color, "#72716d");
+  assert.equal(cursor.primary.color, "#85847f");
   assert.equal(cursor.secondary.color, "#0891b2");
   assert.match(cursor.tooltip, /Cursor Models · Resets Sep 21/);
   assert.match(cursor.tooltip, /Other Models · Resets Sep 21/);

@@ -34,7 +34,9 @@ pub struct ToolColors {
 
 const V0_1_14_CURSOR_PRIMARY: [u8; 3] = [0x3b, 0x82, 0xf6];
 const V0_1_14_CURSOR_SECONDARY: [u8; 3] = [0x06, 0xb6, 0xd4];
-const DEFAULT_CURSOR_PRIMARY: [u8; 3] = [0x72, 0x71, 0x6d];
+const V0_1_19_CURSOR_PRIMARY: [u8; 3] = [0x72, 0x71, 0x6d];
+const V0_1_19_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
+const DEFAULT_CURSOR_PRIMARY: [u8; 3] = [0x85, 0x84, 0x7f];
 const DEFAULT_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
 
 const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
@@ -119,6 +121,78 @@ pub struct TaskbarPlacement {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskbarPresentationProfile {
+    pub bar_mode: String,
+    pub full_reset_time_on: bool,
+    pub limit_order: String,
+    pub indicator_style: String,
+    pub indicator_effect_style: String,
+    pub ring_on: bool,
+    pub ring_numbers_on: bool,
+    pub ring_number_outline_on: bool,
+    pub ring_number_outline_width_px: f32,
+    pub ring_size_px: f32,
+    pub ring_thickness_px: f32,
+    pub ring_gap_px: f32,
+    pub ring_center_size_px: f32,
+    pub ring_number_font_size_px: f32,
+    pub ring_number_font_weight: i32,
+    pub bar_text_font_size_px: f32,
+    pub bar_text_font_weight: i32,
+    pub bar_content_gap_px: f32,
+}
+
+impl Default for TaskbarPresentationProfile {
+    fn default() -> Self {
+        Self {
+            bar_mode: default_bar_mode(),
+            full_reset_time_on: default_full_reset_time_on(),
+            limit_order: default_limit_order(),
+            indicator_style: default_indicator_style(),
+            indicator_effect_style: default_indicator_effect_style(),
+            ring_on: default_ring_on(),
+            ring_numbers_on: default_ring_numbers_on(),
+            ring_number_outline_on: default_ring_number_outline_on(),
+            ring_number_outline_width_px: default_ring_number_outline_width_px(),
+            ring_size_px: default_ring_size_px(),
+            ring_thickness_px: default_ring_thickness_px(),
+            ring_gap_px: default_ring_gap_px(),
+            ring_center_size_px: default_ring_center_size_px(),
+            ring_number_font_size_px: default_ring_number_font_size_px(),
+            ring_number_font_weight: default_ring_number_font_weight(),
+            bar_text_font_size_px: default_bar_text_font_size_px(),
+            bar_text_font_weight: default_bar_text_font_weight(),
+            bar_content_gap_px: default_bar_content_gap_px(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskbarAppearanceProfile {
+    pub palette: Palette,
+    pub tool_colors: ToolColors,
+    pub taskbar_text_colors: TaskbarTextColors,
+    pub indicator_track_color_auto: bool,
+    pub indicator_track_color: [u8; 3],
+    pub indicator_track_opacity_percent: f32,
+}
+
+impl Default for TaskbarAppearanceProfile {
+    fn default() -> Self {
+        Self {
+            palette: default_palette(),
+            tool_colors: ToolColors::default(),
+            taskbar_text_colors: TaskbarTextColors::default(),
+            indicator_track_color_auto: default_indicator_track_color_auto(),
+            indicator_track_color: default_indicator_track_color(),
+            indicator_track_opacity_percent: default_indicator_track_opacity_percent(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TaskbarLayoutProfile {
     #[serde(default)]
     pub monitor_keys: Vec<String>,
@@ -130,6 +204,10 @@ pub struct TaskbarLayoutProfile {
     pub grok: Option<TaskbarPlacement>,
     #[serde(default)]
     pub cursor: Option<TaskbarPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<TaskbarPresentationProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<TaskbarAppearanceProfile>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -172,6 +250,10 @@ pub struct Settings {
     pub taskbar_bars_paused: bool,
     #[serde(default = "default_taskbar_layout_memory_on")]
     pub taskbar_layout_memory_on: bool,
+    #[serde(default = "default_taskbar_profile_presentation_on")]
+    pub taskbar_profile_presentation_on: bool,
+    #[serde(default = "default_taskbar_profile_colors_on")]
+    pub taskbar_profile_colors_on: bool,
     #[serde(default)]
     pub taskbar_layout_profiles: Vec<TaskbarLayoutProfile>,
     #[serde(default)]
@@ -263,6 +345,74 @@ pub struct Settings {
     pub claude_account_auto_collect_on: bool,
 }
 
+impl TaskbarPresentationProfile {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            bar_mode: settings.bar_mode.clone(),
+            full_reset_time_on: settings.full_reset_time_on,
+            limit_order: settings.limit_order.clone(),
+            indicator_style: settings.indicator_style.clone(),
+            indicator_effect_style: settings.indicator_effect_style.clone(),
+            ring_on: settings.ring_on,
+            ring_numbers_on: settings.ring_numbers_on,
+            ring_number_outline_on: settings.ring_number_outline_on,
+            ring_number_outline_width_px: settings.ring_number_outline_width_px,
+            ring_size_px: settings.ring_size_px,
+            ring_thickness_px: settings.ring_thickness_px,
+            ring_gap_px: settings.ring_gap_px,
+            ring_center_size_px: settings.ring_center_size_px,
+            ring_number_font_size_px: settings.ring_number_font_size_px,
+            ring_number_font_weight: settings.ring_number_font_weight,
+            bar_text_font_size_px: settings.bar_text_font_size_px,
+            bar_text_font_weight: settings.bar_text_font_weight,
+            bar_content_gap_px: settings.bar_content_gap_px,
+        }
+    }
+
+    pub fn apply_to(&self, settings: &mut Settings) {
+        settings.bar_mode = self.bar_mode.clone();
+        settings.full_reset_time_on = self.full_reset_time_on;
+        settings.limit_order = self.limit_order.clone();
+        settings.indicator_style = self.indicator_style.clone();
+        settings.indicator_effect_style = self.indicator_effect_style.clone();
+        settings.ring_on = self.ring_on;
+        settings.ring_numbers_on = self.ring_numbers_on;
+        settings.ring_number_outline_on = self.ring_number_outline_on;
+        settings.ring_number_outline_width_px = self.ring_number_outline_width_px;
+        settings.ring_size_px = self.ring_size_px;
+        settings.ring_thickness_px = self.ring_thickness_px;
+        settings.ring_gap_px = self.ring_gap_px;
+        settings.ring_center_size_px = self.ring_center_size_px;
+        settings.ring_number_font_size_px = self.ring_number_font_size_px;
+        settings.ring_number_font_weight = self.ring_number_font_weight;
+        settings.bar_text_font_size_px = self.bar_text_font_size_px;
+        settings.bar_text_font_weight = self.bar_text_font_weight;
+        settings.bar_content_gap_px = self.bar_content_gap_px;
+    }
+}
+
+impl TaskbarAppearanceProfile {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            palette: settings.palette,
+            tool_colors: settings.tool_colors,
+            taskbar_text_colors: settings.taskbar_text_colors,
+            indicator_track_color_auto: settings.indicator_track_color_auto,
+            indicator_track_color: settings.indicator_track_color,
+            indicator_track_opacity_percent: settings.indicator_track_opacity_percent,
+        }
+    }
+
+    pub fn apply_to(&self, settings: &mut Settings) {
+        settings.palette = self.palette;
+        settings.tool_colors = self.tool_colors;
+        settings.taskbar_text_colors = self.taskbar_text_colors;
+        settings.indicator_track_color_auto = self.indicator_track_color_auto;
+        settings.indicator_track_color = self.indicator_track_color;
+        settings.indicator_track_opacity_percent = self.indicator_track_opacity_percent;
+    }
+}
+
 #[derive(Clone, Deserialize)]
 pub struct SettingsInput {
     #[serde(default = "default_palette_name")]
@@ -297,6 +447,10 @@ pub struct SettingsInput {
     pub taskbar_avoid_overlap_on: bool,
     #[serde(default = "default_taskbar_layout_memory_on")]
     pub taskbar_layout_memory_on: bool,
+    #[serde(default = "default_taskbar_profile_presentation_on")]
+    pub taskbar_profile_presentation_on: bool,
+    #[serde(default = "default_taskbar_profile_colors_on")]
+    pub taskbar_profile_colors_on: bool,
     #[serde(default = "default_indicator_style")]
     pub indicator_style: String,
     #[serde(default = "default_indicator_effect_style")]
@@ -556,6 +710,14 @@ fn default_taskbar_layout_memory_on() -> bool {
     true
 }
 
+fn default_taskbar_profile_presentation_on() -> bool {
+    true
+}
+
+fn default_taskbar_profile_colors_on() -> bool {
+    false
+}
+
 fn default_indicator_style() -> String {
     "ring".into()
 }
@@ -689,6 +851,54 @@ fn normalize_taskbar_layout_profile(
     profile.codex = normalize_placement(profile.codex);
     profile.grok = normalize_placement(profile.grok);
     profile.cursor = normalize_placement(profile.cursor);
+    if let Some(presentation) = &mut profile.presentation {
+        presentation.bar_mode = normalize_bar_mode(&presentation.bar_mode).into();
+        presentation.limit_order = normalize_limit_order(&presentation.limit_order).into();
+        presentation.indicator_style =
+            normalize_indicator_style(&presentation.indicator_style).into();
+        presentation.indicator_effect_style =
+            normalize_indicator_effect_style(&presentation.indicator_effect_style).into();
+        presentation.ring_number_outline_width_px =
+            clamp_ring_number_outline_width(presentation.ring_number_outline_width_px);
+        presentation.ring_size_px = clamp_px(
+            presentation.ring_size_px,
+            default_ring_size_px(),
+            20.0,
+            44.0,
+        );
+        presentation.ring_thickness_px = clamp_ring_thickness(presentation.ring_thickness_px);
+        presentation.ring_gap_px = clamp_ring_gap(presentation.ring_gap_px);
+        presentation.ring_center_size_px = clamp_ring_center_size(presentation.ring_center_size_px);
+        presentation.ring_number_font_size_px = clamp_px(
+            presentation.ring_number_font_size_px,
+            default_ring_number_font_size_px(),
+            6.0,
+            16.0,
+        );
+        presentation.ring_number_font_weight =
+            clamp_font_weight(presentation.ring_number_font_weight);
+        presentation.bar_text_font_size_px = clamp_px(
+            presentation.bar_text_font_size_px,
+            default_bar_text_font_size_px(),
+            8.0,
+            16.0,
+        );
+        presentation.bar_text_font_weight = clamp_font_weight(presentation.bar_text_font_weight);
+        presentation.bar_content_gap_px = clamp_px(
+            presentation.bar_content_gap_px,
+            default_bar_content_gap_px(),
+            0.0,
+            24.0,
+        );
+    }
+    if let Some(appearance) = &mut profile.appearance {
+        appearance.indicator_track_opacity_percent = clamp_px(
+            appearance.indicator_track_opacity_percent,
+            default_indicator_track_opacity_percent(),
+            0.0,
+            100.0,
+        );
+    }
     (profile.claude.is_some()
         || profile.codex.is_some()
         || profile.grok.is_some()
@@ -726,6 +936,8 @@ impl Default for Settings {
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             taskbar_bars_paused: false,
             taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
+            taskbar_profile_presentation_on: default_taskbar_profile_presentation_on(),
+            taskbar_profile_colors_on: default_taskbar_profile_colors_on(),
             taskbar_layout_profiles: Vec::new(),
             taskbar_layout_memory_initialized: false,
             indicator_style: default_indicator_style(),
@@ -792,6 +1004,8 @@ impl Default for SettingsInput {
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
+            taskbar_profile_presentation_on: default_taskbar_profile_presentation_on(),
+            taskbar_profile_colors_on: default_taskbar_profile_colors_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -1047,6 +1261,8 @@ impl Settings {
             maximized_hide_on: default_maximized_hide_on(),
             taskbar_avoid_overlap_on: default_taskbar_avoid_overlap_on(),
             taskbar_layout_memory_on: default_taskbar_layout_memory_on(),
+            taskbar_profile_presentation_on: default_taskbar_profile_presentation_on(),
+            taskbar_profile_colors_on: default_taskbar_profile_colors_on(),
             indicator_style: default_indicator_style(),
             indicator_effect_style: default_indicator_effect_style(),
             indicator_track_color_auto: default_indicator_track_color_auto(),
@@ -1138,6 +1354,8 @@ impl Settings {
             taskbar_avoid_overlap_on: input.taskbar_avoid_overlap_on,
             taskbar_bars_paused: false,
             taskbar_layout_memory_on: input.taskbar_layout_memory_on,
+            taskbar_profile_presentation_on: input.taskbar_profile_presentation_on,
+            taskbar_profile_colors_on: input.taskbar_profile_colors_on,
             taskbar_layout_profiles: Vec::new(),
             taskbar_layout_memory_initialized: false,
             indicator_style: normalize_indicator_style(&input.indicator_style).into(),
@@ -1281,32 +1499,59 @@ impl Settings {
     }
 
     fn apply_legacy_tool_colors(&mut self, value: Option<&serde_json::Value>) {
+        fn migrate_cursor_tool_defaults(colors: &mut ToolColors) {
+            let previous_default = (colors.cursor_primary == V0_1_14_CURSOR_PRIMARY
+                && colors.cursor_secondary == V0_1_14_CURSOR_SECONDARY)
+                || (colors.cursor_primary == V0_1_19_CURSOR_PRIMARY
+                    && colors.cursor_secondary == V0_1_19_CURSOR_SECONDARY);
+            if previous_default {
+                colors.cursor_primary = DEFAULT_CURSOR_PRIMARY;
+                colors.cursor_secondary = DEFAULT_CURSOR_SECONDARY;
+            }
+        }
+
+        fn migrate_cursor_text_default(colors: &mut TaskbarTextColors) {
+            if !colors.cursor_on
+                && (colors.cursor == V0_1_14_CURSOR_PRIMARY
+                    || colors.cursor == V0_1_19_CURSOR_PRIMARY)
+            {
+                colors.cursor = DEFAULT_CURSOR_PRIMARY;
+            }
+        }
+
         let Some(value) = value else {
             return;
         };
         if json_has_field(value, "tool_colors") {
-            let legacy_with_previous_cursor = ToolColors {
+            let legacy_with_v0_1_14_cursor = ToolColors {
                 cursor_primary: V0_1_14_CURSOR_PRIMARY,
                 cursor_secondary: V0_1_14_CURSOR_SECONDARY,
                 ..LEGACY_DEFAULT_TOOL_COLORS
             };
-            let previous_cursor_defaults = self.tool_colors.cursor_primary
-                == V0_1_14_CURSOR_PRIMARY
-                && self.tool_colors.cursor_secondary == V0_1_14_CURSOR_SECONDARY;
+            let legacy_with_v0_1_19_cursor = ToolColors {
+                cursor_primary: V0_1_19_CURSOR_PRIMARY,
+                cursor_secondary: V0_1_19_CURSOR_SECONDARY,
+                ..LEGACY_DEFAULT_TOOL_COLORS
+            };
             if self.tool_colors == LEGACY_DEFAULT_TOOL_COLORS
-                || self.tool_colors == legacy_with_previous_cursor
+                || self.tool_colors == legacy_with_v0_1_14_cursor
+                || self.tool_colors == legacy_with_v0_1_19_cursor
             {
                 self.tool_colors = ToolColors::default();
-            } else if previous_cursor_defaults {
-                self.tool_colors.cursor_primary = DEFAULT_CURSOR_PRIMARY;
-                self.tool_colors.cursor_secondary = DEFAULT_CURSOR_SECONDARY;
+            } else {
+                migrate_cursor_tool_defaults(&mut self.tool_colors);
             }
         }
-        if json_has_field(value, "taskbar_text_colors")
-            && self.taskbar_text_colors.cursor == V0_1_14_CURSOR_PRIMARY
-            && !self.taskbar_text_colors.cursor_on
+        if json_has_field(value, "taskbar_text_colors") {
+            migrate_cursor_text_default(&mut self.taskbar_text_colors);
+        }
+        for appearance in self
+            .taskbar_layout_profiles
+            .iter_mut()
+            .filter_map(|profile| profile.appearance.as_mut())
         {
-            self.taskbar_text_colors.cursor = DEFAULT_CURSOR_PRIMARY;
+            migrate_cursor_tool_defaults(&mut appearance.tool_colors);
+            migrate_cursor_text_default(&mut appearance.taskbar_text_colors);
         }
     }
 
@@ -1340,6 +1585,12 @@ impl Settings {
                 }
                 if profile.cursor.is_none() {
                     profile.cursor = previous.cursor;
+                }
+                if profile.presentation.is_none() {
+                    profile.presentation = previous.presentation;
+                }
+                if profile.appearance.is_none() {
+                    profile.appearance = previous.appearance;
                 }
             }
             normalized.push(profile);
@@ -1379,7 +1630,7 @@ impl Settings {
     }
 
     pub fn upsert_taskbar_layout_profile(&mut self, profile: TaskbarLayoutProfile) -> bool {
-        let Some(profile) = normalize_taskbar_layout_profile(profile) else {
+        let Some(mut profile) = normalize_taskbar_layout_profile(profile) else {
             return false;
         };
         if let Some(index) = self
@@ -1387,7 +1638,25 @@ impl Settings {
             .iter()
             .position(|saved| saved.monitor_keys == profile.monitor_keys)
         {
-            self.taskbar_layout_profiles.remove(index);
+            let previous = self.taskbar_layout_profiles.remove(index);
+            if profile.claude.is_none() {
+                profile.claude = previous.claude;
+            }
+            if profile.codex.is_none() {
+                profile.codex = previous.codex;
+            }
+            if profile.grok.is_none() {
+                profile.grok = previous.grok;
+            }
+            if profile.cursor.is_none() {
+                profile.cursor = previous.cursor;
+            }
+            if profile.presentation.is_none() {
+                profile.presentation = previous.presentation;
+            }
+            if profile.appearance.is_none() {
+                profile.appearance = previous.appearance;
+            }
         }
         self.taskbar_layout_profiles.push(profile);
         if self.taskbar_layout_profiles.len() > MAX_TASKBAR_LAYOUT_PROFILES {
@@ -2134,9 +2403,11 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod parser_tests {
     use super::{
-        parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, TaskbarLayoutProfile,
-        TaskbarPlacement, ToolColors, DEFAULT_CURSOR_PRIMARY, DEFAULT_CURSOR_SECONDARY,
+        parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, TaskbarAppearanceProfile,
+        TaskbarLayoutProfile, TaskbarPlacement, TaskbarPresentationProfile, ToolColors,
+        DEFAULT_CURSOR_PRIMARY, DEFAULT_CURSOR_SECONDARY,
     };
+    use crate::render::Palette;
     use std::{
         fs,
         path::Path,
@@ -2165,6 +2436,8 @@ mod parser_tests {
     fn taskbar_layout_memory_defaults_on_and_accepts_an_explicit_opt_out() {
         let legacy: Settings = serde_json::from_str("{}").unwrap();
         assert!(legacy.taskbar_layout_memory_on);
+        assert!(legacy.taskbar_profile_presentation_on);
+        assert!(!legacy.taskbar_profile_colors_on);
         assert!(legacy.taskbar_layout_profiles.is_empty());
         assert!(!legacy.taskbar_layout_memory_initialized);
 
@@ -2173,6 +2446,130 @@ mod parser_tests {
             ..SettingsInput::default()
         });
         assert!(!disabled.taskbar_layout_memory_on);
+
+        let scoped = Settings::from_input(SettingsInput {
+            taskbar_profile_presentation_on: false,
+            taskbar_profile_colors_on: true,
+            ..SettingsInput::default()
+        });
+        assert!(!scoped.taskbar_profile_presentation_on);
+        assert!(scoped.taskbar_profile_colors_on);
+    }
+
+    #[test]
+    fn taskbar_profile_snapshots_apply_only_visual_settings() {
+        let mut source = Settings {
+            palette: Palette::Ocean,
+            bar_mode: "quad".into(),
+            full_reset_time_on: false,
+            limit_order: "secondary_first".into(),
+            indicator_style: "bar".into(),
+            indicator_effect_style: "glow".into(),
+            ring_size_px: 42.0,
+            ring_thickness_px: 7.0,
+            ring_gap_px: 9.0,
+            ring_center_size_px: 20.0,
+            bar_content_gap_px: 3.5,
+            poll_interval_secs: 777,
+            show_cursor: true,
+            theme: "dark".into(),
+            ..Settings::default()
+        };
+        source.tool_colors.cursor_primary = [1, 2, 3];
+        source.taskbar_text_colors.cursor = [4, 5, 6];
+        source.indicator_track_color = [7, 8, 9];
+        source.indicator_track_opacity_percent = 37.5;
+
+        let presentation = TaskbarPresentationProfile::from_settings(&source);
+        let appearance = TaskbarAppearanceProfile::from_settings(&source);
+        let mut target = Settings {
+            poll_interval_secs: 120,
+            show_cursor: false,
+            theme: "light".into(),
+            ..Settings::default()
+        };
+        presentation.apply_to(&mut target);
+        appearance.apply_to(&mut target);
+
+        assert_eq!(target.bar_mode, "quad");
+        assert_eq!(target.indicator_style, "bar");
+        assert_eq!(target.ring_size_px, 42.0);
+        assert_eq!(target.bar_content_gap_px, 3.5);
+        assert_eq!(target.palette, Palette::Ocean);
+        assert_eq!(target.tool_colors.cursor_primary, [1, 2, 3]);
+        assert_eq!(target.taskbar_text_colors.cursor, [4, 5, 6]);
+        assert_eq!(target.indicator_track_color, [7, 8, 9]);
+        assert_eq!(target.indicator_track_opacity_percent, 37.5);
+        assert_eq!(target.poll_interval_secs, 120);
+        assert!(!target.show_cursor);
+        assert_eq!(target.theme, "light");
+    }
+
+    #[test]
+    fn taskbar_profile_snapshots_are_normalized_with_legacy_safe_defaults() {
+        let mut presentation = TaskbarPresentationProfile {
+            bar_mode: "unknown".into(),
+            limit_order: "unknown".into(),
+            indicator_style: "unknown".into(),
+            indicator_effect_style: "unknown".into(),
+            ring_size_px: 100.0,
+            ring_thickness_px: -1.0,
+            ring_gap_px: 100.0,
+            ring_center_size_px: -1.0,
+            ring_number_outline_width_px: 100.0,
+            ring_number_font_size_px: 100.0,
+            ring_number_font_weight: 99,
+            bar_text_font_size_px: 100.0,
+            bar_text_font_weight: 9999,
+            bar_content_gap_px: 100.0,
+            ..TaskbarPresentationProfile::default()
+        };
+        presentation.full_reset_time_on = false;
+        let appearance = TaskbarAppearanceProfile {
+            indicator_track_opacity_percent: -5.0,
+            ..TaskbarAppearanceProfile::default()
+        };
+        let mut settings = Settings {
+            taskbar_layout_profiles: vec![TaskbarLayoutProfile {
+                monitor_keys: vec!["monitor-a".into()],
+                claude: Some(TaskbarPlacement {
+                    monitor_key: "monitor-a".into(),
+                    offset_ratio: 0.5,
+                }),
+                codex: None,
+                grok: None,
+                cursor: None,
+                presentation: Some(presentation),
+                appearance: Some(appearance),
+            }],
+            ..Settings::default()
+        };
+
+        settings.normalize_taskbar_layout_profiles();
+        let profile = &settings.taskbar_layout_profiles[0];
+        let presentation = profile.presentation.as_ref().unwrap();
+        assert_eq!(presentation.bar_mode, "full");
+        assert_eq!(presentation.limit_order, "primary_first");
+        assert_eq!(presentation.indicator_style, "ring");
+        assert_eq!(presentation.indicator_effect_style, "flat");
+        assert_eq!(presentation.ring_size_px, 44.0);
+        assert_eq!(presentation.ring_thickness_px, 1.0);
+        assert_eq!(presentation.ring_gap_px, 14.0);
+        assert_eq!(presentation.ring_center_size_px, 4.0);
+        assert_eq!(presentation.ring_number_outline_width_px, 4.0);
+        assert_eq!(presentation.ring_number_font_size_px, 16.0);
+        assert_eq!(presentation.ring_number_font_weight, 100);
+        assert_eq!(presentation.bar_text_font_size_px, 16.0);
+        assert_eq!(presentation.bar_text_font_weight, 900);
+        assert_eq!(presentation.bar_content_gap_px, 24.0);
+        assert_eq!(
+            profile
+                .appearance
+                .as_ref()
+                .unwrap()
+                .indicator_track_opacity_percent,
+            0.0
+        );
     }
 
     #[test]
@@ -2214,7 +2611,7 @@ mod parser_tests {
 
         let settings = Settings::from_input(SettingsInput {
             show_cursor: true,
-            cursor_primary_color: Some("#72716d".into()),
+            cursor_primary_color: Some("#85847f".into()),
             cursor_secondary_color: Some("#0891b2".into()),
             cursor_text_color: Some("#5b9cff".into()),
             cursor_text_color_on: true,
@@ -2289,6 +2686,8 @@ mod parser_tests {
         assert_eq!(loaded.monitor_keys, ["monitor-a", "monitor-b"]);
         assert_eq!(loaded.claude.as_ref().unwrap().offset_ratio, 1.0);
         assert_eq!(loaded.codex.as_ref().unwrap().offset_ratio, 0.0);
+        assert!(loaded.presentation.is_none());
+        assert!(loaded.appearance.is_none());
 
         for index in 0..18 {
             let monitor_key = format!("monitor-{index:02}");
@@ -2302,6 +2701,14 @@ mod parser_tests {
                     codex: None,
                     grok: None,
                     cursor: None,
+                    presentation: Some(TaskbarPresentationProfile {
+                        bar_mode: "compact".into(),
+                        ..TaskbarPresentationProfile::default()
+                    }),
+                    appearance: Some(TaskbarAppearanceProfile {
+                        palette: Palette::Forest,
+                        ..TaskbarAppearanceProfile::default()
+                    }),
                 })
             );
         }
@@ -2337,6 +2744,14 @@ mod parser_tests {
                     codex: None,
                     grok: None,
                     cursor: None,
+                    presentation: Some(TaskbarPresentationProfile {
+                        bar_mode: "compact".into(),
+                        ..TaskbarPresentationProfile::default()
+                    }),
+                    appearance: Some(TaskbarAppearanceProfile {
+                        palette: Palette::Forest,
+                        ..TaskbarAppearanceProfile::default()
+                    }),
                 },
                 TaskbarLayoutProfile {
                     monitor_keys: vec!["monitor-path:primary".into()],
@@ -2347,6 +2762,8 @@ mod parser_tests {
                     }),
                     grok: None,
                     cursor: None,
+                    presentation: None,
+                    appearance: None,
                 },
             ],
             ..Settings::default()
@@ -2371,6 +2788,22 @@ mod parser_tests {
                 .unwrap()
                 .monitor_key,
             "monitor-path:primary"
+        );
+        assert_eq!(
+            settings.taskbar_layout_profiles[0]
+                .presentation
+                .as_ref()
+                .unwrap()
+                .bar_mode,
+            "compact"
+        );
+        assert_eq!(
+            settings.taskbar_layout_profiles[0]
+                .appearance
+                .as_ref()
+                .unwrap()
+                .palette,
+            Palette::Forest
         );
         assert_eq!(
             settings.taskbar_layout_profiles[0]

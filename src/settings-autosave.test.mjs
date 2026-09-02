@@ -161,6 +161,8 @@ test("settings form auto-saves changed values without a submit button", async ()
     maximized_hide_on: makeField(true, "checkbox"),
     taskbar_avoid_overlap_on: makeField(true, "checkbox"),
     taskbar_layout_memory_on: makeField(true, "checkbox"),
+    taskbar_profile_presentation_on: makeField(true, "checkbox"),
+    taskbar_profile_colors_on: makeField(false, "checkbox"),
     indicator_style: makeField("ring"),
     indicator_effect_style: makeField("flat"),
     indicator_track_color_auto: makeField(true, "checkbox"),
@@ -218,7 +220,19 @@ test("settings form auto-saves changed values without a submit button", async ()
   const trackOpacityEditor = makeField("11", "number", {
     dataset: { rangeNumberFor: "indicator_track_opacity_percent" },
   });
+  const profileRows = {
+    taskbar_profile_presentation_on: { dataset: {}, inert: false },
+    taskbar_profile_colors_on: { dataset: {}, inert: false },
+  };
+  for (const [name, row] of Object.entries(profileRows)) {
+    const field = fields[name];
+    field.tabIndex = 0;
+    field.attributes = {};
+    field.setAttribute = (key, value) => { field.attributes[key] = value; };
+    field.closest = (selector) => selector === ".toggle-row" ? row : null;
+  }
   const form = {
+    dataset: {},
     elements: {
       namedItem(name) {
         return fields[name] ?? null;
@@ -476,6 +490,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].maximized_hide_on, true);
   assert.equal(savedInputs[0].taskbar_avoid_overlap_on, true);
   assert.equal(savedInputs[0].taskbar_layout_memory_on, true);
+  assert.equal(savedInputs[0].taskbar_profile_presentation_on, true);
+  assert.equal(savedInputs[0].taskbar_profile_colors_on, false);
   assert.equal(savedInputs[0].indicator_style, "ring");
   assert.equal(savedInputs[0].indicator_effect_style, "depth");
   assert.equal(savedInputs[0].indicator_track_color_auto, false);
@@ -508,11 +524,30 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(toastLayer.hidden, false);
   assert.equal(toastLayer.dataset.visible, "true");
   assert.equal(toastText.textContent, "저장 완료 · 시스템 적용 재시도 중");
+  assert.equal(profileRows.taskbar_profile_presentation_on.inert, false);
+  assert.equal(profileRows.taskbar_profile_colors_on.inert, false);
+
+  fields.taskbar_layout_memory_on.checked = false;
+  listeners.input?.({ target: fields.taskbar_layout_memory_on });
+  assert.equal(profileRows.taskbar_profile_presentation_on.inert, true);
+  assert.equal(profileRows.taskbar_profile_colors_on.inert, true);
+  assert.equal(fields.taskbar_profile_presentation_on.checked, true);
+  assert.equal(fields.taskbar_profile_colors_on.checked, false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  assert.equal(savedInputs.at(-1).taskbar_layout_memory_on, false);
+  assert.equal(savedInputs.at(-1).taskbar_profile_presentation_on, true);
+  assert.equal(savedInputs.at(-1).taskbar_profile_colors_on, false);
+
+  fields.taskbar_layout_memory_on.checked = true;
+  listeners.input?.({ target: fields.taskbar_layout_memory_on });
+  assert.equal(profileRows.taskbar_profile_presentation_on.inert, false);
+  assert.equal(profileRows.taskbar_profile_colors_on.inert, false);
+  await new Promise((resolve) => setTimeout(resolve, 180));
 
   listeners.click?.({ target: { dataset: { action: "clear-taskbar-layouts" } } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(invokedCommands.includes("clear_taskbar_layout_profiles"));
-  assert.equal(toastText.textContent, "저장된 모니터 배치를 초기화했습니다.");
+  assert.equal(toastText.textContent, "저장된 화면 조합 프로필을 초기화했습니다.");
 
   const clearsBeforeDelayedSave = invokedCommands.filter(
     (command) => command === "clear_taskbar_layout_profiles",
@@ -712,6 +747,8 @@ test("settings form ignores early input events until stored settings hydrate", a
     maximized_hide_on: makeField(false, "checkbox"),
     taskbar_avoid_overlap_on: makeField(true, "checkbox"),
     taskbar_layout_memory_on: makeField(true, "checkbox"),
+    taskbar_profile_presentation_on: makeField(true, "checkbox"),
+    taskbar_profile_colors_on: makeField(false, "checkbox"),
     indicator_style: makeField("bar"),
     indicator_effect_style: makeField("flat"),
     indicator_track_color_auto: makeField(true, "checkbox"),
@@ -764,6 +801,7 @@ test("settings form ignores early input events until stored settings hydrate", a
     tool_danger_color_on: makeField(true, "checkbox"),
   };
   const form = {
+    dataset: {},
     elements: {
       namedItem(name) {
         return fields[name] ?? null;

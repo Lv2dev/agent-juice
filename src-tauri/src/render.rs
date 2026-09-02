@@ -3,7 +3,7 @@ use once_cell::sync::OnceCell;
 use resvg::{tiny_skia, usvg};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Palette {
     Traffic,
     Signal,

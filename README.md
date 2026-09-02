@@ -108,11 +108,13 @@ Juice에는 **4가지 바 모드**가 있습니다.
 
 <p align="center"><sub>이동 흐름을 알아보기 쉽게 만든 합성 데모입니다. 실제 바 구조와 모니터별 위치 저장 동작을 기준으로 제작했습니다.</sub></p>
 
-Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡아 다른 모니터의 작업표시줄로 옮길 수 있습니다. 기본으로 켜진 **모니터 조합별 위치 기억**은 현재 연결된 모니터 구성을 구분해 도구별 대상 모니터와 작업표시줄 상대 위치를 따로 저장합니다. 노트북 단독, 집, 사무실처럼 이전에 사용한 구성이 다시 연결되면 당시 위치를 복원합니다.
+Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡아 다른 모니터의 작업표시줄로 옮길 수 있습니다. 기본으로 켜진 **화면 조합별 프로필**은 현재 연결된 모니터 구성을 구분해 도구별 대상 모니터와 작업표시줄 상대 위치를 따로 저장합니다. **표시 구성과 크기·간격 기억**도 기본으로 켜져 있어 노트북 단독, 집, 사무실 조합마다 넉넉/컴팩트/이중원/링4, 원/가로 바, 표현, 링·글자 크기와 간격을 복원합니다.
 
 - 최근 사용한 모니터 조합을 최대 16개까지 유지합니다.
 - 모니터 연결이 바뀌는 동안의 일시적인 구성은 저장하지 않아 기존 배치를 보호합니다.
-- 설정의 **배치 초기화**는 저장된 조합만 지우며 현재 화면의 바 위치는 그대로 유지합니다.
+- **색상도 기억**은 별도 옵션이며 기본값은 꺼짐입니다. 켜면 팔레트와 도구·기간·글자·트랙 색상도 조합별로 복원합니다.
+- 앱 테마, 언어, 수집주기, 임계값, 도구 활성화와 로그인·수집 상태는 화면 조합과 무관하게 유지됩니다.
+- 설정의 **프로필 초기화**는 저장된 조합만 지우며 현재 화면의 바 위치와 표시 설정은 그대로 유지합니다.
 
 ### 원·바 표현 스타일
 
@@ -156,7 +158,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 | --- | --- |
 | 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
 | 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
-| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 모니터 조합별 위치 기억·초기화, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
+| 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 화면 조합별 위치·표시 구성·크기·간격 프로필과 선택적 색상 기억, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
 | 색상 | 9개 팔레트, 네 도구·기간별 기본 8색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
 | 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 서명 검증 업데이트·재시작, 릴리즈 페이지 fallback, 최근 확인 결과 |
@@ -368,11 +370,13 @@ Juice provides **four bar modes**.
 
 <p align="center"><sub>This synthetic demo makes the movement easy to follow. It reflects the real bar structure and per-monitor position persistence.</sub></p>
 
-Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar can be dragged to another monitor's taskbar without moving the others. **Remember positions by monitor setup** is enabled by default and stores each tool's target monitor and relative taskbar position separately for every connected-monitor setup. When a familiar laptop-only, home, or office setup returns, Juice restores the layout used with that setup.
+Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar can be dragged to another monitor's taskbar without moving the others. **Profiles by monitor setup** stores each tool's target monitor and relative taskbar position for every connected-monitor setup. **Remember presentation, size, and spacing** is also on by default, restoring Full/Compact/Dual/Quad, rings or horizontal bars, effects, ring and text sizes, and spacing for familiar laptop-only, home, or office setups.
 
 - Juice keeps up to 16 recently used monitor setups.
 - Transient configurations observed while monitors are connecting are not saved over a stable layout.
-- **Reset layouts** clears saved setups without moving the bars currently on screen.
+- **Remember colors too** is a separate opt-in setting. It restores palette and tool, period, text, and track colors per setup.
+- App theme, language, collection interval, thresholds, tool activation, and provider login or collection state remain global.
+- **Reset profiles** clears saved setups without changing the bars or presentation currently on screen.
 
 ### Ring and bar visual styles
 
@@ -416,7 +420,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | --- | --- |
 | General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
 | Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
-| Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup position memory and reset, fullscreen/maximized hiding, per-tool display and collection |
+| Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup profiles for position, presentation, size, spacing, and optional colors, fullscreen/maximized hiding, per-tool display and collection |
 | Colors | Nine palettes, eight tool/period base colors, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
 | Updates card | Automatic and manual checks, signed update and restart, Releases fallback, and the latest check result |

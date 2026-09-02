@@ -429,7 +429,7 @@ h1::before {
 }
 
 .tool-card[data-tool="cursor"] {
-  --tool-brand: #72716d;
+  --tool-brand: #85847f;
 }
 
 .tool-card[data-state="stale"],
@@ -585,7 +585,7 @@ h2 {
   --activity-color-claude: #d79a32;
   --activity-color-codex: #2fac7d;
   --activity-color-grok: #d9578b;
-  --activity-color-cursor: #72716d;
+  --activity-color-cursor: #85847f;
   --activity-cell-size: 9px;
   --activity-chart-width: 570px;
   position: relative;
@@ -914,7 +914,7 @@ h2 {
   --claude-text-color: #d79a32;
   --codex-text-color: #2fac7d;
   --grok-text-color: #d9578b;
-  --cursor-text-color: #72716d;
+  --cursor-text-color: #85847f;
   --info-text-color: #6b7280;
   --ring-text-color: #6b7280;
   --bar-text-font-size: 11px;
@@ -1018,7 +1018,7 @@ html[data-panel-visible="false"] * {
 }
 
 .bar-tool[data-tool="cursor"] {
-  --tool-brand: #72716d;
+  --tool-brand: #85847f;
 }
 
 .bar-tool[data-state="stale"],
@@ -2782,6 +2782,14 @@ input[type="range"]::-moz-range-thumb {
 .toggle-row-wide,
 .collection-toggle {
   grid-column: 1 / -1;
+}
+
+.taskbar-profile-option {
+  margin-inline-start: 12px;
+}
+
+.taskbar-profile-option[data-disabled="true"] {
+  opacity: 0.56;
 }
 
 .settings-utility-card {

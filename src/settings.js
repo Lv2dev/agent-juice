@@ -93,6 +93,7 @@ function setSettingsFormEnabled(enabled) {
   if (enabled) {
     updateIndicatorTrackColorAvailability();
     updateTaskbarTextColorAvailability();
+    updateTaskbarProfileOptionAvailability();
     updateActivityScaleAvailability();
   }
 }
@@ -283,6 +284,21 @@ function updateTaskbarTextColorAvailability() {
   }
 }
 
+function updateTaskbarProfileOptionAvailability() {
+  if (!form) return;
+  const enabled = form.dataset?.loadState === "ready"
+    && form.elements.namedItem("taskbar_layout_memory_on")?.checked === true;
+  for (const name of ["taskbar_profile_presentation_on", "taskbar_profile_colors_on"]) {
+    const control = form.elements.namedItem(name);
+    const row = control?.closest?.(".toggle-row");
+    if (!control || !row) continue;
+    control.setAttribute?.("aria-disabled", String(!enabled));
+    control.tabIndex = enabled ? 0 : -1;
+    row.inert = !enabled;
+    if (row.dataset) row.dataset.disabled = String(!enabled);
+  }
+}
+
 function selectSettingsTab(value, focus = false) {
   const selected = settingsTabs.find((tab) => tab.dataset?.settingsTab === value);
   if (!selected) return;
@@ -328,6 +344,7 @@ function updateOutputs() {
   syncRangeNumberEditors();
   updateIndicatorTrackColorAvailability();
   updateTaskbarTextColorAvailability();
+  updateTaskbarProfileOptionAvailability();
   updateActivityScaleAvailability();
 
   const palette = form.elements.namedItem("palette")?.value ?? "traffic";
@@ -406,6 +423,8 @@ function fillForm(settings) {
   setField("maximized_hide_on", state.maximizedHideOn);
   setField("taskbar_avoid_overlap_on", state.taskbarAvoidOverlapOn);
   setField("taskbar_layout_memory_on", state.taskbarLayoutMemoryOn);
+  setField("taskbar_profile_presentation_on", state.taskbarProfilePresentationOn);
+  setField("taskbar_profile_colors_on", state.taskbarProfileColorsOn);
   setField("indicator_style", state.indicatorStyle);
   setField("indicator_effect_style", state.indicatorEffectStyle);
   setField("indicator_track_color_auto", state.indicatorTrackColorAuto);

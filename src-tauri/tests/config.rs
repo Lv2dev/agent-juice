@@ -231,6 +231,8 @@ fn settings_roundtrip_and_legacy_defaults() {
         taskbar_avoid_overlap_on: false,
         taskbar_bars_paused: true,
         taskbar_layout_memory_on: false,
+        taskbar_profile_presentation_on: false,
+        taskbar_profile_colors_on: true,
         taskbar_layout_profiles: Vec::new(),
         taskbar_layout_memory_initialized: true,
         indicator_style: "bar".into(),
@@ -298,6 +300,8 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(!loaded.taskbar_avoid_overlap_on);
     assert!(loaded.taskbar_bars_paused);
     assert!(!loaded.taskbar_layout_memory_on);
+    assert!(!loaded.taskbar_profile_presentation_on);
+    assert!(loaded.taskbar_profile_colors_on);
     assert!(loaded.taskbar_layout_memory_initialized);
     assert_eq!(loaded.indicator_style, "bar");
     assert_eq!(loaded.indicator_effect_style, "glow");
@@ -452,7 +456,7 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
     let cursor_defaults = Settings::load_from(&path);
     assert_eq!(
         cursor_defaults.tool_colors.cursor_primary,
-        [0x72, 0x71, 0x6d]
+        [0x85, 0x84, 0x7f]
     );
     assert_eq!(
         cursor_defaults.tool_colors.cursor_secondary,
@@ -460,8 +464,69 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
     );
     assert_eq!(
         cursor_defaults.taskbar_text_colors.cursor,
+        [0x85, 0x84, 0x7f]
+    );
+
+    fs::write(
+        &path,
+        r##"{
+          "tool_colors":{"cursor_primary":[114,113,109],"cursor_secondary":[8,145,178]},
+          "taskbar_text_colors":{"cursor":[114,113,109],"cursor_on":false},
+          "taskbar_layout_profiles":[
+            {
+              "monitor_keys":["monitor-a"],
+              "cursor":{"monitor_key":"monitor-a","offset_ratio":0.5},
+              "appearance":{
+                "tool_colors":{"cursor_primary":[114,113,109],"cursor_secondary":[8,145,178]},
+                "taskbar_text_colors":{"cursor":[114,113,109],"cursor_on":false}
+              }
+            },
+            {
+              "monitor_keys":["monitor-b"],
+              "cursor":{"monitor_key":"monitor-b","offset_ratio":0.5},
+              "appearance":{
+                "tool_colors":{"cursor_primary":[18,52,86],"cursor_secondary":[8,145,178]},
+                "taskbar_text_colors":{"cursor":[114,113,109],"cursor_on":true}
+              }
+            }
+          ]
+        }"##,
+    )
+    .unwrap();
+    let current_defaults = Settings::load_from(&path);
+    assert_eq!(
+        current_defaults.tool_colors.cursor_primary,
+        [0x85, 0x84, 0x7f]
+    );
+    assert_eq!(
+        current_defaults.taskbar_text_colors.cursor,
+        [0x85, 0x84, 0x7f]
+    );
+    let migrated_appearance = current_defaults.taskbar_layout_profiles[0]
+        .appearance
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        migrated_appearance.tool_colors.cursor_primary,
+        [0x85, 0x84, 0x7f]
+    );
+    assert_eq!(
+        migrated_appearance.taskbar_text_colors.cursor,
+        [0x85, 0x84, 0x7f]
+    );
+    let custom_appearance = current_defaults.taskbar_layout_profiles[1]
+        .appearance
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        custom_appearance.tool_colors.cursor_primary,
+        [0x12, 0x34, 0x56]
+    );
+    assert_eq!(
+        custom_appearance.taskbar_text_colors.cursor,
         [0x72, 0x71, 0x6d]
     );
+    assert!(custom_appearance.taskbar_text_colors.cursor_on);
 
     let custom = ToolColors {
         claude_primary: [0xb7, 0x83, 0x3a],
@@ -485,7 +550,7 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
     .unwrap();
     let mixed = Settings::load_from(&path);
     assert_eq!(mixed.tool_colors.codex_primary, [0x12, 0x34, 0x56]);
-    assert_eq!(mixed.tool_colors.cursor_primary, [0x72, 0x71, 0x6d]);
+    assert_eq!(mixed.tool_colors.cursor_primary, [0x85, 0x84, 0x7f]);
     assert_eq!(mixed.tool_colors.cursor_secondary, [0x08, 0x91, 0xb2]);
     assert_eq!(mixed.taskbar_text_colors.cursor, [0x3b, 0x82, 0xf6]);
     assert!(mixed.taskbar_text_colors.cursor_on);
@@ -1045,6 +1110,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         maximized_hide_on: true,
         taskbar_avoid_overlap_on: false,
         taskbar_layout_memory_on: false,
+        taskbar_profile_presentation_on: false,
+        taskbar_profile_colors_on: true,
         indicator_style: "bar".into(),
         indicator_effect_style: "depth".into(),
         indicator_track_color_auto: false,
@@ -1166,6 +1233,8 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(!settings.fullscreen_hide_on);
     assert!(settings.maximized_hide_on);
     assert!(!settings.taskbar_avoid_overlap_on);
+    assert!(!settings.taskbar_profile_presentation_on);
+    assert!(settings.taskbar_profile_colors_on);
     assert_eq!(settings.indicator_style, "bar");
     assert_eq!(settings.indicator_effect_style, "depth");
     assert!(!settings.indicator_track_color_auto);

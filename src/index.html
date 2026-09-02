@@ -399,7 +399,7 @@
                   </label>
                   <label>
                     <span data-i18n="field.cursorPrimaryColor">Cursor 모델</span>
-                    <input type="color" name="cursor_primary_color" value="#72716d" />
+                    <input type="color" name="cursor_primary_color" value="#85847f" />
                   </label>
                   <label>
                     <span data-i18n="field.cursorSecondaryColor">기타 모델</span>
@@ -466,7 +466,7 @@
                     </label>
                     <label class="taskbar-text-color-picker">
                       <span data-i18n="field.textColorValue">색상</span>
-                      <input type="color" name="cursor_text_color" value="#72716d" />
+                      <input type="color" name="cursor_text_color" value="#85847f" />
                     </label>
                   </div>
                   <div class="taskbar-text-color-item" data-taskbar-text-color="info">
@@ -721,17 +721,33 @@
               <label class="toggle-row toggle-row-wide">
                 <input type="checkbox" name="taskbar_layout_memory_on" checked />
                 <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.taskbarLayoutMemory">모니터 조합별 위치 기억</span>
-                  <small class="field-help" data-i18n="help.taskbarLayoutMemory">연결된 모니터 조합마다 도구별 작업표시줄 위치를 따로 복원합니다.</small>
+                  <span class="toggle-title" data-i18n="field.taskbarLayoutMemory">화면 조합별 프로필</span>
+                  <small class="field-help" data-i18n="help.taskbarLayoutMemory">연결된 모니터 조합마다 위치와 선택한 표시 설정을 복원합니다.</small>
+                </span>
+              </label>
+
+              <label class="toggle-row toggle-row-wide taskbar-profile-option">
+                <input type="checkbox" name="taskbar_profile_presentation_on" checked />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.taskbarProfilePresentation">표시 구성과 크기·간격 기억</span>
+                  <small class="field-help" data-i18n="help.taskbarProfilePresentation">모드, 원·바, 표현, 크기와 간격을 화면 조합별로 복원합니다.</small>
+                </span>
+              </label>
+
+              <label class="toggle-row toggle-row-wide taskbar-profile-option">
+                <input type="checkbox" name="taskbar_profile_colors_on" />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.taskbarProfileColors">색상도 기억</span>
+                  <small class="field-help" data-i18n="help.taskbarProfileColors">팔레트와 도구·기간·글자·트랙 색상을 화면 조합별로 복원합니다.</small>
                 </span>
               </label>
 
               <div class="settings-action-row">
                 <span class="settings-action-copy">
-                  <strong data-i18n="field.savedTaskbarLayouts">저장된 모니터 배치</strong>
+                  <strong data-i18n="field.savedTaskbarLayouts">저장된 화면 조합 프로필</strong>
                   <small class="field-help" data-i18n="help.clearTaskbarLayouts">현재 표시 위치는 유지됩니다.</small>
                 </span>
-                <button type="button" data-action="clear-taskbar-layouts" data-i18n="action.clearTaskbarLayouts">배치 초기화</button>
+                <button type="button" data-action="clear-taskbar-layouts" data-i18n="action.clearTaskbarLayouts">프로필 초기화</button>
               </div>
 
               <label class="toggle-row">

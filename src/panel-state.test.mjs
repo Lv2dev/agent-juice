@@ -67,8 +67,10 @@ test("default tool colors are brighter than the legacy muted set", () => {
 });
 
 test("Cursor defaults stay visually distinct from the Codex blue limit", () => {
-  assert.equal(toolBrandColor("cursor", settings), "#72716d");
-  assert.ok(rgbDistance("#72716d", "#4d86d6") > 90);
+  assert.equal(toolBrandColor("cursor", settings), "#85847f");
+  assert.ok(rgbDistance("#85847f", "#4d86d6") > 90);
+  assert.ok(Math.abs(luminance("#85847f") - luminance("#4d86d6")) < 0.02);
+  assert.ok(luminance("#85847f") > luminance("#72716d") + 0.05);
 });
 
 test("colorForPercent uses thresholds and palette from settings", () => {
@@ -327,7 +329,7 @@ test("viewModelForTool maps Cursor Auto and API pools to two monthly indicators"
     new Date("2026-08-21T00:00:00Z"),
   );
 
-  assert.equal(vm.brandColor, "#72716d");
+  assert.equal(vm.brandColor, "#85847f");
   assert.equal(vm.primary.label, "Cursor Models");
   assert.equal(vm.primary.value, "99%");
   assert.equal(vm.primary.reset, "Resets Sep 21");
