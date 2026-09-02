@@ -139,7 +139,7 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   assert.equal(cards.codex.style.getPropertyValue("--tool-brand"), "#2fac7d");
   assert.equal(cards.codex.querySelector(".p5h").hidden, true);
   assert.equal(cards.codex.querySelector(".pweek").hidden, false);
-  assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#72716d");
+  assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#85847f");
   assert.equal(focusListenerCount, 0);
   let prevented = false;
   listeners.contextmenu?.({ preventDefault() { prevented = true; } });

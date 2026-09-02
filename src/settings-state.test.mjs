@@ -25,6 +25,8 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       maximized_hide_on: true,
       taskbar_avoid_overlap_on: false,
       taskbar_layout_memory_on: false,
+      taskbar_profile_presentation_on: false,
+      taskbar_profile_colors_on: true,
       indicator_style: "bar",
       indicator_effect_style: "glow",
       indicator_track_color_auto: false,
@@ -104,6 +106,8 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       maximizedHideOn: true,
       taskbarAvoidOverlapOn: false,
       taskbarLayoutMemoryOn: false,
+      taskbarProfilePresentationOn: false,
+      taskbarProfileColorsOn: true,
       indicatorStyle: "bar",
       indicatorEffectStyle: "glow",
       indicatorTrackColorAuto: false,
@@ -199,6 +203,8 @@ test("payloadFromEntries creates save_settings input payload", () => {
     maximized_hide_on: "on",
     taskbar_avoid_overlap_on: "on",
     taskbar_layout_memory_on: "on",
+    taskbar_profile_presentation_on: "on",
+    taskbar_profile_colors_on: "on",
     indicator_style: "bar",
     indicator_effect_style: "depth",
     indicator_track_color_auto: "on",
@@ -276,6 +282,8 @@ test("payloadFromEntries creates save_settings input payload", () => {
     maximized_hide_on: true,
     taskbar_avoid_overlap_on: true,
     taskbar_layout_memory_on: true,
+    taskbar_profile_presentation_on: true,
+    taskbar_profile_colors_on: true,
     indicator_style: "bar",
     indicator_effect_style: "depth",
     indicator_track_color_auto: true,
@@ -370,6 +378,17 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     formStateFromSettings({ taskbar_layout_memory_on: false }).taskbarLayoutMemoryOn,
     false,
   );
+  assert.equal(formStateFromSettings({}).taskbarProfilePresentationOn, true);
+  assert.equal(
+    formStateFromSettings({ taskbar_profile_presentation_on: false })
+      .taskbarProfilePresentationOn,
+    false,
+  );
+  assert.equal(formStateFromSettings({}).taskbarProfileColorsOn, false);
+  assert.equal(
+    formStateFromSettings({ taskbar_profile_colors_on: true }).taskbarProfileColorsOn,
+    true,
+  );
   assert.equal(formStateFromSettings({}).indicatorStyle, "ring");
   assert.equal(formStateFromSettings({}).indicatorEffectStyle, "flat");
   assert.equal(formStateFromSettings({}).indicatorTrackColorAuto, true);
@@ -420,7 +439,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#d36b86");
   assert.equal(formStateFromSettings({}).codexPrimaryColor, "#2fac7d");
   assert.equal(formStateFromSettings({}).codexSecondaryColor, "#4d86d6");
-  assert.equal(formStateFromSettings({}).cursorPrimaryColor, "#72716d");
+  assert.equal(formStateFromSettings({}).cursorPrimaryColor, "#85847f");
   assert.equal(formStateFromSettings({}).cursorSecondaryColor, "#0891b2");
   assert.equal(formStateFromSettings({}).toolWarningColor, "#f59e0b");
   assert.equal(formStateFromSettings({}).toolDangerColor, "#ef4444");
@@ -430,7 +449,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).claudeTextColorOn, false);
   assert.equal(formStateFromSettings({}).codexTextColor, "#2fac7d");
   assert.equal(formStateFromSettings({}).codexTextColorOn, false);
-  assert.equal(formStateFromSettings({}).cursorTextColor, "#72716d");
+  assert.equal(formStateFromSettings({}).cursorTextColor, "#85847f");
   assert.equal(formStateFromSettings({}).cursorTextColorOn, false);
   assert.equal(formStateFromSettings({}).infoTextColor, "#6b7280");
   assert.equal(formStateFromSettings({}).infoTextColorOn, false);
@@ -481,6 +500,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.maximized_hide_on, false);
   assert.equal(payload.taskbar_avoid_overlap_on, false);
   assert.equal(payload.taskbar_layout_memory_on, false);
+  assert.equal(payload.taskbar_profile_presentation_on, false);
+  assert.equal(payload.taskbar_profile_colors_on, false);
   assert.equal(payload.indicator_style, "ring");
   assert.equal(payload.indicator_effect_style, "flat");
   assert.equal(payload.indicator_track_color_auto, false);

@@ -165,7 +165,7 @@ test("usage cards share the same surface tint regardless of tool", () => {
   assert.match(claudeCard, /--tool-brand: #d79a32/);
   assert.match(codexCard, /--tool-brand: #2fac7d/);
   assert.match(grokCard, /--tool-brand: #d9578b/);
-  assert.match(cursorCard, /--tool-brand: #72716d/);
+  assert.match(cursorCard, /--tool-brand: #85847f/);
   assert.doesNotMatch(claudeCard, /--tool-glow/);
   assert.doesNotMatch(codexCard, /--tool-glow/);
   assert.doesNotMatch(grokCard, /--tool-glow/);
@@ -756,14 +756,36 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="taskbar_avoid_overlap_on"[^>]*checked/);
   assert.match(panelMarkup, />바 겹침 자동 방지</);
   assert.match(panelMarkup, /name="taskbar_layout_memory_on"[^>]*checked/);
+  assert.match(panelMarkup, /name="taskbar_profile_presentation_on"[^>]*checked/);
+  assert.match(panelMarkup, /name="taskbar_profile_colors_on"/);
+  assert.doesNotMatch(panelMarkup, /name="taskbar_profile_colors_on"[^>]*checked/);
+  assert.match(cssBlock(".taskbar-profile-option"), /margin-inline-start: 12px/);
+  assert.match(
+    cssBlock('.taskbar-profile-option[data-disabled="true"]'),
+    /opacity: 0\.56/,
+  );
+  assert.match(
+    settingsJs,
+    /function updateTaskbarProfileOptionAvailability\(\)[\s\S]*?row\.inert = !enabled/,
+  );
   assert.match(panelMarkup, /data-action="clear-taskbar-layouts"/);
-  assert.match(readme, /모니터 조합별 위치 기억/);
+  assert.match(readme, /화면 조합별 프로필/);
+  assert.match(readme, /표시 구성과 크기·간격 기억/);
+  assert.match(readme, /색상도 기억/);
   assert.match(readme, /최근 사용한 모니터 조합을 최대 16개/);
-  assert.match(readme, /Remember positions by monitor setup/);
+  assert.match(readme, /Profiles by monitor setup/);
+  assert.match(readme, /Remember presentation, size, and spacing/);
+  assert.match(readme, /Remember colors too/);
   assert.match(readme, /up to 16 recently used monitor setups/);
   assert.match(rustConfig, /maximized_hide_on/);
   assert.match(rustConfig, /taskbar_avoid_overlap_on/);
   assert.match(rustConfig, /taskbar_layout_profiles/);
+  assert.match(rustConfig, /taskbar_profile_presentation_on/);
+  assert.match(rustConfig, /taskbar_profile_colors_on/);
+  assert.match(
+    rustLib,
+    /async fn save_settings[\s\S]*?spawn_blocking[\s\S]*?TASKBAR_PROFILE_GATE[\s\S]*?stable_taskbar_topology[\s\S]*?update_taskbar_settings/,
+  );
   assert.match(
     rustLib,
     /async fn clear_taskbar_layout_profiles[\s\S]*?ensure_panel_command\(window\.label\(\)\)\?/,
@@ -1761,7 +1783,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.19"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.20"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
