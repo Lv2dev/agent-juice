@@ -7,6 +7,7 @@ import {
 } from "./activity-state.js";
 import { DEFAULT_SETTINGS, toolBrandColor, viewModelForTool } from "./panel-state.js";
 import { applyFont } from "./font.js";
+import { createTextScaleState, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
@@ -34,6 +35,11 @@ let panelVisible = false;
 let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
 const activeUnlisteners = new Set();
+const systemTextScale = createTextScaleState(() => {
+  hideActivityTooltip();
+  lastActivityRenderSignature = "";
+  renderActivity();
+});
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 
@@ -456,6 +462,7 @@ async function loadActivityOnce() {
 function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
+    void systemTextScale.load(invoke);
     void loadSettings();
     void loadStatus();
   }, 30_000);
@@ -482,6 +489,7 @@ function unlistenSafely(unlisten) {
 function cleanupListeners() {
   if (listenersDisposed) return;
   listenersDisposed = true;
+  systemTextScale.dispose();
   listenerLifecycleGeneration += 1;
   if (snapshotFallbackTimer) {
     clearInterval(snapshotFallbackTimer);
@@ -555,6 +563,7 @@ async function listenWithRetry(listen, eventName, handler) {
 function bindStatusUpdates() {
   const listen = tauriApi().event?.listen;
   if (listen) {
+    void listenWithRetry(listen, TEXT_SCALE_EVENT, (event) => systemTextScale.accept(event.payload));
     void listenWithRetry(listen, "status-updated", (event) => {
       statusEventGeneration += 1;
       renderStatuses(event.payload);
@@ -601,6 +610,7 @@ async function bootstrap() {
   bindWindowControls();
   bindPanelDragFallback();
   bindStatusUpdates();
+  void systemTextScale.load(invoke);
   scheduleActivityRefresh();
   document.addEventListener("keydown", (event) => {
     const cell = event.target?.closest?.("[data-activity-cell-index]");

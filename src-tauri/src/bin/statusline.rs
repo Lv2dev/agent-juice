@@ -5,7 +5,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     if let Some(arg) = args.next() {
         if arg == "--restore-owned-statusline" && args.next().is_none() {
-            return match agent_juice::config::Settings::restore_statusline() {
+            return match agent_juice::config::Settings::restore_statusline_if_installed() {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("failed to restore owned Claude statusLine: {err}");

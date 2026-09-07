@@ -16,6 +16,7 @@ pub mod statusline;
 mod system_activity;
 #[cfg(windows)]
 pub mod taskbar;
+mod text_scale;
 pub mod update;
 
 #[cfg(all(test, windows))]
@@ -519,10 +520,19 @@ struct TaskbarSettingsSnapshot {
 fn update_taskbar_settings(
     mutator: impl FnOnce(&mut Settings),
 ) -> anyhow::Result<TaskbarSettingsSnapshot> {
+    try_update_taskbar_settings(|settings| {
+        mutator(settings);
+        Ok(())
+    })
+}
+
+fn try_update_taskbar_settings(
+    mutator: impl FnOnce(&mut Settings) -> anyhow::Result<()>,
+) -> anyhow::Result<TaskbarSettingsSnapshot> {
     let _guard = TASKBAR_SETTINGS_WRITE_GATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let settings = Settings::update(mutator)?;
+    let settings = Settings::try_update(mutator)?;
     let revision = Settings::storage_revision();
     let generation = mark_taskbar_settings_changed();
     Ok(TaskbarSettingsSnapshot {
@@ -594,6 +604,9 @@ pub fn tray_quit_menu_id() -> &'static str {
 }
 
 fn begin_native_shutdown(app: &tauri::AppHandle) {
+    if let Some(scale) = app.try_state::<text_scale::SystemTextScale>() {
+        scale.stop();
+    }
     collector::begin_codex_app_server_shutdown();
     collector::begin_grok_acp_shutdown();
     if let Some(state) = app.try_state::<TaskbarShutdownState>() {
@@ -1473,6 +1486,9 @@ fn cached_status_attempt(
     let previous_failures = cache_guard
         .as_ref()
         .map_or(0, |cached| cached.consecutive_failures);
+    let authentication_failed = cache_guard
+        .as_ref()
+        .is_some_and(|cached| cached.error == Some(CollectionErrorKind::LoginRequired));
     drop(cache_guard);
 
     let outcome = collect();
@@ -1482,9 +1498,19 @@ fn cached_status_attempt(
             let consecutive_failures = previous_failures.saturating_add(1);
             let retry_secs =
                 collection_retry_delay_secs(&error, minimum_interval_secs, consecutive_failures);
+            let authentication_failed =
+                authentication_failed || error == CollectionErrorKind::LoginRequired;
             (
-                previous_last_good,
-                Some(error),
+                if authentication_failed {
+                    None
+                } else {
+                    previous_last_good
+                },
+                Some(if authentication_failed {
+                    CollectionErrorKind::LoginRequired
+                } else {
+                    error
+                }),
                 consecutive_failures,
                 retry_secs,
             )
@@ -2203,16 +2229,51 @@ fn status_payload_signature(statuses: &[AgentStatus]) -> String {
     serde_json::to_string(statuses).unwrap_or_default()
 }
 
+fn tray_menu_labels(language: &str, system_language: u16) -> [&'static str; 5] {
+    if notification_uses_korean(language, system_language) {
+        [
+            "Juice 열기",
+            "사용량 새로고침",
+            "바 표출 일시중지",
+            "바 표출 재개",
+            "종료",
+        ]
+    } else {
+        [
+            "Open Juice",
+            "Refresh usage",
+            "Pause bars",
+            "Resume bars",
+            "Quit",
+        ]
+    }
+}
+
+fn build_tray_menu<R: tauri::Runtime>(
+    app: &impl tauri::Manager<R>,
+    language: &str,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    let labels = tray_menu_labels(language, system_ui_language());
+    MenuBuilder::new(app)
+        .text(tray_open_menu_id(), labels[0])
+        .text(tray_refresh_menu_id(), labels[1])
+        .text(tray_pause_bar_menu_id(), labels[2])
+        .text(tray_resume_bar_menu_id(), labels[3])
+        .separator()
+        .text(tray_quit_menu_id(), labels[4])
+        .build()
+}
+
+fn refresh_tray_menu(app: &tauri::AppHandle, language: &str) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id(tray_id()) {
+        tray.set_menu(Some(build_tray_menu(app, language)?))?;
+    }
+    Ok(())
+}
+
 fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
     let default_icon = app.default_window_icon().cloned();
-    let menu = MenuBuilder::new(app)
-        .text(tray_open_menu_id(), "Juice 열기")
-        .text(tray_refresh_menu_id(), "사용량 새로고침")
-        .text(tray_pause_bar_menu_id(), "바 표출 일시중지")
-        .text(tray_resume_bar_menu_id(), "바 표출 재개")
-        .separator()
-        .text(tray_quit_menu_id(), "종료")
-        .build()?;
+    let menu = build_tray_menu(app, &Settings::load().language)?;
 
     let mut builder = TrayIconBuilder::with_id(tray_id())
         .tooltip(tray_tooltip())
@@ -3290,7 +3351,29 @@ fn taskbar_width_with_menu(width: i32, menu_open: bool) -> i32 {
 
 fn taskbar_physical_length(logical_length: i32, dpi: u32) -> i32 {
     let dpi = if dpi == 0 { 96 } else { dpi };
-    (((logical_length.max(1) as i64) * (dpi as i64) + 48) / 96).clamp(1, i32::MAX as i64) as i32
+    (((logical_length.max(1) as i64) * (dpi as i64) + 95) / 96).clamp(1, i32::MAX as i64) as i32
+}
+
+fn taskbar_measured_logical_length(
+    css_length: f64,
+    device_pixel_ratio: Option<f64>,
+    target_scale: f64,
+) -> Result<i32, String> {
+    let pixel_ratio = device_pixel_ratio.unwrap_or(target_scale);
+    if !css_length.is_finite()
+        || !(1.0..=2304.0).contains(&css_length)
+        || !pixel_ratio.is_finite()
+        || !(0.25..=8.0).contains(&pixel_ratio)
+        || !target_scale.is_finite()
+        || !(0.25..=8.0).contains(&target_scale)
+    {
+        return Err("taskbar content measurement is out of range".into());
+    }
+    let logical_length = (css_length * pixel_ratio / target_scale).ceil();
+    if !(1.0..=4096.0).contains(&logical_length) {
+        return Err("taskbar content measurement is out of range".into());
+    }
+    Ok(logical_length as i32)
 }
 
 fn taskbar_ratio_preserving_leading_edge(
@@ -4182,6 +4265,19 @@ async fn check_for_updates(
     Ok(result)
 }
 
+async fn await_update_download<T, E>(
+    download: impl std::future::Future<Output = Result<T, E>>,
+    oversize: &tokio::sync::Notify,
+    timeout: std::time::Duration,
+) -> Result<T, String> {
+    tokio::select! {
+        result = tokio::time::timeout(timeout, download) => result
+            .map_err(|_| "update download timed out".to_string())?
+            .map_err(|_| "update download or signature verification failed".to_string()),
+        _ = oversize.notified() => Err("update package exceeds the size limit".to_string()),
+    }
+}
+
 #[tauri::command]
 async fn install_update(
     window: tauri::Window,
@@ -4243,14 +4339,12 @@ async fn install_update(
             let _ = verifying_events.send(UpdateInstallEvent::Verifying);
         },
     );
-    tokio::pin!(download);
-    let bytes = tokio::select! {
-        result = &mut download => result
-            .map_err(|_| "update download or signature verification failed".to_string())?,
-        _ = oversize_notify.notified() => {
-            return Err("update package exceeds the size limit".to_string());
-        },
-    };
+    let bytes = await_update_download(
+        download,
+        &oversize_notify,
+        std::time::Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS),
+    )
+    .await?;
     if !update::update_package_size_is_allowed(bytes.len() as u64, Some(bytes.len() as u64)) {
         return Err("update package exceeds the size limit".to_string());
     }
@@ -4329,6 +4423,13 @@ async fn get_settings() -> Result<Settings, String> {
         .await
         .map_err(|err| format!("settings load task failed: {err}"))?
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_system_text_scale(app: tauri::AppHandle) -> text_scale::TextScaleSnapshot {
+    app.try_state::<text_scale::SystemTextScale>()
+        .map(|state| state.snapshot())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -4442,6 +4543,77 @@ fn preserve_concurrent_taskbar_state(
     if drag_active || !taskbar_targets_match(current, baseline) {
         preserve_taskbar_positions(current, requested);
     }
+}
+
+fn merge_settings_edits(
+    current: &Settings,
+    baseline: Option<&Settings>,
+    requested: &Settings,
+) -> anyhow::Result<Settings> {
+    let Some(baseline) = baseline else {
+        return Ok(requested.clone());
+    };
+    fn apply_changes(
+        current: &mut serde_json::Value,
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+    ) {
+        if before == after {
+            return;
+        }
+        if let (Some(current), Some(before), Some(after)) = (
+            current.as_object_mut(),
+            before.as_object(),
+            after.as_object(),
+        ) {
+            for key in before.keys().filter(|key| !after.contains_key(*key)) {
+                current.remove(key);
+            }
+            for (key, value) in after {
+                apply_changes(
+                    current.entry(key).or_insert(serde_json::Value::Null),
+                    before.get(key).unwrap_or(&serde_json::Value::Null),
+                    value,
+                );
+            }
+        } else {
+            *current = after.clone();
+        }
+    }
+    let mut merged = serde_json::to_value(current)?;
+    apply_changes(
+        &mut merged,
+        &serde_json::to_value(baseline)?,
+        &serde_json::to_value(requested)?,
+    );
+    Ok(serde_json::from_value(merged)?)
+}
+
+fn validate_settings_edit_topology(
+    current: &Settings,
+    baseline: Option<&Settings>,
+    requested: &Settings,
+    edit_topology: Option<&[String]>,
+    current_topology: &[String],
+) -> anyhow::Result<()> {
+    let (Some(baseline), Some(edit_topology)) = (baseline, edit_topology) else {
+        return Ok(());
+    };
+    let presentation_changed = (current.taskbar_profile_presentation_on
+        || requested.taskbar_profile_presentation_on)
+        && TaskbarPresentationProfile::from_settings(baseline)
+            != TaskbarPresentationProfile::from_settings(requested);
+    let colors_changed = (current.taskbar_profile_colors_on || requested.taskbar_profile_colors_on)
+        && TaskbarAppearanceProfile::from_settings(baseline)
+            != TaskbarAppearanceProfile::from_settings(requested);
+    if (current.taskbar_layout_memory_on || requested.taskbar_layout_memory_on)
+        && (presentation_changed || colors_changed)
+        && canonical_taskbar_monitor_keys(edit_topology.to_vec())
+            != canonical_taskbar_monitor_keys(current_topology.to_vec())
+    {
+        anyhow::bail!("monitor layout changed; settings reloaded, please retry the edit");
+    }
+    Ok(())
 }
 
 fn retry_settings_side_effects(app: tauri::AppHandle, retry_taskbar: bool, retry_autostart: bool) {
@@ -4570,14 +4742,20 @@ async fn save_settings(
     window: tauri::Window,
     app: tauri::AppHandle,
     input: config::SettingsInput,
+    edit_baseline: Option<config::SettingsInput>,
+    edit_topology: Option<Vec<String>>,
 ) -> Result<SaveSettingsResult, String> {
     ensure_panel_command(window.label())?;
     drop(window);
-    let mut requested = Settings::from_input(input);
+    let edit_request = Settings::from_input(input);
+    let edit_baseline = edit_baseline.map(Settings::from_input);
     let baseline = tauri::async_runtime::spawn_blocking(Settings::try_load)
         .await
         .map_err(|err| format!("settings load task failed: {err}"))?
         .map_err(|err| err.to_string())?;
+    let mut requested = merge_settings_edits(&baseline, edit_baseline.as_ref(), &edit_request)
+        .map_err(|err| err.to_string())?;
+    let previous_language = baseline.language.clone();
     let previous_show_claude = baseline.show_claude;
     let previous_show_codex = baseline.show_codex;
     let previous_show_grok = baseline.show_grok;
@@ -4610,7 +4788,17 @@ async fn save_settings(
             .unwrap_or_else(|err| err.into_inner());
         let profile_topology = stable_taskbar_topology(&update_app);
         let mut autostart_changed = false;
-        let snapshot = update_taskbar_settings(|current| {
+        let snapshot = try_update_taskbar_settings(|current| {
+            validate_settings_edit_topology(
+                current,
+                edit_baseline.as_ref(),
+                &edit_request,
+                edit_topology.as_deref(),
+                &profile_topology,
+            )?;
+            let mut merged = merge_settings_edits(current, edit_baseline.as_ref(), &edit_request)?;
+            preserve_taskbar_positions(&requested, &mut merged);
+            requested = merged;
             autostart_changed = autostart_setting_changed(current, &requested);
             preserve_concurrent_taskbar_state(
                 current,
@@ -4622,6 +4810,7 @@ async fn save_settings(
             if !drag_was_active && !profile_topology.is_empty() {
                 record_taskbar_layout_profile(current, &profile_topology);
             }
+            Ok(())
         })?;
         Ok::<_, anyhow::Error>((snapshot.settings, autostart_changed, snapshot.generation))
     })
@@ -4645,6 +4834,11 @@ async fn save_settings(
             return Err(save_error);
         }
     };
+    if previous_language != settings.language {
+        if let Err(error) = refresh_tray_menu(&app, &settings.language) {
+            eprintln!("[tray] menu language update failed: {error}");
+        }
+    }
     if previous_show_codex != settings.show_codex {
         if let Err(error) = collector::set_codex_app_server_enabled(settings.show_codex) {
             eprintln!("[codex] app-server broker state update failed: {error}");
@@ -4937,17 +5131,32 @@ async fn set_taskbar_content_width(
     app: tauri::AppHandle,
     tool: String,
     width: f64,
+    mode: Option<String>,
+    device_pixel_ratio: Option<f64>,
 ) -> Result<bool, String> {
     ensure_matching_bar_command(window.label(), &tool)?;
-    if !width.is_finite() || !(1.0..=1024.0).contains(&width) {
+    if !width.is_finite() || !(1.0..=2304.0).contains(&width) {
         return Err("taskbar content width is out of range".into());
     }
 
     let tool = normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
     let (settings, settings_generation) =
         load_settings_with_generation().map_err(|err| err.to_string())?;
+    if mode.as_ref().is_some_and(|mode| mode != &settings.bar_mode) {
+        return Err("taskbar mode changed while measuring".into());
+    }
     let target_initialized = taskbar_target_initialized(&settings, tool);
-    let width = width.ceil() as i32;
+    #[cfg(windows)]
+    let target_scale = {
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        let taskbar = taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(&settings, tool))
+            .map_err(|err| err.to_string())?;
+        // Dock geometry uses the shell window's DPI; WebView CSS pixels may use a different scale.
+        (unsafe { GetDpiForWindow(taskbar.hwnd) }).max(96) as f64 / 96.0
+    };
+    #[cfg(not(windows))]
+    let target_scale = 1.0;
+    let width = taskbar_measured_logical_length(width, device_pixel_ratio, target_scale)?;
     let previous = taskbar_content_layout(&app, &settings, tool);
     let layout_matches = previous
         .as_ref()
@@ -4966,7 +5175,7 @@ async fn set_taskbar_content_width(
                 rect.right - rect.left
             };
         let expected = taskbar_physical_length_for_window(width, taskbar.hwnd);
-        Some((actual - expected).abs() <= 1)
+        Some(actual >= expected && actual <= expected + 1)
     })()
     .unwrap_or(false);
     #[cfg(not(windows))]
@@ -6093,6 +6302,12 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                         }
                     }
                     let profile_topology = taskbar_profile_topology_keys(&snapshot);
+                    if !stable_taskbar_topology_matches(&app, &profile_topology) {
+                        let _profile_guard = TASKBAR_PROFILE_GATE
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner());
+                        let _ = set_stable_taskbar_topology(&app, &[]);
+                    }
                     if let Some(stable_topology) = topology_stability.observe(profile_topology) {
                         let _profile_guard = TASKBAR_PROFILE_GATE
                             .lock()
@@ -6290,6 +6505,7 @@ pub fn run() {
             install_update,
             open_release_page,
             get_settings,
+            get_system_text_scale,
             save_settings,
             clear_taskbar_layout_profiles,
             get_taskbar_orientation,
@@ -6305,6 +6521,10 @@ pub fn run() {
             start_panel_drag
         ])
         .setup(move |app| {
+            let scale_app = app.handle().clone();
+            app.manage(text_scale::SystemTextScale::start(move |snapshot| {
+                let _ = scale_app.emit(text_scale::CHANGED_EVENT, snapshot);
+            }));
             app.manage(TaskbarPauseState::default());
             app.manage(TaskbarMenuState::default());
             app.manage(TaskbarRecoveryState::default());
@@ -6402,6 +6622,250 @@ mod tests {
         render::Palette,
         taskbar,
     };
+    #[test]
+    fn settings_edits_merge_only_changed_fields_into_the_latest_profile() {
+        let baseline = Settings::default();
+        let mut requested = baseline.clone();
+        requested.theme = "dark".into();
+        requested.tool_colors.claude_primary = [1, 2, 3];
+        let mut current = baseline.clone();
+        current.bar_mode = "compact".into();
+        current.indicator_style = "bar".into();
+        current.bar_content_gap_px = 3.1;
+        current.tool_colors.cursor_primary = [4, 5, 6];
+        current.taskbar_bars_paused = true;
+        current.codex_taskbar_offset_ratio = 0.8;
+        super::record_taskbar_layout_profile(&mut current, &["monitor-b".into()]);
+        let merged = super::merge_settings_edits(&current, Some(&baseline), &requested).unwrap();
+        assert_eq!(merged.theme, "dark");
+        assert_eq!(merged.bar_mode, "compact");
+        assert_eq!(merged.indicator_style, "bar");
+        assert_eq!(merged.bar_content_gap_px, 3.1);
+        assert_eq!(merged.tool_colors.claude_primary, [1, 2, 3]);
+        assert_eq!(merged.tool_colors.cursor_primary, [4, 5, 6]);
+        assert!(merged.taskbar_bars_paused);
+        assert_eq!(merged.codex_taskbar_offset_ratio, 0.8);
+        assert_eq!(
+            merged.taskbar_layout_profiles,
+            current.taskbar_layout_profiles
+        );
+    }
+
+    #[test]
+    fn scoped_edits_reject_a_changed_topology_but_global_edits_merge() {
+        let baseline = Settings::default();
+        let mut requested = baseline.clone();
+        requested.theme = "dark".into();
+        let old_topology = vec!["monitor-a".into()];
+        let new_topology = vec!["monitor-b".into()];
+        assert!(super::validate_settings_edit_topology(
+            &baseline,
+            Some(&baseline),
+            &requested,
+            Some(&old_topology),
+            &new_topology
+        )
+        .is_ok());
+        requested.bar_mode = "quad".into();
+        assert!(super::validate_settings_edit_topology(
+            &baseline,
+            Some(&baseline),
+            &requested,
+            Some(&old_topology),
+            &new_topology
+        )
+        .is_err());
+        assert!(super::validate_settings_edit_topology(
+            &baseline,
+            Some(&baseline),
+            &requested,
+            Some(&old_topology),
+            &[]
+        )
+        .is_err());
+        assert!(super::validate_settings_edit_topology(
+            &baseline,
+            Some(&baseline),
+            &requested,
+            Some(&old_topology),
+            &old_topology
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn settings_edit_merge_switches_payload_palette_variants_without_stale_tags() {
+        let palettes = [
+            Palette::Traffic,
+            Palette::Mono([1, 2, 3]),
+            Palette::Mono([4, 5, 6]),
+            Palette::Custom([1, 2, 3], [4, 5, 6], [7, 8, 9]),
+            Palette::Custom([9, 8, 7], [6, 5, 4], [3, 2, 1]),
+        ];
+        for before in palettes {
+            for after in palettes {
+                let baseline = Settings {
+                    palette: before,
+                    ..Settings::default()
+                };
+                let mut current = baseline.clone();
+                current.theme = "dark".into();
+                let mut requested = baseline.clone();
+                requested.palette = after;
+                let merged = super::merge_settings_edits(&current, Some(&baseline), &requested)
+                    .unwrap_or_else(|error| panic!("{before:?} -> {after:?}: {error}"));
+                assert_eq!(merged.palette, after);
+                assert_eq!(merged.theme, "dark");
+            }
+        }
+    }
+
+    #[test]
+    fn native_tray_labels_follow_explicit_and_system_language() {
+        let english = super::tray_menu_labels("en", 0x0412);
+        assert_eq!(
+            english,
+            [
+                "Open Juice",
+                "Refresh usage",
+                "Pause bars",
+                "Resume bars",
+                "Quit"
+            ]
+        );
+        assert_eq!(super::tray_menu_labels("system", 0x0409), english);
+        assert_eq!(
+            super::tray_menu_labels("ko", 0x0409),
+            super::tray_menu_labels("system", 0x0412)
+        );
+    }
+
+    #[test]
+    fn measured_bar_width_never_rounds_below_content_at_any_supported_dpi() {
+        for dpi in [96, 120, 144, 168, 192] {
+            for css_length in [36.0, 37.1, 83.2, 105.0, 186.2, 431.7, 1024.0] {
+                for zoom in [1.0, 1.1, 1.25, 1.5] {
+                    let scale = dpi as f64 / 96.0;
+                    let logical = super::taskbar_measured_logical_length(
+                        css_length,
+                        Some(scale * zoom),
+                        scale,
+                    )
+                    .unwrap();
+                    let physical = super::taskbar_physical_length(logical, dpi) as f64;
+                    let content = css_length * scale * zoom;
+                    assert!(
+                        physical >= content,
+                        "dpi={dpi}, css={css_length}, zoom={zoom}"
+                    );
+                    assert!(physical - content < scale + 1.0);
+                }
+            }
+        }
+        assert_eq!(super::taskbar_physical_length(37, 120), 47);
+        assert_eq!(
+            super::taskbar_measured_logical_length(1050.7, Some(2.0), 2.0).unwrap(),
+            1051
+        );
+        assert_eq!(
+            super::taskbar_measured_logical_length(2304.0, Some(1.0), 1.0).unwrap(),
+            2304
+        );
+        assert!(super::taskbar_measured_logical_length(2305.0, Some(1.0), 1.0).is_err());
+        for shell_dpi in [96, 120, 144, 168, 192] {
+            for webview_dpr in [1.0, 1.25, 1.5, 1.75, 2.0] {
+                let length = super::taskbar_measured_logical_length(
+                    183.3,
+                    Some(webview_dpr),
+                    shell_dpi as f64 / 96.0,
+                )
+                .unwrap();
+                assert!(
+                    super::taskbar_physical_length(length, shell_dpi) as f64 >= 183.3 * webview_dpr
+                );
+            }
+        }
+        assert_eq!(
+            super::taskbar_measured_logical_length(37.1, None, 1.5).unwrap(),
+            38
+        );
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, 9.0] {
+            assert!(super::taskbar_measured_logical_length(50.0, Some(invalid), 1.0).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_update_download_times_out_and_releases_the_operation() {
+        let gate = tokio::sync::Mutex::new(());
+        let oversize = tokio::sync::Notify::new();
+        let result = {
+            let _guard = gate.lock().await;
+            super::await_update_download(
+                std::future::pending::<Result<Vec<u8>, ()>>(),
+                &oversize,
+                std::time::Duration::from_millis(20),
+            )
+            .await
+        };
+        assert_eq!(result.unwrap_err(), "update download timed out");
+        assert!(gate.try_lock().is_ok());
+        assert_eq!(
+            super::await_update_download(
+                std::future::ready(Ok::<_, ()>(vec![1u8])),
+                &oversize,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap(),
+            vec![1]
+        );
+        oversize.notify_one();
+        assert_eq!(
+            super::await_update_download(
+                std::future::pending::<Result<Vec<u8>, ()>>(),
+                &oversize,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err(),
+            "update package exceeds the size limit"
+        );
+    }
+
+    #[test]
+    fn auth_failure_blocks_old_account_until_successful_collection() {
+        use chrono::TimeZone;
+        use std::sync::Mutex;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 5, 0, 0, 0).unwrap();
+        let cache = Mutex::new(None);
+        super::cached_status_attempt(&cache, now, 60, true, || {
+            Ok(status_for_signature("account-A"))
+        });
+        assert!(super::cached_status_attempt(&cache, now, 60, true, || Err(
+            super::CollectionErrorKind::LoginRequired
+        ))
+        .is_none());
+        assert!(super::cached_status_attempt(&cache, now, 60, true, || Err(
+            super::CollectionErrorKind::Transport
+        ))
+        .is_none());
+        assert_eq!(
+            super::cached_collection_health(&cache),
+            super::CollectionHealth::LoginRequired
+        );
+        assert!(
+            super::cached_status_attempt(&cache, now, 60, false, || panic!("backoff")).is_none()
+        );
+        let fresh = super::cached_status_attempt(&cache, now, 60, true, || {
+            Ok(status_for_signature("account-B"))
+        })
+        .unwrap();
+        assert_eq!(fresh.session_id, "account-B");
+        assert_eq!(
+            super::cached_collection_health(&cache),
+            super::CollectionHealth::Ready
+        );
+    }
 
     struct EnvVarGuard {
         key: &'static str,

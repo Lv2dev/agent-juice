@@ -590,13 +590,13 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
     /if !taskbar_target_initialized\(settings, tool\)[\s\S]*actions\.push\(Action::Hide\(tool, handle\)\)/,
   );
   assert.equal(
-    rustLib.match(/Settings::update\(/g)?.length,
+    rustLib.match(/Settings::(?:try_)?update\(/g)?.length,
     1,
     "all taskbar settings writes must use the generation-guarded update helper",
   );
   assert.match(
     rustLib,
-    /let settings = Settings::update\(mutator\)\?;\s*let revision = Settings::storage_revision\(\);\s*let generation = mark_taskbar_settings_changed\(\)/,
+    /let settings = Settings::try_update\(mutator\)\?;\s*let revision = Settings::storage_revision\(\);\s*let generation = mark_taskbar_settings_changed\(\)/,
   );
   assert.match(
     rustLib,
@@ -1466,9 +1466,9 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.staleAfter"[\s\S]*data-i18n="help\.staleAfter"/);
   assert.match(cssBlock(".field-grid label.field-with-help"), /grid-template-columns: minmax\(72px, 1fr\) 58px auto/);
   assert.match(cssBlock(".field-grid label.field-with-help > span:first-child"), /white-space: nowrap/);
-  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-size: 10\.5px/);
+  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-size: calc\(10\.5px \* var\(--system-text-scale, 1\)\)/);
   assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-weight: 560/);
-  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-size: 12px/);
+  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-size: calc\(12px \* var\(--system-text-scale, 1\)\)/);
   assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-weight: 740/);
   assert.doesNotMatch(css, /\.field-grid span,/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
@@ -1783,7 +1783,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.20"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.21"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

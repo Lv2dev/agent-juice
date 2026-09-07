@@ -1,6 +1,7 @@
 import { DEFAULT_SETTINGS } from "./panel-state.js";
 import { barViewModel } from "./bar-state.js";
 import { applyFont } from "./font.js";
+import { createTextScaleState, fittedRingNumberSize, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 
@@ -360,11 +361,25 @@ function renderTool(vm, limitOrder) {
   }
 }
 
+function fitRingNumbers() {
+  const item = toolElement(CURRENT_TOOL);
+  if (!item || !document.createRange || !currentBarView) return;
+  for (const number of item.querySelectorAll?.(".bar-worst, .quad-number") ?? []) {
+    number.style.removeProperty("font-size");
+    if (currentBarView.textScale <= 1 || !number.getClientRects().length || !number.textContent) continue;
+    const range = document.createRange();
+    range.selectNodeContents(number);
+    const rect = range.getBoundingClientRect();
+    const size = fittedRingNumberSize(currentBarView.ringNumberFontSizePx, rect.width, rect.height,
+      currentBarView.ringCenterSizePx, currentBarView.ringNumberOutlineOn ? currentBarView.ringNumberOutlineWidthPx : 0);
+    number.style.fontSize = `${size}px`;
+  }
+}
+
 function scheduleTaskbarContentWidthSync() {
-  if (!CURRENT_TOOL || !tauriApi().core?.invoke) return;
+  if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return;
   const root = document.querySelector("#bar");
   const item = toolElement(CURRENT_TOOL);
-  const mode = root?.dataset?.mode;
   if (
     !root ||
     !item ||
@@ -379,26 +394,29 @@ function scheduleTaskbarContentWidthSync() {
   contentWidthSyncTimer = setTimeout(() => {
     contentWidthSyncTimer = null;
     if (
-      item.hidden ||
+      listenersDisposed || item.hidden ||
       refreshMenuState !== MENU_STATES.CLOSED
     ) {
       return;
     }
 
     const vertical = root.dataset.taskbarOrientation === "vertical";
+    fitRingNumbers();
     const rect = item.getBoundingClientRect?.() ?? {};
     const rectLength = Number(vertical ? rect.height : rect.width) || 0;
     const scrollLength = Number(vertical ? item.scrollHeight : item.scrollWidth) || 0;
     const width = Math.ceil(Math.max(rectLength, scrollLength));
-    if (!Number.isFinite(width) || width < 1 || width > 1024) return;
-    const requestKey = `${vertical ? "vertical" : "horizontal"}:${mode}:${width}`;
+    if (!Number.isFinite(width) || width < 1 || width > 2304) return;
+    const mode = root.dataset.mode;
+    const devicePixelRatio = Number(window.devicePixelRatio) || 1;
+    const requestKey = `${vertical ? "vertical" : "horizontal"}:${mode}:${width}:${devicePixelRatio}`;
     if (requestKey === lastRequestedContentWidth) return;
     if (requestKey !== contentWidthRetryKey) {
       contentWidthRetryKey = requestKey;
       contentWidthRetryCount = 0;
     }
     lastRequestedContentWidth = requestKey;
-    void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width })
+    void invoke("set_taskbar_content_width", { tool: CURRENT_TOOL, width, mode, devicePixelRatio })
       .then(() => {
         if (contentWidthRetryKey === requestKey) {
           contentWidthRetryKey = "";
@@ -424,6 +442,39 @@ function scheduleTaskbarContentWidthSync() {
   }, CONTENT_WIDTH_SYNC_DELAY_MS);
 }
 
+function observeTaskbarContentSize() {
+  if (!CURRENT_TOOL) return;
+  const item = toolElement(CURRENT_TOOL);
+  const remeasure = () => {
+    lastRequestedContentWidth = "";
+    if (systemTextScale.factor > 1) renderBar();
+    else scheduleTaskbarContentWidthSync();
+  };
+  const Observer = window.ResizeObserver;
+  if (Observer && item) {
+    const observer = new Observer(scheduleTaskbarContentWidthSync);
+    observer.observe(item, { box: "border-box" });
+    activeUnlisteners.add(() => observer.disconnect());
+  }
+  window.addEventListener?.("resize", remeasure);
+  activeUnlisteners.add(() => window.removeEventListener?.("resize", remeasure));
+  const fonts = document.fonts;
+  fonts?.ready?.then(remeasure).catch(() => {});
+  fonts?.addEventListener?.("loadingdone", remeasure);
+  activeUnlisteners.add(() => fonts?.removeEventListener?.("loadingdone", remeasure));
+  let removeDpiListener;
+  const watchDpi = () => {
+    removeDpiListener?.();
+    if (listenersDisposed) return;
+    const query = window.matchMedia?.(`(resolution: ${Number(window.devicePixelRatio) || 1}dppx)`);
+    query?.addEventListener?.("change", watchDpi);
+    removeDpiListener = () => query?.removeEventListener?.("change", watchDpi);
+    remeasure();
+  };
+  watchDpi();
+  activeUnlisteners.add(() => removeDpiListener?.());
+}
+
 function syncNativeTooltip() {
   if (refreshMenuState !== MENU_STATES.CLOSED || !pendingNativeTooltip) return;
   const { tool, text } = pendingNativeTooltip;
@@ -434,6 +485,9 @@ function syncNativeTooltip() {
   });
 }
 
+let currentBarView = null;
+const systemTextScale = createTextScaleState(() => renderBar());
+
 function renderBar() {
   const root = document.querySelector("#bar");
   if (!root) return;
@@ -441,7 +495,11 @@ function renderBar() {
   const vm = barViewModel(statuses, settings, new Date(), {
     startupLoading: startupStatusLoading,
     collectionHealth,
+    textScale: systemTextScale.factor,
+    crossAxisSize: root.dataset.taskbarOrientation === "vertical"
+      ? document.documentElement?.clientWidth : document.documentElement?.clientHeight,
   });
+  currentBarView = vm;
   root.dataset.mode = vm.mode;
   root.dataset.menuState = refreshMenuState;
   root.dataset.fullResetTime = vm.fullResetTimeOn ? "on" : "off";
@@ -559,6 +617,7 @@ async function loadTaskbarOrientation() {
 function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
+    void systemTextScale.load(invoke);
     void loadSettings().then(renderBar);
     void loadStatus();
     void loadTaskbarOrientation();
@@ -578,7 +637,9 @@ function unlistenSafely(unlisten) {
 function cleanupListeners() {
   if (listenersDisposed) return;
   listenersDisposed = true;
+  systemTextScale.dispose();
   listenerLifecycleGeneration += 1;
+  clearTimeout(contentWidthSyncTimer);
   if (snapshotFallbackTimer) {
     clearInterval(snapshotFallbackTimer);
     snapshotFallbackTimer = null;
@@ -645,8 +706,17 @@ async function listenWithRetry(listen, eventName, handler) {
 }
 
 function bindEvents() {
+  observeTaskbarContentSize();
+  const currentWindow = tauriApi().window?.getCurrentWindow?.();
+  if (typeof currentWindow?.listen === "function") {
+    void listenWithRetry(currentWindow.listen.bind(currentWindow), "tauri://scale-change", () => {
+      lastRequestedContentWidth = "";
+      renderBar();
+    });
+  }
   const listen = tauriApi().event?.listen;
   if (listen) {
+    void listenWithRetry(listen, TEXT_SCALE_EVENT, (event) => systemTextScale.accept(event.payload));
     void listenWithRetry(listen, REFRESH_MENU_OPENED_EVENT, (event) => {
       const openedTool = event.payload?.tool;
       if (openedTool && openedTool !== (CURRENT_TOOL ?? "all")) {
@@ -682,6 +752,7 @@ function bindEvents() {
       const root = document.querySelector("#bar");
       if (!root) return;
       root.dataset.taskbarOrientation = event.payload === "vertical" ? "vertical" : "horizontal";
+      lastRequestedContentWidth = "";
       scheduleTaskbarContentWidthSync();
     });
   }
@@ -718,6 +789,7 @@ async function bootstrap() {
   bindRefreshMenu();
   renderBar();
   bindEvents();
+  void systemTextScale.load(invoke);
   await Promise.all([loadSettings().then(renderBar), loadStatus(), loadTaskbarOrientation()]);
   renderBar();
 }

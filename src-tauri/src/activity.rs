@@ -24,8 +24,11 @@ const DEFAULT_MAX_ENTRIES: usize = 32_768;
 const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILE_BYTES_PER_PASS: u64 = 32 * 1024 * 1024;
 const DEFAULT_SCAN_DURATION: Duration = Duration::from_secs(3);
+const MAX_ENUMERATION_DEPTH: usize = 128;
 
 static SCAN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ENUMERATION_READERS: Lazy<Mutex<[Vec<OpenDirectory>; 3]>> =
+    Lazy::new(|| Mutex::new(std::array::from_fn(|_| Vec::new())));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ActivityDay {
@@ -167,6 +170,8 @@ struct ActivityIndex {
     timezone_offset_minutes: i32,
     #[serde(default)]
     files: BTreeMap<String, FileCheckpoint>,
+    #[serde(default)]
+    enumeration: EnumerationCheckpoint,
 }
 
 impl ActivityIndex {
@@ -175,16 +180,43 @@ impl ActivityIndex {
             schema_version: SCHEMA_VERSION.into(),
             timezone_offset_minutes,
             files: BTreeMap::new(),
+            enumeration: EnumerationCheckpoint::default(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CandidateFile {
     path: PathBuf,
     key: String,
     tool: ActivityTool,
     modified_millis: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct EnumerationCheckpoint {
+    next_tool: usize,
+    walks: [DirectoryWalk; 3],
+    pending: VecDeque<CandidateFile>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct DirectoryWalk {
+    root: Option<PathBuf>,
+    stack: Vec<DirectoryPosition>,
+    complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DirectoryPosition {
+    relative: PathBuf,
+    offset: usize,
+}
+
+struct OpenDirectory {
+    path: PathBuf,
+    entries: fs::ReadDir,
+    offset: usize,
 }
 
 #[derive(Debug, Default)]
@@ -251,31 +283,75 @@ pub fn refresh_at(
     .format("%Y-%m-%d")
     .to_string();
 
-    let (mut candidates, enumeration_partial) = collect_candidates(
-        roots,
-        [show_claude, show_codex, show_grok],
-        &cutoff,
-        timezone,
-        deadline,
-        options,
-    );
-    candidates = fair_candidate_order(candidates);
+    let enabled_tools = [show_claude, show_codex, show_grok];
+    let current_roots = [&roots.claude, &roots.codex, &roots.grok];
+    let walks = &index.enumeration.walks;
+    index.enumeration.pending.retain(|candidate| {
+        ActivityTool::ALL
+            .iter()
+            .position(|tool| *tool == candidate.tool)
+            .is_some_and(|i| {
+                enabled_tools[i]
+                    && current_roots[i].as_ref().is_some_and(|root| {
+                        walks[i].root.as_ref() == Some(root)
+                            && candidate
+                                .path
+                                .strip_prefix(root)
+                                .ok()
+                                .is_some_and(|relative| {
+                                    !relative.as_os_str().is_empty()
+                                        && relative.components().all(|component| {
+                                            matches!(component, std::path::Component::Normal(_))
+                                        })
+                                })
+                            && candidate.key == candidate.path.to_string_lossy()
+                    })
+            })
+    });
+    let enumeration_partial = if index.enumeration.pending.is_empty() {
+        let mut readers = ENUMERATION_READERS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let (candidates, partial) = collect_candidates(
+            roots,
+            enabled_tools,
+            &cutoff,
+            timezone,
+            deadline,
+            options,
+            &mut index.enumeration,
+            &mut readers,
+        );
+        index.enumeration.pending = fair_candidate_order(candidates).into();
+        partial
+    } else {
+        true
+    };
 
     let mut progress = ScanProgress {
         incomplete: enumeration_partial,
         lossy: false,
         bytes_read: 0,
     };
-    let seen_files = candidates
+    let seen_files = index
+        .enumeration
+        .pending
         .iter()
         .map(|candidate| candidate.key.clone())
         .collect::<BTreeSet<_>>();
 
-    for candidate in candidates {
+    let mut files_scanned = 0;
+    while !index.enumeration.pending.is_empty() {
         if Instant::now() >= deadline || progress.bytes_read >= options.max_bytes {
             progress.incomplete = true;
             break;
         }
+        if files_scanned >= options.max_files {
+            progress.incomplete = true;
+            break;
+        }
+        let candidate = index.enumeration.pending.pop_front().unwrap();
+        files_scanned += 1;
         let checkpoint = index
             .files
             .entry(candidate.key)
@@ -308,7 +384,10 @@ pub fn refresh_at(
 
     index.files.retain(|key, checkpoint| {
         checkpoint.prune(&cutoff);
-        seen_files.contains(key) || !checkpoint.days.is_empty()
+        seen_files.contains(key)
+            || !checkpoint.days.is_empty()
+            || !checkpoint.claude_messages.is_empty()
+            || !checkpoint.grok_responses.is_empty()
     });
     if !show_codex {
         index
@@ -339,6 +418,14 @@ pub fn refresh_at(
 }
 
 fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
+    let first_tool = candidates
+        .first()
+        .and_then(|candidate| {
+            ActivityTool::ALL
+                .iter()
+                .position(|tool| *tool == candidate.tool)
+        })
+        .unwrap_or(0);
     let newest_first = |left: &CandidateFile, right: &CandidateFile| {
         right
             .modified_millis
@@ -356,8 +443,8 @@ fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
     });
     let mut ordered = Vec::with_capacity(candidates.len());
     while queues.iter().any(|queue| !queue.is_empty()) {
-        for queue in &mut queues {
-            if let Some(candidate) = queue.pop_front() {
+        for offset in 0..queues.len() {
+            if let Some(candidate) = queues[(first_tool + offset) % 3].pop_front() {
                 ordered.push(candidate);
             }
         }
@@ -387,6 +474,7 @@ fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
     config::replace_file(path, &contents).context("replace activity index")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_candidates(
     roots: &ActivityRoots,
     enabled_tools: [bool; 3],
@@ -394,6 +482,8 @@ fn collect_candidates(
     timezone: FixedOffset,
     deadline: Instant,
     options: ScanOptions,
+    checkpoint: &mut EnumerationCheckpoint,
+    readers: &mut [Vec<OpenDirectory>; 3],
 ) -> (Vec<CandidateFile>, bool) {
     let mut candidates = Vec::new();
     let mut partial = false;
@@ -404,73 +494,163 @@ fn collect_candidates(
         roots.codex.as_deref(),
         roots.grok.as_deref(),
     ];
-    for ((enabled, root), tool) in enabled_tools.into_iter().zip(roots).zip(ActivityTool::ALL) {
-        let Some(root) = root.filter(|_| enabled) else {
+    let mut active = [false; 3];
+    for i in 0..3 {
+        let walk = &mut checkpoint.walks[i];
+        let root = roots[i].filter(|_| enabled_tools[i]);
+        if walk.root.as_deref() != root
+            || walk.stack.len() > MAX_ENUMERATION_DEPTH
+            || walk.stack.iter().any(|position| {
+                position
+                    .relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            })
+        {
+            *walk = DirectoryWalk {
+                root: root.map(Path::to_path_buf),
+                stack: Vec::new(),
+                complete: false,
+            };
+            readers[i].clear();
+        }
+        let Some(root) = root else {
+            readers[i].clear();
             continue;
         };
-        if !root.is_dir() {
+        if walk.complete {
             continue;
         }
-        let mut pending = VecDeque::from([root.to_path_buf()]);
-        while let Some(directory) = pending.pop_front() {
-            if Instant::now() >= deadline
-                || entries_seen >= options.max_entries
-                || candidates.len() >= options.max_files
-            {
-                partial = true;
-                break;
+        if walk.stack.is_empty() {
+            if !root.is_dir() {
+                readers[i].clear();
+                walk.complete = true;
+                continue;
             }
-            let Ok(entries) = fs::read_dir(&directory) else {
+            walk.stack.push(DirectoryPosition {
+                relative: PathBuf::new(),
+                offset: 0,
+            });
+            readers[i].clear();
+        }
+        active[i] = true;
+    }
+
+    while active.iter().any(|active| *active) {
+        if Instant::now() >= deadline
+            || entries_seen >= options.max_entries
+            || candidates.len() >= options.max_files
+        {
+            partial = true;
+            break;
+        }
+        let i = (0..3)
+            .map(|offset| (checkpoint.next_tool % 3 + offset) % 3)
+            .find(|i| active[*i])
+            .unwrap();
+        checkpoint.next_tool = (i + 1) % 3;
+        // Replay after reopening is also charged to the entry budget. The live
+        // readers retain replay progress and parent positions across passes.
+        // Both the DFS stack and its directory handles have a fixed depth bound.
+        entries_seen += 1;
+        let walk = &mut checkpoint.walks[i];
+        let depth = walk.stack.len() - 1;
+        let position = walk.stack.last_mut().unwrap();
+        let directory = roots[i].unwrap().join(&position.relative);
+        if readers[i]
+            .last()
+            .is_none_or(|reader| reader.path != directory || reader.offset > position.offset)
+        {
+            // Ancestors reopened from a saved checkpoint are filled lazily.
+            readers[i]
+                .retain(|reader| directory.starts_with(&reader.path) && reader.path != directory);
+            let metadata = if position.relative.as_os_str().is_empty() {
+                fs::metadata(&directory)
+            } else {
+                fs::symlink_metadata(&directory)
+            };
+            let entries = metadata
+                .ok()
+                .filter(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                .and_then(|_| fs::read_dir(&directory).ok());
+            let Some(entries) = entries else {
                 partial = true;
+                walk.stack.pop();
+                active[i] = !walk.stack.is_empty();
+                walk.complete = !active[i];
                 continue;
             };
-            for entry in entries.flatten() {
-                entries_seen += 1;
-                if entries_seen > options.max_entries || Instant::now() >= deadline {
-                    partial = true;
-                    break;
-                }
-                let Ok(file_type) = entry.file_type() else {
-                    partial = true;
-                    continue;
-                };
-                if file_type.is_dir() {
-                    pending.push_back(entry.path());
-                    continue;
-                }
-                let path = entry.path();
-                if !file_type.is_file()
-                    || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-                    || (tool == ActivityTool::Grok
-                        && path.file_name().and_then(|value| value.to_str())
-                            != Some("updates.jsonl"))
-                {
-                    continue;
-                }
-                let Ok(metadata) = entry.metadata() else {
-                    partial = true;
-                    continue;
-                };
-                let modified_millis = modified_millis(&metadata);
-                let modified_date =
-                    DateTime::<Utc>::from(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
-                        .with_timezone(&timezone)
-                        .format("%Y-%m-%d")
-                        .to_string();
-                if modified_date.as_str() < cutoff {
-                    continue;
-                }
-                candidates.push(CandidateFile {
-                    key: path.to_string_lossy().into_owned(),
-                    path,
-                    tool,
-                    modified_millis,
+            readers[i].push(OpenDirectory {
+                path: directory,
+                entries,
+                offset: 0,
+            });
+        }
+        debug_assert!(readers[i].len() <= depth + 1);
+        let reader = readers[i].last_mut().unwrap();
+        let Some(entry) = reader.entries.next() else {
+            readers[i].pop();
+            walk.stack.pop();
+            active[i] = !walk.stack.is_empty();
+            walk.complete = !active[i];
+            continue;
+        };
+        reader.offset = reader.offset.saturating_add(1);
+        if reader.offset <= position.offset {
+            continue;
+        }
+        position.offset = reader.offset;
+        let Ok(entry) = entry else {
+            partial = true;
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            partial = true;
+            continue;
+        };
+        if file_type.is_dir() {
+            let relative = position.relative.join(entry.file_name());
+            if walk.stack.len() < MAX_ENUMERATION_DEPTH {
+                walk.stack.push(DirectoryPosition {
+                    relative,
+                    offset: 0,
                 });
-                if candidates.len() >= options.max_files {
-                    partial = true;
-                    break;
-                }
+            } else {
+                partial = true;
             }
+            continue;
+        }
+        let path = entry.path();
+        let tool = ActivityTool::ALL[i];
+        if !file_type.is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            || (tool == ActivityTool::Grok
+                && path.file_name().and_then(|value| value.to_str()) != Some("updates.jsonl"))
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            partial = true;
+            continue;
+        };
+        let modified_millis = modified_millis(&metadata);
+        let modified_date =
+            DateTime::<Utc>::from(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
+                .with_timezone(&timezone)
+                .format("%Y-%m-%d")
+                .to_string();
+        if modified_date.as_str() >= cutoff {
+            candidates.push(CandidateFile {
+                key: path.to_string_lossy().into_owned(),
+                path,
+                tool,
+                modified_millis,
+            });
+        }
+    }
+    if !active.iter().any(|active| *active) {
+        for walk in &mut checkpoint.walks {
+            walk.complete = false;
         }
     }
     (candidates, partial)
@@ -1819,8 +1999,8 @@ mod tests {
     #[test]
     fn candidate_order_round_robins_three_tools_and_keeps_each_newest_first() {
         let ordered = fair_candidate_order(vec![
-            candidate(ActivityTool::Codex, "codex-old", 10),
             candidate(ActivityTool::Claude, "claude-old", 20),
+            candidate(ActivityTool::Codex, "codex-old", 10),
             candidate(ActivityTool::Codex, "codex-new", 40),
             candidate(ActivityTool::Claude, "claude-new", 30),
             candidate(ActivityTool::Grok, "grok-old", 5),
@@ -1842,6 +2022,360 @@ mod tests {
                 "grok-old"
             ]
         );
+    }
+
+    #[test]
+    fn candidate_order_preserves_the_enumeration_starting_tool() {
+        let ordered = fair_candidate_order(vec![
+            candidate(ActivityTool::Grok, "grok", 10),
+            candidate(ActivityTool::Claude, "claude", 20),
+        ]);
+        assert_eq!(ordered[0].tool, ActivityTool::Grok);
+    }
+
+    #[test]
+    fn existing_v3_index_keeps_history_without_an_enumeration_checkpoint() {
+        let mut index = ActivityIndex::new(540);
+        let mut file = FileCheckpoint::new(ActivityTool::Claude);
+        file.days.insert("2026-07-19".into(), 30);
+        index.files.insert("session.jsonl".into(), file);
+        let mut value = serde_json::to_value(&index).unwrap();
+        value.as_object_mut().unwrap().remove("enumeration");
+        let restored: ActivityIndex = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, index);
+    }
+
+    fn write_enumeration_logs(root: &Path, claude_files: usize) {
+        fs::create_dir_all(root.join("claude")).unwrap();
+        fs::create_dir_all(root.join("grok")).unwrap();
+        for i in 0..claude_files {
+            let line = serde_json::json!({
+                "timestamp": "2026-07-19T01:00:00Z",
+                "message": {
+                    "id": format!("message-{i}"),
+                    "usage": { "input_tokens": 10, "output_tokens": 20 }
+                }
+            });
+            fs::write(
+                root.join("claude").join(format!("{i}.jsonl")),
+                format!("{line}\n"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.join("grok").join("updates.jsonl"),
+            grok_event(
+                serde_json::json!("2026-07-19T01:00:00Z"),
+                "_x.ai/session/update",
+                serde_json::json!({ "input_tokens": 7, "output_tokens": 3 }),
+            ) + "\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn one_file_budget_collects_both_providers_and_finishes_the_sweep() {
+        let root = temp_root("enumeration-provider-fairness");
+        write_enumeration_logs(&root, 1);
+        let mut scan_options = options();
+        scan_options.max_files = 1;
+        let index = root.join("index.json");
+        let mut complete = false;
+        for pass in 0..6 {
+            let snapshot = refresh_at(
+                &index,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                scan_options,
+            )
+            .unwrap();
+            if pass == 1 {
+                assert_eq!(snapshot.days[0].claude_tokens, 30);
+                assert_eq!(snapshot.days[0].grok_tokens, 10);
+            }
+            if !snapshot.backfill_pending {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_file_budget_resumes_all_files_of_the_same_tool_without_double_counting() {
+        let root = temp_root("enumeration-file-fairness");
+        write_enumeration_logs(&root, 4);
+        let mut scan_options = options();
+        scan_options.max_files = 1;
+        let index = root.join("index.json");
+        let mut completed_sweeps = 0;
+        for _ in 0..20 {
+            let snapshot = refresh_at(
+                &index,
+                &roots(&root),
+                true,
+                false,
+                false,
+                now(),
+                kst(),
+                scan_options,
+            )
+            .unwrap();
+            if !snapshot.backfill_pending {
+                assert_eq!(snapshot.days[0].claude_tokens, 120);
+                assert_eq!(snapshot.days[0].grok_tokens, 0);
+                completed_sweeps += 1;
+                if completed_sweeps == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(completed_sweeps, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enumeration_resumes_entry_budget_through_nested_directories_and_reopen() {
+        let root = temp_root("enumeration-entry-resume");
+        write_enumeration_logs(&root, 4);
+        let nested = root.join("claude").join("nested").join("deeper");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("last.jsonl"), "{}\n").unwrap();
+        fs::write(root.join("claude").join("ignored.txt"), "ignored").unwrap();
+        let mut checkpoint = EnumerationCheckpoint::default();
+        let mut readers = std::array::from_fn(|_| Vec::new());
+        let mut scan_options = options();
+        scan_options.max_entries = 1;
+        let mut seen = BTreeSet::new();
+        let mut grok_seen = false;
+        let mut complete = false;
+        for pass in 0..100 {
+            let (candidates, partial) = collect_candidates(
+                &roots(&root),
+                [true, false, true],
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                scan_options,
+                &mut checkpoint,
+                &mut readers,
+            );
+            assert!(candidates.len() <= 1);
+            for candidate in candidates {
+                grok_seen |= candidate.tool == ActivityTool::Grok;
+                assert!(seen.insert(candidate.key));
+            }
+            if pass == 1 {
+                assert!(grok_seen, "Claude must not monopolize the entry budget");
+            }
+            if pass == 3 {
+                readers = std::array::from_fn(|_| Vec::new());
+            }
+            // Simulate disk checkpoints without discarding live reader progress.
+            checkpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            if !partial {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        assert_eq!(seen.len(), 6);
+        assert!(readers.iter().all(Vec::is_empty));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enumeration_deadline_keeps_the_resume_position() {
+        let root = temp_root("enumeration-deadline");
+        write_enumeration_logs(&root, 2);
+        let mut checkpoint = EnumerationCheckpoint::default();
+        let mut readers = std::array::from_fn(|_| Vec::new());
+        let mut scan_options = options();
+        scan_options.max_entries = 1;
+        collect_candidates(
+            &roots(&root),
+            [true, false, true],
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            scan_options,
+            &mut checkpoint,
+            &mut readers,
+        );
+        let before = checkpoint.clone();
+        let (candidates, partial) = collect_candidates(
+            &roots(&root),
+            [true, false, true],
+            "2026-01-01",
+            kst(),
+            Instant::now(),
+            scan_options,
+            &mut checkpoint,
+            &mut readers,
+        );
+        assert!(partial);
+        assert!(candidates.is_empty());
+        assert_eq!(checkpoint, before);
+        let (candidates, _) = collect_candidates(
+            &roots(&root),
+            [true, false, true],
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            scan_options,
+            &mut checkpoint,
+            &mut readers,
+        );
+        assert_eq!(candidates[0].tool, ActivityTool::Grok);
+        drop(readers);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deferred_candidates_are_scanned_before_enumerating_and_disabled_ones_are_dropped() {
+        let root = temp_root("enumeration-deferred");
+        write_enumeration_logs(&root, 1);
+        let index = root.join("index.json");
+        let mut scan_options = options();
+        scan_options.max_bytes = 0;
+        let snapshot = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            kst(),
+            scan_options,
+        )
+        .unwrap();
+        assert!(snapshot.backfill_pending);
+        assert!(snapshot.days.is_empty());
+        let (saved, _) = load_index(&index, 540);
+        assert_eq!(saved.enumeration.pending.len(), 2);
+
+        scan_options = options();
+        scan_options.max_duration = Duration::ZERO;
+        refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            kst(),
+            scan_options,
+        )
+        .unwrap();
+        let (paused, _) = load_index(&index, 540);
+        assert_eq!(paused.enumeration.pending, saved.enumeration.pending);
+
+        scan_options = options();
+        scan_options.max_entries = 0;
+        let snapshot = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            scan_options,
+        )
+        .unwrap();
+        assert_eq!(snapshot.days[0].claude_tokens, 0);
+        assert_eq!(snapshot.days[0].grok_tokens, 10);
+        let (saved, _) = load_index(&index, 540);
+        assert!(saved.enumeration.pending.is_empty());
+        assert!(saved
+            .files
+            .values()
+            .all(|file| file.tool == ActivityTool::Grok));
+        fs::write(root.join("grok").join("updates.jsonl"), "not-json\n").unwrap();
+        let not_enumerated = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            true,
+            now(),
+            kst(),
+            scan_options,
+        )
+        .unwrap();
+        assert_eq!(not_enumerated.days, snapshot.days);
+        assert!(not_enumerated.backfill_pending);
+        assert_eq!(load_index(&index, 540).0.files, saved.files);
+        let disabled = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(disabled.days, snapshot.days);
+        assert!(!disabled.partial);
+        assert_eq!(load_index(&index, 540).0.files, saved.files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unseen_message_contributions_are_preserved_until_retention_expires() {
+        let root = temp_root("enumeration-history-retention");
+        write_enumeration_logs(&root, 1);
+        let index = root.join("index.json");
+        let initial = refresh_at(
+            &index,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(initial.days.len(), 1);
+        assert_eq!(initial.days[0].claude_tokens, 30);
+        assert_eq!(initial.days[0].grok_tokens, 10);
+
+        let retained = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            false,
+            now() + ChronoDuration::days(RETENTION_DAYS - 1),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(retained.days, initial.days);
+        assert_eq!(load_index(&index, 540).0.files.len(), 2);
+
+        let expired = refresh_at(
+            &index,
+            &roots(&root),
+            false,
+            false,
+            false,
+            now() + ChronoDuration::days(RETENTION_DAYS),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert!(expired.days.is_empty());
+        assert!(load_index(&index, 540).0.files.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

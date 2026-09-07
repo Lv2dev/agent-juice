@@ -36,6 +36,7 @@ let isHydrating = false;
 let hasLoadedSettings = false;
 let localRevision = 0;
 let savedRevision = 0;
+let editSession = { baseline: null, topology: [] };
 let saveQueue = Promise.resolve();
 let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
@@ -490,6 +491,10 @@ function fillForm(settings) {
   applyTranslations({ language: state.language });
   updateOutputs();
   renderUpdateStatus(currentUpdateStatus);
+  editSession = {
+    baseline: payloadFromEntries(new FormData(form)),
+    topology: [...(settings?.taskbar_layout_profiles?.at(-1)?.monitor_keys ?? [])],
+  };
   isHydrating = false;
 }
 
@@ -696,8 +701,9 @@ async function checkForUpdates() {
   }
 }
 
-async function saveSettings(input, revision) {
-  const response = await invoke("save_settings", { input });
+async function saveSettings(input, revision, edit) {
+  const response = await invoke("save_settings", { input, editBaseline: edit.baseline, editTopology: edit.topology });
+  edit.baseline = input;
   if (revision !== localRevision) return;
 
   const saved = response?.settings ?? response;
@@ -734,9 +740,10 @@ function enqueueLatestSettingsSave({ failOnRollback = false } = {}) {
 
   const revision = localRevision;
   const input = payloadFromEntries(new FormData(form));
+  const edit = editSession;
   saveQueue = saveQueue
     .catch(() => {})
-    .then(() => saveSettings(input, revision))
+    .then(() => saveSettings(input, revision, edit))
     .catch(async (error) => {
       await rollbackFailedSave(revision, error);
       if (failOnRollback) throw error;

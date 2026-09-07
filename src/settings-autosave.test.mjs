@@ -29,6 +29,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   const windowListeners = {};
   const dispatched = [];
   const savedInputs = [];
+  const saveRequests = [];
   const pendingSaveResponses = [];
   let pendingClearResponse = null;
   let deferSaveResponses = false;
@@ -287,6 +288,7 @@ test("settings form auto-saves changed values without a submit button", async ()
             return cleared;
           }
           if (command === "save_settings") {
+            saveRequests.push(args);
             savedInputs.push(args.input);
             if (failNextSave) {
               failNextSave = false;
@@ -664,11 +666,32 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.bar_mode.value, "quad", "an old response must not overwrite a newer edit");
   assert.equal(savedInputs.length, savesBeforeDeferredQueue + 2);
+  assert.equal(saveRequests.at(-1).editBaseline.bar_mode, "compact",
+    "queued edits must diff against the preceding successful save, including reverting a field");
   pendingSaveResponses.shift().resolve(savedInputs[savesBeforeDeferredQueue + 1]);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.bar_mode.value, "quad");
 
   deferSaveResponses = false;
+  eventHandlers["settings-updated"]?.({ payload: {
+    ...persistedSettings, theme: "system", bar_mode: "full", indicator_style: "ring", bar_content_gap_px: 14,
+    taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"] }],
+  } });
+  fields.theme.value = "dark";
+  listeners.change?.({ target: fields.theme });
+  eventHandlers["settings-updated"]?.({ payload: {
+    ...persistedSettings, bar_mode: "compact", indicator_style: "bar", bar_content_gap_px: 3.1,
+    taskbar_layout_profiles: [{ monitor_keys: ["monitor-b"] }],
+  } });
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const topologyEdit = saveRequests.at(-1);
+  assert.equal(topologyEdit.input.theme, "dark");
+  assert.equal(topologyEdit.editBaseline.theme, "system");
+  assert.equal(topologyEdit.input.bar_mode, topologyEdit.editBaseline.bar_mode,
+    "unchanged fields must remain distinguishable from actual user edits");
+  assert.equal(topologyEdit.editBaseline.bar_content_gap_px, 14);
+  assert.deepEqual(topologyEdit.editTopology, ["monitor-a"],
+    "a dirty form must keep the topology where the edit started");
   persistedSettings = { ...savedInputs.at(-1), show_claude: true, show_codex: true };
   failNextSave = true;
   fields.show_claude.checked = false;
