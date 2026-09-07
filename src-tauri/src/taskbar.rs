@@ -1802,7 +1802,7 @@ pub fn drag_rect_for_logical_length_at_dpi(
 ) -> Option<(DockRect, f32)> {
     let dpi = if dpi == 0 { 96 } else { dpi };
     let physical_length =
-        ((logical_length.max(1) as i64 * dpi as i64 + 48) / 96).clamp(1, i32::MAX as i64) as i32;
+        ((logical_length.max(1) as i64 * dpi as i64 + 95) / 96).clamp(1, i32::MAX as i64) as i32;
     let axis_ratio = grab_axis_ratio.clamp(0.0, 1.0);
     let cross_ratio = grab_cross_ratio.clamp(0.0, 1.0);
     let grab_offset = if is_horizontal_taskbar(taskbar.width, taskbar.height) {

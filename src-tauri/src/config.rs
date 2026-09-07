@@ -38,6 +38,7 @@ const V0_1_19_CURSOR_PRIMARY: [u8; 3] = [0x72, 0x71, 0x6d];
 const V0_1_19_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
 const DEFAULT_CURSOR_PRIMARY: [u8; 3] = [0x85, 0x84, 0x7f];
 const DEFAULT_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
+const TOOL_COLORS_VERSION: u8 = 1;
 
 const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     claude_primary: [0xb7, 0x83, 0x3a],
@@ -212,6 +213,8 @@ pub struct TaskbarLayoutProfile {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub tool_colors_version: u8,
     #[serde(default = "default_palette")]
     pub palette: Palette,
     #[serde(default)]
@@ -917,6 +920,7 @@ pub fn canonical_taskbar_monitor_keys(mut monitor_keys: Vec<String>) -> Vec<Stri
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            tool_colors_version: TOOL_COLORS_VERSION,
             palette: default_palette(),
             tool_colors: ToolColors::default(),
             taskbar_text_colors: TaskbarTextColors::default(),
@@ -1220,17 +1224,29 @@ impl Settings {
         self.save_to(&path)
     }
 
-    pub(crate) fn update(mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+    pub(crate) fn try_update(
+        mutator: impl FnOnce(&mut Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("no settings path"))?;
-        Self::update_at(&path, mutator)
+        Self::try_update_at(&path, mutator)
     }
 
     pub fn update_at(path: &Path, mutator: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+        Self::try_update_at(path, |settings| {
+            mutator(settings);
+            Ok(())
+        })
+    }
+
+    pub fn try_update_at(
+        path: &Path,
+        mutator: impl FnOnce(&mut Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let _guard = SETTINGS_UPDATE_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let mut settings = Self::load_for_update(path)?;
-        mutator(&mut settings);
+        mutator(&mut settings)?;
         settings.save_to(path)?;
         Ok(settings)
     }
@@ -1335,6 +1351,7 @@ impl Settings {
         let warn = clamp_percent(input.warn_threshold);
         let danger = clamp_percent(input.danger_threshold).max(warn);
         Self {
+            tool_colors_version: TOOL_COLORS_VERSION,
             palette: palette_from_input(&input),
             tool_colors: tool_colors_from_input(&input),
             taskbar_text_colors: taskbar_text_colors_from_input(&input),
@@ -1499,6 +1516,10 @@ impl Settings {
     }
 
     fn apply_legacy_tool_colors(&mut self, value: Option<&serde_json::Value>) {
+        if self.tool_colors_version >= TOOL_COLORS_VERSION {
+            return;
+        }
+        self.tool_colors_version = TOOL_COLORS_VERSION;
         fn migrate_cursor_tool_defaults(colors: &mut ToolColors) {
             let previous_default = (colors.cursor_primary == V0_1_14_CURSOR_PRIMARY
                 && colors.cursor_secondary == V0_1_14_CURSOR_SECONDARY)

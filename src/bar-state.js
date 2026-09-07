@@ -7,6 +7,7 @@ import {
   toolBrandColor,
 } from "./panel-state.js";
 import { formatDuration, resolveLanguage, t } from "./i18n.js";
+import { normalizeTextScale } from "./text-scale.js";
 
 const TOOL_LABELS = {
   claude: "Claude",
@@ -399,10 +400,15 @@ export function barViewModel(
   options = {},
 ) {
   const merged = { ...DEFAULT_SETTINGS, ...settings };
-  const ringSizePx = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
-  const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10);
-  const ringGapPx = numberRangeSetting(merged.ring_gap_px, 6, 2, 14);
-  const ringCenterSizePx = numberRangeSetting(merged.ring_center_size_px, 16, 4, 32);
+  const textScale = normalizeTextScale(options.textScale);
+  const baseRingSize = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
+  const crossAxis = Number(options.crossAxisSize);
+  const available = Number.isFinite(crossAxis) && crossAxis >= 20 ? crossAxis : 48;
+  const indicatorScale = textScale > 1 ? Math.min(textScale, available / baseRingSize) : 1;
+  const ringSizePx = baseRingSize * indicatorScale;
+  const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10) * indicatorScale;
+  const ringGapPx = numberRangeSetting(merged.ring_gap_px, 6, 2, 14) * indicatorScale;
+  const ringCenterSizePx = numberRangeSetting(merged.ring_center_size_px, 16, 4, 32) * indicatorScale;
   const svgGeometry = ringSvgGeometry(
     ringSizePx,
     ringThicknessPx,
@@ -444,10 +450,12 @@ export function barViewModel(
     ringSizePx,
     ringThicknessPx,
     ringGapPx,
+    ringCenterSizePx,
+    textScale,
     ...svgGeometry,
-    ringNumberFontSizePx: numberRangeSetting(merged.ring_number_font_size_px, 9, 6, 16),
+    ringNumberFontSizePx: numberRangeSetting(merged.ring_number_font_size_px, 9, 6, 16) * textScale,
     ringNumberFontWeight: intRangeSetting(merged.ring_number_font_weight, 600, 100, 900),
-    barTextFontSizePx: numberRangeSetting(merged.bar_text_font_size_px, 11, 8, 16),
+    barTextFontSizePx: Math.min(numberRangeSetting(merged.bar_text_font_size_px, 11, 8, 16) * textScale, available / 1.4),
     barTextFontWeight: intRangeSetting(merged.bar_text_font_weight, 500, 100, 900),
     barContentGapPx: numberRangeSetting(merged.bar_content_gap_px, 14, 0, 24),
     tools: TOOLS.filter((tool) => toolEnabled(merged, tool)).map((tool) =>

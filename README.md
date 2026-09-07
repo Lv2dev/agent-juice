@@ -237,6 +237,7 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 - **테마:** 기본값은 시스템 테마이며 라이트와 다크를 직접 선택할 수 있습니다.
 - **언어:** 시스템 언어를 따르거나 한국어/영어를 고정할 수 있습니다.
 - **폰트:** Windows 작업표시줄과 맞춘 시스템 폰트가 기본이며 Pretendard를 선택할 수 있습니다.
+- **Windows 텍스트 크기:** 접근성의 텍스트 크기 100~225%를 자동 반영합니다. 설정창은 큰 글자에 맞춰 줄바꿈하고 바는 실제 내용에 맞춰 폭을 조정합니다. 작업표시줄 높이와 링 중앙 공간이 제한되는 경우 숫자는 그 안에 맞추며, Juice에 저장한 글자 크기 설정은 그대로 유지됩니다.
 - **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 네 도구·기간별 여덟 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
 - **전체화면 숨김:** 신규 설치 기본값은 꺼짐입니다. 켜면 같은 모니터의 전체화면 앱을 감지할 때 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
 - **다중 모니터:** 각 바를 원하는 모니터 작업표시줄로 직접 끌어 놓으면 모니터와 상대 위치를 기억합니다.
@@ -499,6 +500,7 @@ Cursor defaults to **off** so existing users do not suddenly receive an empty fo
 - **Theme:** Follows the system by default, with explicit light and dark choices.
 - **Language:** Follows the system or locks the UI to Korean or English.
 - **Font:** Uses the Windows taskbar-style system font by default, with Pretendard available.
+- **Windows text size:** Automatically follows the Accessibility text size setting from 100% to 225%. Settings reflow for larger text, and bars resize to their measured content. Numbers fit within the available taskbar height and ring center; your saved Juice font-size settings are preserved.
 - **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes eight tool/period base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
 - **Fullscreen hiding:** Off by default on a new installation. When enabled, it hides each bar while a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
 - **Multiple monitors:** Drag each bar onto a monitor's taskbar to remember that monitor and relative position.

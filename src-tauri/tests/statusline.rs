@@ -241,6 +241,22 @@ fn restore_owned_statusline_cli_uses_exit_status_without_stdout() {
     assert_eq!(restored["statusLine"]["command"], "old");
     assert_eq!(restored["statusLine"]["extra"], true);
 
+    let repeated = Command::new(env!("CARGO_BIN_EXE_agentjuice-statusline"))
+        .arg("--restore-owned-statusline")
+        .env("AGENT_JUICE_CLAUDE_HOME", &home)
+        .env("AGENT_JUICE_DATA_DIR", &data_dir)
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "uninstall after Claude OFF must succeed"
+    );
+    assert!(repeated.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path).unwrap()).unwrap(),
+        restored
+    );
+
     Settings::install_statusline_wrap_at(&home, &data_dir, r"C:\Juice\agentjuice-statusline.exe")
         .unwrap();
     let mut changed: Value =

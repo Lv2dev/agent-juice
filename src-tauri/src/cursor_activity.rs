@@ -93,6 +93,8 @@ impl From<cursor_dashboard::DashboardError> for ActivityError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CursorMonthCache {
     refreshed_at: String,
+    #[serde(default)]
+    complete: bool,
     days: BTreeMap<String, u64>,
 }
 
@@ -356,9 +358,11 @@ fn save_cache(path: &Path, cache: &CursorActivityCache) -> Result<(), ActivityEr
         .map_err(|_| ActivityError::unavailable("Cursor activity cache write failed"))
 }
 
-fn view_from_cache(
+fn view_from_cache<Tz: TimeZone>(
     cache: &CursorActivityCache,
     required: &[Month],
+    now: DateTime<Utc>,
+    timezone: &Tz,
     partial: bool,
 ) -> CursorActivityView {
     let mut days = BTreeMap::new();
@@ -371,10 +375,17 @@ fn view_from_cache(
     }
     let backfill_pending = required
         .iter()
-        .any(|month| !cache.months.contains_key(&month.key()));
+        .any(|month| !cache.months.contains_key(&month.key()))
+        || historical_target_month(cache, required, now, timezone).is_some();
+    let incomplete_history = required.iter().skip(1).any(|month| {
+        cache
+            .months
+            .get(&month.key())
+            .is_none_or(|cached| !cached.complete)
+    });
     CursorActivityView {
         days,
-        partial: partial || backfill_pending,
+        partial: partial || backfill_pending || incomplete_history,
         backfill_pending,
         scope: cache.account_scope,
     }
@@ -395,11 +406,49 @@ pub fn cached_view(
     let path = cache_path()
         .ok_or_else(|| ActivityError::unavailable("Cursor activity data path unavailable"))?;
     let cache = load_cache(&path, credentials.scope, &timezone);
-    Ok(view_from_cache(
+    let view = view_from_cache(
         &cache,
         &required_months(weeks, now, &Local),
+        now,
+        &Local,
         false,
-    ))
+    );
+    validate_cache_access(&cache, deadline, &|| true)?;
+    Ok(view)
+}
+
+fn check_cache_access(
+    cache: &CursorActivityCache,
+    current_scope: AccountScope,
+    current_timezone: &TimezoneIdentity,
+    scope_validated: bool,
+    commit_allowed: bool,
+) -> Result<(), ActivityError> {
+    if current_scope != cache.account_scope
+        || *current_timezone != cache.timezone_identity
+        || !scope_validated
+        || !commit_allowed
+    {
+        return Err(ActivityError::changed(
+            "Cursor activity scope or settings changed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cache_access(
+    cache: &CursorActivityCache,
+    deadline: Instant,
+    commit_allowed: &impl Fn() -> bool,
+) -> Result<(), ActivityError> {
+    let current = cursor_dashboard::read_credentials(deadline)?;
+    check_cache_access(
+        cache,
+        current.scope,
+        &timezone_identity()?,
+        cursor_dashboard::scope_is_validated(cache.account_scope),
+        commit_allowed(),
+    )
 }
 
 fn refreshed_recently(value: &str, now: DateTime<Utc>, duration: Duration) -> bool {
@@ -414,11 +463,12 @@ fn refreshed_recently(value: &str, now: DateTime<Utc>, duration: Duration) -> bo
         .unwrap_or(false)
 }
 
-fn target_month(
+fn target_month<Tz: TimeZone>(
     cache: &CursorActivityCache,
     required: &[Month],
     now: DateTime<Utc>,
     force_current: bool,
+    timezone: &Tz,
 ) -> Option<Month> {
     let current = *required.first()?;
     let current_cached = cache.months.get(&current.key());
@@ -429,7 +479,17 @@ fn target_month(
     {
         return Some(current);
     }
-    let local = now.with_timezone(&Local);
+    historical_target_month(cache, required, now, timezone)
+}
+
+fn historical_target_month<Tz: TimeZone>(
+    cache: &CursorActivityCache,
+    required: &[Month],
+    now: DateTime<Utc>,
+    timezone: &Tz,
+) -> Option<Month> {
+    let current = *required.first()?;
+    let local = now.with_timezone(timezone);
     if local.day() <= 7 {
         let previous = current.previous();
         if required.contains(&previous)
@@ -440,10 +500,19 @@ fn target_month(
             return Some(previous);
         }
     }
-    required
-        .iter()
-        .copied()
-        .find(|month| !cache.months.contains_key(&month.key()))
+    required.iter().skip(1).copied().find(|month| {
+        cache.months.get(&month.key()).is_none_or(|cached| {
+            !cached.complete
+                && month_bounds(*month, timezone)
+                    .is_ok_and(|(_, end_ms)| end_ms <= ingestion_cutoff(now))
+        })
+    })
+}
+
+fn ingestion_cutoff(now: DateTime<Utc>) -> i64 {
+    (now - ChronoDuration::from_std(CURRENT_INGESTION_LAG)
+        .unwrap_or_else(|_| ChronoDuration::zero()))
+    .timestamp_millis()
 }
 
 fn page_signature(events: &[UsageEvent]) -> u64 {
@@ -465,14 +534,19 @@ fn fetch_month_with_page_size<S: UsageSource, Tz: TimeZone>(
     page_size: u32,
     deadline: Instant,
 ) -> Result<CursorMonthCache, ActivityError> {
-    let (start_ms, mut end_ms) = month_bounds(month, timezone)?;
-    let now_ms = (Utc::now()
-        - ChronoDuration::from_std(CURRENT_INGESTION_LAG)
-            .unwrap_or_else(|_| ChronoDuration::zero()))
-    .timestamp_millis();
-    if end_ms > now_ms {
-        end_ms = now_ms;
-    }
+    fetch_month_with_page_size_at(source, month, timezone, page_size, deadline, Utc::now())
+}
+
+fn fetch_month_with_page_size_at<S: UsageSource, Tz: TimeZone>(
+    source: &S,
+    month: Month,
+    timezone: &Tz,
+    page_size: u32,
+    deadline: Instant,
+    now: DateTime<Utc>,
+) -> Result<CursorMonthCache, ActivityError> {
+    let (start_ms, month_end_ms) = month_bounds(month, timezone)?;
+    let end_ms = month_end_ms.min(ingestion_cutoff(now));
     if end_ms <= start_ms {
         return Err(ActivityError::parse(
             "Cursor activity month interval rejected",
@@ -550,6 +624,8 @@ fn fetch_month_with_page_size<S: UsageSource, Tz: TimeZone>(
     }
     Ok(CursorMonthCache {
         refreshed_at: Utc::now().to_rfc3339(),
+        // Use the queried interval, not the time when pagination finished.
+        complete: end_ms == month_end_ms,
         days,
     })
 }
@@ -592,22 +668,16 @@ fn refresh_step_at_path(
     let timezone = timezone_identity()?;
     let mut cache = load_cache(path, credentials.scope, &timezone);
     let required = required_months(weeks, now, &Local);
-    let Some(target) = target_month(&cache, &required, now, force_current) else {
-        return Ok(RefreshStep {
-            kind: RefreshStepKind::Complete,
-            view: view_from_cache(&cache, &required, false),
+    let Some(target) = target_month(&cache, &required, now, force_current, &Local) else {
+        return checked_refresh_step(&cache, &required, now, &Local, || {
+            validate_cache_access(&cache, deadline, &commit_allowed)
         });
     };
     let source = DashboardSource {
         credentials: &credentials,
     };
     let month = fetch_month(&source, target, &Local, deadline)?;
-    let current = cursor_dashboard::read_credentials(deadline)?;
-    if current.scope != credentials.scope || timezone_identity()? != timezone || !commit_allowed() {
-        return Err(ActivityError::changed(
-            "Cursor activity scope changed before commit",
-        ));
-    }
+    validate_cache_access(&cache, deadline, &commit_allowed)?;
     cache.months.insert(target.key(), month);
     while cache.months.len() > MAX_CACHE_MONTHS {
         let Some(oldest) = cache.months.keys().next().cloned() else {
@@ -616,12 +686,20 @@ fn refresh_step_at_path(
         cache.months.remove(&oldest);
     }
     save_cache(path, &cache)?;
-    if !commit_allowed() {
-        return Err(ActivityError::changed(
-            "Cursor activity settings changed after commit",
-        ));
-    }
-    let view = view_from_cache(&cache, &required, false);
+    checked_refresh_step(&cache, &required, Utc::now(), &Local, || {
+        validate_cache_access(&cache, deadline, &commit_allowed)
+    })
+}
+
+fn checked_refresh_step<Tz: TimeZone>(
+    cache: &CursorActivityCache,
+    required: &[Month],
+    now: DateTime<Utc>,
+    timezone: &Tz,
+    validate: impl FnOnce() -> Result<(), ActivityError>,
+) -> Result<RefreshStep, ActivityError> {
+    let view = view_from_cache(cache, required, now, timezone, false);
+    validate()?;
     Ok(RefreshStep {
         kind: if view.backfill_pending {
             RefreshStepKind::Updated
@@ -691,6 +769,289 @@ mod tests {
         }
     }
 
+    fn timestamp(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn sample_cache(now: DateTime<Utc>) -> (CursorActivityCache, Vec<Month>) {
+        let required = vec![
+            Month {
+                year: 2026,
+                month: 9,
+            },
+            Month {
+                year: 2026,
+                month: 8,
+            },
+            Month {
+                year: 2026,
+                month: 7,
+            },
+        ];
+        let mut cache = CursorActivityCache::new(
+            AccountScope {
+                user_id: 1,
+                team_id: None,
+            },
+            TimezoneIdentity {
+                key: "UTC".into(),
+                dynamic_daylight_disabled: false,
+            },
+        );
+        for (index, month) in required.iter().enumerate() {
+            cache.months.insert(
+                month.key(),
+                CursorMonthCache {
+                    refreshed_at: now.to_rfc3339(),
+                    complete: index != 0,
+                    days: BTreeMap::from([(format!("{}-15", month.key()), 10)]),
+                },
+            );
+        }
+        (cache, required)
+    }
+
+    fn fetch_empty_month<Tz: TimeZone>(
+        month: Month,
+        now: DateTime<Utc>,
+        timezone: &Tz,
+    ) -> CursorMonthCache {
+        let empty = cursor_dashboard::UsageEventPage {
+            events: vec![],
+            total_count: 0,
+        };
+        let source = FakeSource {
+            first_pages: RefCell::new(VecDeque::from([empty.clone(), empty])),
+            other_pages: BTreeMap::new(),
+            aggregate: TokenUsage::default(),
+        };
+        fetch_month_with_page_size_at(
+            &source,
+            month,
+            timezone,
+            PAGE_SIZE,
+            Instant::now() + Duration::from_secs(2),
+            now,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fresh_cache_return_rejects_invalidated_scope_and_cancelled_commit() {
+        let now = timestamp("2026-09-08T12:00:00Z");
+        let (cache, required) = sample_cache(now);
+        assert_eq!(target_month(&cache, &required, now, false, &Utc), None);
+        for (validated, allowed, expected_success) in [
+            (true, true, true),
+            (false, true, false), // Invalidated scope or a fresh process.
+            (true, false, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            let result = checked_refresh_step(&cache, &required, now, &Utc, || {
+                check_cache_access(
+                    &cache,
+                    cache.account_scope,
+                    &cache.timezone_identity,
+                    validated,
+                    allowed,
+                )
+            });
+            if expected_success {
+                let step = result.unwrap();
+                assert_eq!(step.kind, RefreshStepKind::Complete);
+                assert!(!step.view.partial);
+                assert!(!step.view.days.is_empty());
+            } else {
+                assert_eq!(result.unwrap_err().kind, DashboardErrorKind::ScopeChanged);
+            }
+        }
+    }
+
+    #[test]
+    fn cache_return_rechecks_user_team_and_timezone_after_reading_cache() {
+        let now = timestamp("2026-09-08T12:00:00Z");
+        let (cache, required) = sample_cache(now);
+        for scope in [
+            AccountScope {
+                user_id: 2,
+                team_id: None,
+            },
+            AccountScope {
+                user_id: 1,
+                team_id: Some(1),
+            },
+        ] {
+            let error = checked_refresh_step(&cache, &required, now, &Utc, || {
+                check_cache_access(&cache, scope, &cache.timezone_identity, true, true)
+            })
+            .unwrap_err();
+            assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+        }
+        let timezone = TimezoneIdentity {
+            dynamic_daylight_disabled: true,
+            ..cache.timezone_identity.clone()
+        };
+        assert_eq!(
+            check_cache_access(&cache, cache.account_scope, &timezone, true, true,)
+                .unwrap_err()
+                .kind,
+            DashboardErrorKind::ScopeChanged
+        );
+    }
+
+    #[test]
+    fn midmonth_cache_is_finalized_after_day_seven_even_after_forced_current() {
+        let now = timestamp("2026-09-08T12:00:00Z");
+        let (mut cache, required) = sample_cache(now);
+        let current = required[0];
+        let previous = required[1];
+        let midmonth = fetch_empty_month(previous, timestamp("2026-08-15T12:00:00Z"), &Utc);
+        assert!(!midmonth.complete);
+        cache.months.insert(previous.key(), midmonth);
+        assert_eq!(
+            target_month(&cache, &required, now, false, &Utc),
+            Some(previous)
+        );
+        assert_eq!(
+            target_month(&cache, &required, now, true, &Utc),
+            Some(current)
+        );
+
+        // A successful forced current-month fetch must not end the backfill loop.
+        let mut current_cache = fetch_empty_month(current, now, &Utc);
+        current_cache.refreshed_at = now.to_rfc3339();
+        assert!(!current_cache.complete);
+        cache.months.insert(current.key(), current_cache);
+        let step = checked_refresh_step(&cache, &required, now, &Utc, || Ok(())).unwrap();
+        assert_eq!(step.kind, RefreshStepKind::Updated);
+        assert!(step.view.partial && step.view.backfill_pending);
+        assert_eq!(
+            target_month(&cache, &required, now, false, &Utc),
+            Some(previous)
+        );
+
+        let finalized = fetch_empty_month(previous, now, &Utc);
+        assert!(finalized.complete);
+        cache.months.insert(previous.key(), finalized);
+        let step = checked_refresh_step(&cache, &required, now, &Utc, || Ok(())).unwrap();
+        assert_eq!(step.kind, RefreshStepKind::Complete);
+        assert!(!step.view.partial && !step.view.backfill_pending);
+        for minutes in 0..=5 {
+            assert_eq!(
+                target_month(
+                    &cache,
+                    &required,
+                    now + ChronoDuration::minutes(minutes),
+                    false,
+                    &Utc,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            target_month(
+                &cache,
+                &required,
+                now + ChronoDuration::minutes(6),
+                false,
+                &Utc,
+            ),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn legacy_months_are_refetched_once_without_invalidating_fresh_current() {
+        let now = timestamp("2026-09-08T12:00:00Z");
+        let (mut cache, required) = sample_cache(now);
+        let legacy: CursorMonthCache = serde_json::from_value(serde_json::json!({
+            "refreshed_at": now.to_rfc3339(),
+            "days": {"2026-07-15": 42}
+        }))
+        .unwrap();
+        assert!(!legacy.complete);
+        assert_eq!(legacy.days["2026-07-15"], 42);
+        cache.months.insert(required[2].key(), legacy);
+        assert_eq!(
+            target_month(&cache, &required, now, false, &Utc),
+            Some(required[2])
+        );
+        cache
+            .months
+            .insert(required[2].key(), fetch_empty_month(required[2], now, &Utc));
+        let roundtrip: CursorActivityCache =
+            serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert_eq!(roundtrip, cache);
+        assert_eq!(target_month(&roundtrip, &required, now, false, &Utc), None);
+        assert_eq!(
+            target_month(&roundtrip, &required[..1], now, false, &Utc),
+            None
+        );
+    }
+
+    #[test]
+    fn month_finalization_waits_for_ingestion_lag_at_local_month_boundary() {
+        let timezone = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        let before = timestamp("2026-09-01T00:04:59+09:00");
+        let cutoff = timestamp("2026-09-01T00:05:00+09:00");
+        let (mut cache, required) = sample_cache(before);
+        let previous = required[1];
+        let mut partial = fetch_empty_month(previous, before, &timezone);
+        assert!(!partial.complete);
+        partial.refreshed_at = before.to_rfc3339();
+        cache.months.insert(previous.key(), partial);
+        assert_eq!(
+            target_month(&cache, &required, before, false, &timezone),
+            None
+        );
+        let waiting =
+            checked_refresh_step(&cache, &required, before, &timezone, || Ok(())).unwrap();
+        assert!(waiting.view.partial);
+        assert!(!waiting.view.backfill_pending);
+        assert_eq!(
+            target_month(&cache, &required, cutoff, false, &timezone),
+            Some(previous)
+        );
+
+        let mut finalized = fetch_empty_month(previous, cutoff, &timezone);
+        assert!(finalized.complete);
+        finalized.refreshed_at = cutoff.to_rfc3339();
+        cache.months.insert(previous.key(), finalized);
+        assert_eq!(
+            target_month(&cache, &required, cutoff, false, &timezone),
+            None
+        );
+        assert!(!view_from_cache(&cache, &required, cutoff, &timezone, false).partial);
+    }
+
+    #[test]
+    fn finalized_previous_month_keeps_only_the_existing_bounded_grace_refresh() {
+        let now = timestamp("2026-09-07T12:00:00Z");
+        let (mut cache, required) = sample_cache(now);
+        cache
+            .months
+            .get_mut(&required[1].key())
+            .unwrap()
+            .refreshed_at = (now - ChronoDuration::hours(2)).to_rfc3339();
+        assert_eq!(
+            target_month(&cache, &required, now, false, &Utc),
+            Some(required[1])
+        );
+        let after_grace = now + ChronoDuration::days(1);
+        cache
+            .months
+            .get_mut(&required[0].key())
+            .unwrap()
+            .refreshed_at = after_grace.to_rfc3339();
+        assert_eq!(
+            target_month(&cache, &required, after_grace, false, &Utc),
+            None
+        );
+    }
+
     #[test]
     fn month_bounds_follow_dst_instead_of_reusing_one_offset() {
         let march = month_bounds(
@@ -735,6 +1096,7 @@ mod tests {
             "2026-08".into(),
             CursorMonthCache {
                 refreshed_at: Utc::now().to_rfc3339(),
+                complete: true,
                 days: BTreeMap::from([("2026-08-25".into(), 10)]),
             },
         );

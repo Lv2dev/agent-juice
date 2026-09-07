@@ -308,7 +308,7 @@ test("full bar reports packed content width once after horizontal rendering", as
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.deepEqual(
     calls.filter(({ command }) => command === "set_taskbar_content_width"),
-    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 187 } }],
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 187, mode: "full", devicePixelRatio: 1 } }],
   );
 
   eventHandlers["status-updated"]?.({ payload: [] });
@@ -317,6 +317,106 @@ test("full bar reports packed content width once after horizontal rendering", as
     calls.filter(({ command }) => command === "set_taskbar_content_width").length,
     1,
   );
+  delete global.window;
+  delete global.document;
+});
+
+test("bar remeasures late fonts, content growth, shrinking, and DPI changes without a status event", async () => {
+  const root = { dataset: {} };
+  const tool = toolStub();
+  let length = 105.2;
+  tool.getBoundingClientRect = () => ({ width: length, height: 40 });
+  const calls = [];
+  const handlers = {};
+  const fontHandlers = {};
+  const nativeHandlers = {};
+  let resizeContent;
+  let dpiChanged;
+  let disconnected = false;
+  let fontsReady;
+  global.window = {
+    location: { search: "?tool=cursor" },
+    devicePixelRatio: 1.25,
+    ResizeObserver: class {
+      constructor(callback) { resizeContent = callback; }
+      observe(target) { assert.equal(target, tool); }
+      disconnect() { disconnected = true; }
+    },
+    addEventListener(name, handler) { handlers[name] = handler; },
+    removeEventListener(name) { delete handlers[name]; },
+    matchMedia() {
+      return {
+        matches: false,
+        addEventListener(name, handler) { dpiChanged = handler; },
+        removeEventListener() {},
+      };
+    },
+    __TAURI__: {
+      core: {
+        async invoke(command, args) {
+          if (command === "get_settings") return { bar_mode: "compact", show_cursor: true };
+          if (command === "get_status") return [];
+          if (command === "get_collection_health") return {};
+          if (command === "get_taskbar_orientation") return "horizontal";
+          if (command === "set_taskbar_content_width") calls.push(args);
+        },
+      },
+      event: { async listen() {} },
+      window: { getCurrentWindow() { return { async listen(name, handler) { nativeHandlers[name] = handler; } }; } },
+    },
+  };
+  global.document = {
+    addEventListener() {},
+    querySelector(selector) {
+      if (selector === "#bar") return root;
+      if (selector === '[data-tool="cursor"]') return tool;
+      return null;
+    },
+    fonts: {
+      ready: new Promise((resolve) => { fontsReady = resolve; }),
+      addEventListener(name, handler) { fontHandlers[name] = handler; },
+      removeEventListener(name) { delete fontHandlers[name]; },
+    },
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 130));
+  await import(`./bar.js?test=${Date.now()}-late-layout-dpi`);
+  await settle();
+  assert.equal(calls.at(-1).width, 106);
+  length = 131.4;
+  fontsReady();
+  await settle();
+  assert.equal(calls.at(-1).width, 132);
+  length = 190.1;
+  resizeContent();
+  await settle();
+  assert.equal(calls.at(-1).width, 191);
+  length = 1050.7;
+  resizeContent();
+  await settle();
+  assert.equal(calls.at(-1).width, 1051, "large system text must not hit the former 1024px cap");
+  length = 38.2;
+  resizeContent();
+  await settle();
+  assert.equal(calls.at(-1).width, 39);
+  const beforeDpi = calls.length;
+  window.devicePixelRatio = 1.75;
+  dpiChanged();
+  await settle();
+  assert.equal(calls.length, beforeDpi + 1);
+  assert.deepEqual(calls.at(-1), { tool: "cursor", width: 39, mode: "compact", devicePixelRatio: 1.75 });
+  window.devicePixelRatio = 2;
+  nativeHandlers["tauri://scale-change"]({ payload: { scaleFactor: 2 } });
+  await settle();
+  assert.equal(calls.at(-1).devicePixelRatio, 2, "native DPI signals must work without browser resize or media-query events");
+  handlers.resize();
+  await settle();
+  assert.equal(calls.length, beforeDpi + 3, "same width must recheck native geometry after resize");
+  fontHandlers.loadingdone();
+  handlers.pagehide();
+  await settle();
+  assert.equal(calls.length, beforeDpi + 3, "closing the bar must cancel queued measurements");
+  assert.ok(disconnected);
+  assert.equal(fontHandlers.loadingdone, undefined);
   delete global.window;
   delete global.document;
 });
@@ -366,7 +466,7 @@ test("content width retries while the native taskbar target is still initializin
     calls.filter(({ command }) => command === "set_taskbar_content_width"),
     Array.from({ length: 3 }, () => ({
       command: "set_taskbar_content_width",
-      args: { tool: "codex", width: 187 },
+      args: { tool: "codex", width: 187, mode: "full", devicePixelRatio: 1 },
     })),
   );
   delete global.window;
@@ -421,7 +521,7 @@ test("login-required dual bar expands and returns to its indicator width", async
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.deepEqual(
     calls.filter(({ command }) => command === "set_taskbar_content_width"),
-    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 96 } }],
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 96, mode: "dual", devicePixelRatio: 1 } }],
   );
 
   measuredWidth = 37;
@@ -430,8 +530,8 @@ test("login-required dual bar expands and returns to its indicator width", async
   assert.deepEqual(
     calls.filter(({ command }) => command === "set_taskbar_content_width"),
     [
-      { command: "set_taskbar_content_width", args: { tool: "codex", width: 96 } },
-      { command: "set_taskbar_content_width", args: { tool: "codex", width: 37 } },
+      { command: "set_taskbar_content_width", args: { tool: "codex", width: 96, mode: "dual", devicePixelRatio: 1 } },
+      { command: "set_taskbar_content_width", args: { tool: "codex", width: 37, mode: "dual", devicePixelRatio: 1 } },
     ],
   );
   delete global.window;
@@ -478,7 +578,7 @@ test("vertical login-required bar reports its rendered content height", async ()
   await new Promise((resolve) => setTimeout(resolve, 120));
   assert.deepEqual(
     calls.filter(({ command }) => command === "set_taskbar_content_width"),
-    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 84 } }],
+    [{ command: "set_taskbar_content_width", args: { tool: "codex", width: 84, mode: "quad", devicePixelRatio: 1 } }],
   );
   delete global.window;
   delete global.document;
@@ -1736,7 +1836,7 @@ test("bar bounds pending listeners, cleans late registrations, and preserves new
     windowListeners.beforeunload?.();
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(attempts.has("collection-health-updated"));
-    assert.equal(normalUnlistenCalls, 5);
+    assert.equal(normalUnlistenCalls, 6);
 
     for (const resolve of pendingListenerResolvers.slice(1)) {
       resolve(() => {

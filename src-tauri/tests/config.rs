@@ -187,6 +187,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     let path = root.join("settings.json");
     let settings = Settings {
         palette: Palette::Cool,
+        tool_colors_version: Settings::default().tool_colors_version,
         tool_colors: ToolColors {
             claude_primary: [0x11, 0x22, 0x33],
             claude_secondary: [0x44, 0x55, 0x66],
@@ -566,6 +567,46 @@ fn legacy_default_tool_colors_migrate_without_overwriting_custom_combinations() 
         custom_cursor.tool_colors.cursor_secondary,
         [0x06, 0xb6, 0xd4]
     );
+}
+
+#[test]
+fn rejected_settings_edit_does_not_persist_a_partial_mutation() {
+    let root = temp_root("update-rejected-edit");
+    let path = root.join("settings.json");
+    Settings::default().save_to(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    assert!(Settings::try_update_at(&path, |settings| {
+        settings.bar_mode = "quad".into();
+        anyhow::bail!("monitor layout changed");
+    })
+    .is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicitly_reselected_previous_default_colors_survive_reload() {
+    let root = temp_root("explicit-previous-colors");
+    let path = root.join("settings.json");
+    for color in ["#72716d", "#3b82f6"] {
+        let selected = Settings::from_input(SettingsInput {
+            cursor_primary_color: Some(color.into()),
+            cursor_secondary_color: Some(
+                if color == "#72716d" {
+                    "#0891b2"
+                } else {
+                    "#06b6d4"
+                }
+                .into(),
+            ),
+            ..SettingsInput::default()
+        });
+        selected.save_to(&path).unwrap();
+        let loaded = Settings::try_load_from(&path).unwrap();
+        assert_eq!(loaded.tool_colors, selected.tool_colors);
+        assert!(loaded.tool_colors_version > 0);
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
