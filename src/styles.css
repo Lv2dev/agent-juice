@@ -391,7 +391,7 @@ h1::before {
   background: var(--surface);
   box-shadow: var(--shadow-soft);
   display: grid;
-  grid-template-rows: auto 1fr 1fr auto;
+  grid-auto-rows: max-content;
   gap: 10px;
   overflow: hidden;
   -webkit-backdrop-filter: blur(12px) saturate(1.04);
@@ -571,6 +571,10 @@ h2 {
   width: 100%;
   justify-self: stretch;
   text-align: right;
+}
+
+.tool-card > .meta:empty {
+  display: none;
 }
 
 .empty-hint {

@@ -14,10 +14,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-overview.png" alt="Juice 실제 사용량 패널" width="620">
+  <img src="docs/assets/juice-v021-ko-hero.png" alt="Juice 작업표시줄 사용량과 활동 히트맵" width="1000">
 </p>
 
-<p align="center"><sub>현재 Tauri WebView를 2배 해상도로 직접 렌더링했습니다. 값과 PC 이름은 문서용 샘플입니다.</sub></p>
+<p align="center"><sub>앱의 화면 코드를 사용해 2배 해상도로 렌더링했습니다. 값과 PC 이름은 문서용 샘플입니다.</sub></p>
 
 <p align="center"><a href="#한국어">한국어</a> · <a href="#english">English</a></p>
 
@@ -55,7 +55,7 @@ Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
 ### 토큰 활동
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-activity.png" alt="Juice Claude, Codex, Grok, Cursor 토큰 활동 히트맵" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-activity.png" alt="Juice Claude, Codex, Grok, Cursor 토큰 활동 히트맵" width="620">
 </p>
 
 <p align="center"><sub>문서용 샘플 데이터입니다. 전체·Claude·Codex·Grok·Cursor를 따로 볼 수 있으며 Codex와 Cursor는 계정 범위입니다.</sub></p>
@@ -70,11 +70,11 @@ Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
 ### 작업표시줄 표시
 
 <p align="center">
-  <img src="docs/assets/juice-v014-taskbar-modes.png" alt="Juice 작업표시줄 4가지 바 모드" width="900">
+  <img src="docs/assets/juice-v021-ko-taskbar-modes.png" alt="Juice 작업표시줄 4가지 원 모드" width="1000">
 </p>
 
 <p align="center">
-  <img src="docs/assets/juice-v014-taskbar-bars.png" alt="Juice 작업표시줄 가로 바 4가지 모드" width="900">
+  <img src="docs/assets/juice-v021-ko-taskbar-bars.png" alt="Juice 작업표시줄 가로 바 4가지 모드" width="1000">
 </p>
 
 <p align="center"><sub>같은 4개 모드를 원 대신 위아래 두 줄의 가로 바로 표시합니다. 이중원과 링4는 가로 바를 선택하면 같은 2줄 압축 표시를 사용합니다.</sub></p>
@@ -103,7 +103,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 ### 보조 모니터로 이동
 
 <p align="center">
-  <img src="docs/assets/juice-v014-multi-monitor.gif" alt="Juice 바를 보조 모니터 작업표시줄로 이동하고 위치를 저장하는 과정" width="760">
+  <img src="docs/assets/juice-v021-ko-multi-monitor.gif" alt="Claude는 그대로 두고 Codex 바만 보조 모니터로 이동하는 합성 데모" width="1000">
 </p>
 
 <p align="center"><sub>이동 흐름을 알아보기 쉽게 만든 합성 데모입니다. 실제 바 구조와 모니터별 위치 저장 동작을 기준으로 제작했습니다.</sub></p>
@@ -119,7 +119,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 ### 원·바 표현 스타일
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-effects.png" alt="Juice 원과 바 표현 스타일 설정" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-effects.png" alt="Juice 원과 바 표현 스타일 설정" width="620">
 </p>
 
 원과 위아래 가로 바는 같은 표현 스타일을 공유합니다.
@@ -138,7 +138,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 ### 테마·팔레트·도구별 색상
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-appearance.png" alt="Juice 테마와 도구별 색상 설정" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-appearance.png" alt="Juice 도구별·기간별 색상 설정" width="620">
 </p>
 
 - 기본 테마는 Windows 시스템 설정을 따르며 라이트와 다크를 직접 고정할 수 있습니다.
@@ -149,7 +149,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 ### 설정 구성
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="Juice 5탭 설정의 표시줄 탭" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-taskbar.png" alt="Juice 5탭 설정의 표시줄 탭" width="620">
 </p>
 
 설정 카드는 기능별 5개 탭으로 나뉘며 업데이트와 정보는 별도 카드로 분리됩니다.
@@ -167,7 +167,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 ### 업데이트 확인과 알림
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-update.png" alt="Juice 업데이트 확인과 알림 설정" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-update.png" alt="Juice 업데이트 확인과 알림 설정" width="620">
 </p>
 
 - 기본값은 켜짐이며 시작 15초 후, 마지막 성공 확인에서 24시간이 지난 경우에만 최신 정식 GitHub Release를 확인합니다.
@@ -185,7 +185,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 ### Claude 계정 사용량 자동 수집
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-collection.png" alt="Juice Claude 계정 사용량 자동 수집 설정" width="620">
+  <img src="docs/assets/juice-v021-ko-panel-collection.png" alt="Juice Claude 계정 사용량 자동 수집 설정" width="620">
 </p>
 
 **Claude 계정 사용량 자동 수집**은 `수집` 탭의 일반 기능이며 기본값은 **켜짐**입니다.
@@ -286,6 +286,12 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 
 ## English
 
+<p align="center">
+  <img src="docs/assets/juice-v021-en-hero.png" alt="Juice taskbar usage indicators and token activity" width="1000">
+</p>
+
+<p align="center"><sub>Rendered at 2x resolution using the application's UI code. Values and PC names are sample data.</sub></p>
+
 ### What does Juice show?
 
 Juice reads Claude Code's **5-hour and weekly limits**, whichever **5-hour or weekly windows the Codex account currently provides**, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor. When Codex exposes only one window, Juice renders that real limit without an empty placeholder. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
@@ -318,7 +324,7 @@ Juice reuses each tool's existing local login and never asks you to enter accoun
 ### Token activity
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-activity.png" alt="Juice token activity heatmap for Claude, Codex, Grok, and Cursor" width="620">
+  <img src="docs/assets/juice-v021-en-panel-activity.png" alt="Juice token activity heatmap for Claude, Codex, Grok, and Cursor" width="620">
 </p>
 
 <p align="center"><sub>Documentation sample data. All, Claude, Codex, Grok, and Cursor views are available; Codex and Cursor use account scope.</sub></p>
@@ -333,11 +339,11 @@ Juice reuses each tool's existing local login and never asks you to enter accoun
 ### Taskbar display
 
 <p align="center">
-  <img src="docs/assets/juice-v014-taskbar-modes.png" alt="Four Juice taskbar display modes" width="900">
+  <img src="docs/assets/juice-v021-en-taskbar-modes.png" alt="Four Juice taskbar modes with ring indicators" width="1000">
 </p>
 
 <p align="center">
-  <img src="docs/assets/juice-v014-taskbar-bars.png" alt="Four Juice taskbar modes using horizontal bar indicators" width="900">
+  <img src="docs/assets/juice-v021-en-taskbar-bars.png" alt="Four Juice taskbar modes using horizontal bar indicators" width="1000">
 </p>
 
 <p align="center"><sub>The same four modes use two stacked horizontal bars instead of rings. Dual ring and Four rings use the same compact two-line indicator when bars are selected.</sub></p>
@@ -366,7 +372,7 @@ Juice provides **four bar modes**.
 ### Move to another monitor
 
 <p align="center">
-  <img src="docs/assets/juice-v014-multi-monitor.gif" alt="Moving a Juice bar to another monitor taskbar and saving its position" width="760">
+  <img src="docs/assets/juice-v021-en-multi-monitor.gif" alt="Simulated movement of Codex to a second monitor while Claude stays in place" width="1000">
 </p>
 
 <p align="center"><sub>This synthetic demo makes the movement easy to follow. It reflects the real bar structure and per-monitor position persistence.</sub></p>
@@ -382,7 +388,7 @@ Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar
 ### Ring and bar visual styles
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-effects.png" alt="Juice ring and bar visual style settings" width="620">
+  <img src="docs/assets/juice-v021-en-panel-effects.png" alt="Juice ring and bar visual style settings" width="620">
 </p>
 
 Rings and stacked horizontal bars share one visual style.
@@ -401,7 +407,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 ### Theme, palettes, and per-tool colors
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-appearance.png" alt="Juice theme and per-tool color settings" width="620">
+  <img src="docs/assets/juice-v021-en-panel-appearance.png" alt="Juice per-tool and per-period color settings" width="620">
 </p>
 
 - The default theme follows Windows, with explicit light and dark overrides.
@@ -412,7 +418,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 ### Settings layout
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-taskbar.png" alt="The Taskbar tab in Juice's five-tab settings" width="620">
+  <img src="docs/assets/juice-v021-en-panel-taskbar.png" alt="The Taskbar tab in Juice's five-tab settings" width="620">
 </p>
 
 The settings card is split into five task-focused tabs. Updates and About remain separate cards.
@@ -430,7 +436,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 ### Update checks and notifications
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-update.png" alt="Juice update checks and notifications" width="620">
+  <img src="docs/assets/juice-v021-en-panel-update.png" alt="Juice update checks and notifications" width="620">
 </p>
 
 - Enabled by default. Juice checks the latest stable GitHub Release 15 seconds after startup only when 24 hours have passed since the last successful check.
@@ -448,7 +454,7 @@ The `About` card contains only the current version, product purpose, and local-p
 ### Automatic Claude account usage collection
 
 <p align="center">
-  <img src="docs/assets/juice-v014-panel-collection.png" alt="Juice Claude account usage collection setting" width="620">
+  <img src="docs/assets/juice-v021-en-panel-collection.png" alt="Juice Claude account usage collection setting" width="620">
 </p>
 
 **Claude account usage auto-collection** is a regular option in the `Collection` tab and is **on by default**.
