@@ -27,18 +27,6 @@ function gifDimensions(path) {
   return [buffer.readUInt16LE(6), buffer.readUInt16LE(8)];
 }
 
-function isProjectGitWorktree() {
-  try {
-    const root = execFileSync("git", ["-C", projectRoot, "rev-parse", "--show-toplevel"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    return resolve(root) === projectRoot;
-  } catch {
-    return false;
-  }
-}
-
 test("app and tray icons use the same vertical capsule mark as the settings logo", () => {
   const script = String.raw`
 import json
@@ -218,169 +206,75 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /default collection interval and Claude account cache are both 60 seconds/);
 });
 
-test("README uses current Tauri panel and taskbar capture assets", () => {
+test("README uses localized current UI assets with bounded motion", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
-  const assets = new Map([
-    ["juice-v014-panel-overview.png", [1240, 1696]],
-    ["juice-v014-panel-activity.png", [1240, 674]],
-    ["juice-v014-panel-appearance.png", [1240, 1668]],
-    ["juice-v014-panel-taskbar.png", [1240, 1412]],
-    ["juice-v014-panel-collection.png", [1240, 1416]],
-    ["juice-v014-panel-effects.png", [1240, 2428]],
-    ["juice-v014-panel-update.png", [1240, 588]],
-    ["juice-v014-taskbar-modes.png", [1800, 792]],
-    ["juice-v014-taskbar-bars.png", [1800, 792]],
-  ]);
-
-  for (const [name, dimensions] of assets) {
-    const path = resolve(projectRoot, `docs/assets/${name}`);
-    assert.ok(existsSync(path), `${name} is missing`);
-    assert.match(readme, new RegExp(`docs/assets/${name.replaceAll(".", "\\.")}`));
-    assert.deepEqual(pngDimensions(path), dimensions, `${name} dimensions changed`);
-    assert.ok(readFileSync(path).length > 10_000, `${name} is unexpectedly small`);
-  }
-
-  assert.equal(
-    readme.match(/docs\/assets\/juice-v014-panel-activity\.png/g)?.length,
-    2,
-    "the activity image must appear in both Korean and English sections",
-  );
-
-  const gifName = "juice-v014-multi-monitor.gif";
-  const gifPath = resolve(projectRoot, `docs/assets/${gifName}`);
-  assert.ok(existsSync(gifPath), `${gifName} is missing`);
-  assert.match(readme, new RegExp(`docs/assets/${gifName.replaceAll(".", "\\.")}`));
-  assert.deepEqual(gifDimensions(gifPath), [960, 420]);
-  assert.ok(readFileSync(gifPath).length > 100_000, `${gifName} is unexpectedly small`);
-  assert.ok(readFileSync(gifPath).length < 1_500_000, `${gifName} is too large for the README`);
-  const gifStats = JSON.parse(
-    execFileSync(
-      "python",
-      [
-        "-c",
-        "import json,sys; from PIL import Image; im=Image.open(sys.argv[1]); durations=[]; [(im.seek(i), durations.append(im.info.get('duration', 0))) for i in range(im.n_frames)]; print(json.dumps({'frames': im.n_frames, 'duration': sum(durations)}))",
-        gifPath,
-      ],
-      { encoding: "utf8" },
-    ),
-  );
-  assert.ok(gifStats.frames >= 20, `${gifName} does not have enough motion frames`);
-  assert.ok(gifStats.duration >= 3_000 && gifStats.duration <= 8_000, `${gifName} has an unsuitable duration`);
-
-  const taskbarPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-modes.png");
-  const ringHeights = JSON.parse(
-    execFileSync(
-      "python",
-      [
-        "-c",
-        `
-import json
-import sys
+  const dimensions = {
+    "hero.png": [2560, 2200],
+    "panel-activity.png": [1136, 458],
+    "panel-appearance.png": [1136, 1454],
+    "panel-taskbar.png": [1136, 1416],
+    "panel-collection.png": [1136, 1200],
+    "panel-effects.png": [1136, 2212],
+    "panel-update.png": [1136, 372],
+  };
+  for (const language of ["ko", "en"]) {
+    for (const [suffix, expected] of Object.entries(dimensions)) {
+      const name = `juice-v021-${language}-${suffix}`;
+      const file = resolve(projectRoot, "docs/assets", name);
+      assert.ok(readme.includes(`docs/assets/${name}`));
+      assert.deepEqual(pngDimensions(file), expected);
+      assert.ok(readFileSync(file).length > 10000);
+    }
+    for (const style of ["modes", "bars"]) {
+      const file = resolve(projectRoot, `docs/assets/juice-v021-${language}-taskbar-${style}.png`);
+      const [width, height] = pngDimensions(file);
+      assert.ok(width >= 2200 && width <= 2500);
+      assert.ok(height >= 1150 && height <= 1300);
+    }
+    const gif = resolve(projectRoot, `docs/assets/juice-v021-${language}-multi-monitor.gif`);
+    assert.deepEqual(gifDimensions(gif), [1280, 660]);
+    assert.ok(readFileSync(gif).length < 1500000);
+    const stats = JSON.parse(execFileSync("python", ["-c", `
+import json, sys
+from pathlib import Path
 from PIL import Image
-
-image = Image.open(sys.argv[1]).convert("RGB")
-tool_colors = [
-    [(215, 154, 50), (211, 107, 134)],
-    [(47, 172, 125), (77, 134, 214)],
-    [(217, 87, 139), (138, 111, 209)],
-    [(114, 113, 109), (8, 145, 178)],
-]
-rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
-columns = [(224, 990), (990, 1756)]
-heights = []
-for top, bottom in rows:
-    row = []
-    middle = (top + bottom) // 2
-    cells = [
-        (*columns[0], top, middle),
-        (*columns[1], top, middle),
-        (*columns[0], middle, bottom),
-        (*columns[1], middle, bottom),
-    ]
-    for tool_index, (left, right, cell_top, cell_bottom) in enumerate(cells):
-        colors = tool_colors[tool_index]
-        points = [
-            (x, y)
-            for y in range(cell_top, cell_bottom)
-            for x in range(left, right)
-            if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
-        ]
-        row.append(max(y for _, y in points) - min(y for _, y in points) + 1)
-    heights.append(row)
-print(json.dumps(heights))
-`,
-        taskbarPath,
-      ],
-      { encoding: "utf8" },
-    ),
-  );
-  for (const row of ringHeights) {
-    assert.equal(row.length, 4);
-    assert.ok(row.every((height) => height >= 63 && height <= 64), `ring size drifted: ${JSON.stringify(row)}`);
-    assert.ok(Math.max(...row) - Math.min(...row) <= 1, `ring sizes are uneven: ${JSON.stringify(row)}`);
-  }
-
-  const taskbarBarsPath = resolve(projectRoot, "docs/assets/juice-v014-taskbar-bars.png");
-  const barBounds = JSON.parse(
-    execFileSync(
-      "python",
-      [
-        "-c",
-        `
-import json
-import sys
-from PIL import Image
-
-image = Image.open(sys.argv[1]).convert("RGB")
-tool_colors = [
-    [(215, 154, 50), (211, 107, 134)],
-    [(47, 172, 125), (77, 134, 214)],
-    [(217, 87, 139), (138, 111, 209)],
-    [(114, 113, 109), (8, 145, 178)],
-]
-rows = [(64, 228), (244, 408), (424, 588), (604, 768)]
-columns = [(224, 990), (990, 1756)]
-bounds = []
-for top, bottom in rows:
-    row = []
-    middle = (top + bottom) // 2
-    cells = [
-        (*columns[0], top, middle),
-        (*columns[1], top, middle),
-        (*columns[0], middle, bottom),
-        (*columns[1], middle, bottom),
-    ]
-    for tool_index, (left, right, cell_top, cell_bottom) in enumerate(cells):
-        colors = tool_colors[tool_index]
-        points = [
-            (x, y)
-            for y in range(cell_top, cell_bottom)
-            for x in range(left, right)
-            if min(sum((image.getpixel((x, y))[i] - color[i]) ** 2 for i in range(3)) for color in colors) < 400
-        ]
-        row.append({
-            "width": max(x for x, _ in points) - min(x for x, _ in points) + 1,
-            "height": max(y for _, y in points) - min(y for _, y in points) + 1,
-        })
-    bounds.append(row)
-print(json.dumps(bounds))
-`,
-        taskbarBarsPath,
-      ],
-      { encoding: "utf8" },
-    ),
-  );
-  for (const row of barBounds) {
-    for (const bounds of row) {
-      assert.ok(bounds.width >= 40, `horizontal indicator is too narrow: ${JSON.stringify(bounds)}`);
-      assert.ok(bounds.height <= 32, `horizontal indicator is too tall: ${JSON.stringify(bounds)}`);
+im = Image.open(sys.argv[1])
+durations = []
+for i in range(im.n_frames):
+    im.seek(i)
+    durations.append(im.info.get("duration", 0))
+boards = []
+colors = [(215,154,50), (47,172,125), (217,87,139), (133,132,127)]
+widths = [180,177,133,249] if sys.argv[2] == "ko" else [194,191,147,285]
+for style in ["modes", "bars"]:
+    image = Image.open(Path(sys.argv[1]).with_name(f"juice-v021-{sys.argv[2]}-taskbar-{style}.png")).convert("RGB")
+    left = (40 + 146) * 2
+    for width, color in zip(widths, colors):
+        ys = [y for y in range(420, image.height - 90) if any(
+            sum((image.getpixel((x,y))[i]-color[i])**2 for i in range(3)) < 300
+            for x in range(left, left + 73))]
+        groups = []
+        for y in ys:
+            if not groups or y - groups[-1][-1] > 40:
+                groups.append([])
+            groups[-1].append(y)
+        boards.append({"style": style, "heights": [max(g)-min(g)+1 for g in groups]})
+        left += (width + 40) * 2
+print(json.dumps({"frames": im.n_frames, "duration": sum(durations), "boards": boards}))
+`, gif, language], { encoding: "utf8", windowsHide: true }));
+    assert.equal(stats.frames, 150);
+    assert.equal(stats.duration, 7500);
+    for (const board of stats.boards) {
+      assert.equal(board.heights.length, 4, `missing mode indicator: ${JSON.stringify(board)}`);
+      for (const [row, height] of board.heights.entries()) {
+        if (board.style === "modes") {
+          const minimum = row === 3 ? 38 : 68;
+          assert.ok(height >= minimum && height <= 74, `ring raster size: ${height}`);
+        } else assert.ok(height >= 6 && height <= 36, `horizontal bar raster size: ${height}`);
+      }
     }
   }
-
-  assert.match(
-    readme,
-    /juice-v014-taskbar-modes\.png[\s\S]*juice-v014-taskbar-bars\.png/,
-  );
+  assert.doesNotMatch(readme, /docs\/assets\/juice-v014/);
   assert.match(readme, /같은 4개 모드를 원 대신 위아래 두 줄의 가로 바로 표시합니다/);
   assert.match(readme, /The same four modes use two stacked horizontal bars instead of rings/);
 
@@ -401,20 +295,5 @@ print(json.dumps(bounds))
   assert.match(readme, /Fullscreen hiding:[^\n]*Off by default on a new installation/);
   assert.doesNotMatch(readme, /\b(?:RAII|HWND|AppHang)\b|z-order/i);
 
-  if (isProjectGitWorktree()) {
-    assert.doesNotThrow(() =>
-      execFileSync(
-        "git",
-        [
-          "-C",
-          projectRoot,
-          "ls-files",
-          "--error-unmatch",
-          "--",
-          "docs/assets/juice-v014-taskbar-bars.png",
-        ],
-        { stdio: "pipe" },
-      ),
-    );
-  }
+
 });

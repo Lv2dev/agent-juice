@@ -126,6 +126,29 @@ function markupSection(name) {
   return "";
 }
 
+test("README product images exist and match each section language", () => {
+  const sections = readme.split("## English");
+  assert.equal(sections.length, 2);
+  for (const [index, section] of sections.entries()) {
+    const images = [...section.matchAll(/<img\b[^>]*src="([^"]+)"/g)].map(match => match[1]);
+    assert.ok(images.length >= 10);
+    for (const image of images) {
+      assert.ok(existsSync(resolve(here, "..", image)), `Missing README image: ${image}`);
+      if (image.endsWith("juice-brand.svg")) continue;
+      assert.match(image, index === 0 ? /-ko-/ : /-en-/);
+    }
+  }
+});
+
+test("usage cards reserve rows only for visible content", () => {
+  const card = cssBlock(".tool-card");
+  assert.match(card, /grid-auto-rows:\s*max-content/);
+  assert.doesNotMatch(card, /grid-template-rows:/);
+  assert.match(cssBlock(".tool-card > .meta:empty"), /display:\s*none/);
+  assert.match(card, /padding:\s*12px/);
+  assert.match(card, /gap:\s*10px/);
+});
+
 test("styles define the restrained Quiet Glass surface tokens used by Juice", () => {
   for (const token of [
     "--glass",
@@ -1783,7 +1806,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.21"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.22"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
