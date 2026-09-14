@@ -434,6 +434,7 @@ pub struct WindowCoverageCandidate {
 #[derive(Clone)]
 pub struct ShellTaskbarWindow {
     pub hwnd: HWND,
+    pub dpi: u32,
     pub left: i32,
     pub top: i32,
     pub right: i32,
@@ -1599,8 +1600,13 @@ fn shell_taskbar_window_from_hwnd(hwnd: HWND, primary: bool) -> anyhow::Result<S
         let key = displayconfig_monitor_path(&device)
             .map(|path| taskbar_monitor_path_key(&path))
             .unwrap_or_else(|| device_key.clone());
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            anyhow::bail!("taskbar DPI unavailable");
+        }
         Ok(ShellTaskbarWindow {
             hwnd,
+            dpi,
             left: rect.x,
             top: rect.y,
             right: rect.x.saturating_add(rect.width),
@@ -1898,6 +1904,49 @@ mod tooltip_tests {
         assert_eq!(native_tooltip_registry_count_for_test(), baseline + 1);
 
         assert!(remove_window_tooltip_direct(HWND(parent as *mut core::ffi::c_void)).unwrap());
+        assert_eq!(native_tooltip_registry_count_for_test(), baseline);
+    }
+
+    #[test]
+    fn native_tooltip_details_resize_visible_bubble_and_release_resources() {
+        let _guard = tooltip_test_guard();
+        struct Probe(isize);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = remove_window_tooltip(raw_hwnd(self.0));
+                let _ = request_tooltip(|reply| TooltipCommand::DestroyProbe {
+                    hwnd: self.0,
+                    reply,
+                });
+            }
+        }
+        let baseline = native_tooltip_registry_count_for_test();
+        {
+            let probe =
+                Probe(request_tooltip(|reply| TooltipCommand::CreateProbe { reply }).unwrap());
+            let parent = raw_hwnd(probe.0);
+            set_window_tooltip(parent, "Codex").unwrap();
+            show_window_tooltip(parent, true).unwrap();
+            let tooltip = {
+                let registry = NATIVE_TOOLTIPS.lock().unwrap();
+                raw_hwnd(registry.get(&probe.0).unwrap().hwnd)
+            };
+            let mut short = RECT::default();
+            unsafe { GetWindowRect(tooltip, &mut short).unwrap() };
+            let details = "Codex - Ready\n5h - Remaining 72% - Used 28%\nResets: 2h 15m (9/14/2026, 2:15:00 PM)\nWeekly - Remaining 46% - Used 54%\nResets: 4d 0h (9/18/2026, 12:00:00 PM)\nLast record: 9/14/2026, 11:58:00 AM (2m ago)\nData: Exact\nPC: DESKTOP";
+            set_window_tooltip(parent, details).unwrap();
+            assert!(unsafe { IsWindowVisible(tooltip).as_bool() });
+            let mut expanded = RECT::default();
+            unsafe { GetWindowRect(tooltip, &mut expanded).unwrap() };
+            assert!(expanded.bottom - expanded.top > short.bottom - short.top);
+            assert!(expanded.right > expanded.left);
+            set_window_tooltip(parent, "Codex\nSign in required").unwrap();
+            let mut restored = RECT::default();
+            unsafe { GetWindowRect(tooltip, &mut restored).unwrap() };
+            assert!(restored.bottom - restored.top < expanded.bottom - expanded.top);
+            show_window_tooltip(parent, false).unwrap();
+            assert!(!unsafe { IsWindowVisible(tooltip).as_bool() });
+        }
         assert_eq!(native_tooltip_registry_count_for_test(), baseline);
     }
 

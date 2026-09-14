@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { barToolViewModel, barViewModel } from "./bar-state.js";
+import { formatLocalDateTime } from "./i18n.js";
 
 const settings = {
   warn_threshold: 70,
@@ -92,7 +93,13 @@ test("barToolViewModel renders remaining account limits, reset text, and lowest 
   assert.equal(vm.secondary.text, "주간 59%");
   assert.equal(vm.secondary.percent, 59);
   assert.equal(vm.secondary.reset, "3일 2시간");
-  assert.equal(vm.tooltip, "Claude\n5h 리셋 1시간 5분\n주간 리셋 3일 2시간");
+  assert.equal(vm.tooltip, [
+    "Claude · 경고", "5h · 잔여 12% · 사용 88%",
+    `초기화: 1시간 5분 (${formatLocalDateTime(status.primary.resets_at, "ko")})`,
+    "주간 · 잔여 59% · 사용 41%",
+    `초기화: 3일 2시간 (${formatLocalDateTime(status.secondary.resets_at, "ko")})`,
+    `마지막 기록: ${formatLocalDateTime(status.captured_at, "ko")} (방금)`,
+  ].join("\n"));
   assert.equal(vm.ariaLabel, "Claude, 5h 12%, 주간 59%");
   assert.equal(vm.secondary.arc, "212.4deg");
   assert.equal(vm.worst, "12");
@@ -115,14 +122,14 @@ test("barToolViewModel is null-safe and marks stale or empty tools", () => {
   assert.equal(vm.primary.arc, "0deg");
   assert.equal(vm.secondary.text, "주간 –");
   assert.equal(vm.worst, "–");
-  assert.equal(vm.tooltip, "Codex\n주간 –");
+  assert.match(vm.tooltip, /^Codex · 오래됨\n주간 · 잔여 – · 사용 –\n초기화: –\n마지막 기록:/);
   assert.equal(vm.ariaLabel, "Codex, 주간 –, 오래됨");
 
   const empty = barToolViewModel([], "claude", settings);
   assert.equal(empty.state, "empty");
   assert.equal(empty.severity, "empty");
   assert.equal(empty.primary.text, "5h –");
-  assert.equal(empty.tooltip, "Claude\n5h –\n주간 –");
+  assert.equal(empty.tooltip, "Claude · 기록 없음");
   assert.equal(empty.ariaLabel, "Claude, 5h –, 주간 –");
 });
 
@@ -182,7 +189,7 @@ test("barToolViewModel keeps a weekly-only Codex limit in the weekly slot", () =
   assert.equal(vm.secondary.percent, 84);
   assert.equal(vm.secondary.visible, true);
   assert.equal(vm.worst, "84");
-  assert.equal(vm.tooltip, "Codex\n주간 리셋 7일 0시간");
+  assert.match(vm.tooltip, /^Codex · 정상\n주간 · 잔여 84% · 사용 16%\n초기화: 7일 0시간/);
   assert.equal(vm.ariaLabel, "Codex, 주간 84%");
 });
 
@@ -204,7 +211,7 @@ test("barToolViewModel keeps a 5h-only Codex limit without a weekly placeholder"
   assert.equal(vm.primary.visible, true);
   assert.equal(vm.secondary.text, "");
   assert.equal(vm.secondary.visible, false);
-  assert.equal(vm.tooltip, "Codex\n5h 리셋 5시간 0분");
+  assert.match(vm.tooltip, /^Codex · 정상\n5h · 잔여 84% · 사용 16%\n초기화: 5시간 0분/);
   assert.equal(vm.ariaLabel, "Codex, 5h 84%");
 });
 
@@ -334,7 +341,7 @@ test("barToolViewModel localizes the weekly limit label", () => {
   const vm = barToolViewModel([], "codex", { ...settings, language: "en" });
 
   assert.equal(vm.secondary.text, "Weekly –");
-  assert.equal(vm.tooltip, "Codex\n5h –\nWeekly –");
+  assert.equal(vm.tooltip, "Codex · No records");
   assert.equal(vm.ariaLabel, "Codex, 5h –, Weekly –");
 
   const past = barToolViewModel(
@@ -348,7 +355,7 @@ test("barToolViewModel localizes the weekly limit label", () => {
     { ...settings, language: "en" },
     new Date("2026-07-07T00:00:00Z"),
   );
-  assert.equal(past.tooltip, "Codex\n5h Waiting for refresh");
+  assert.match(past.tooltip, /Resets: Waiting for refresh \(/);
 });
 
 test("barViewModel normalizes mode and ring settings", () => {
@@ -689,7 +696,8 @@ test("Grok renders one dynamic weekly or monthly limit without an empty sibling"
   assert.equal(grok.primary.text, "Weekly 66%");
   assert.equal(grok.primary.color, "#d9578b");
   assert.equal(grok.secondary.visible, false);
-  assert.equal(grok.tooltip, "Grok\nWeekly –");
+  assert.match(grok.tooltip, /^Grok · Ready\nWeekly · Remaining/);
+  assert.match(grok.tooltip, /Resets: –/);
   assert.doesNotMatch(grok.ariaLabel, /Monthly/);
 
   const monthly = barToolViewModel(
@@ -727,8 +735,8 @@ test("Cursor renders its two monthly pools and date-only reset without a fake co
   assert.equal(cursor.primary.reset, "Sep 21");
   assert.equal(cursor.primary.color, "#85847f");
   assert.equal(cursor.secondary.color, "#0891b2");
-  assert.match(cursor.tooltip, /Cursor Models · Resets Sep 21/);
-  assert.match(cursor.tooltip, /Other Models · Resets Sep 21/);
+  assert.match(cursor.tooltip, /Cursor Models · Remaining 99% · Used 1%\nResets: Sep 21/);
+  assert.match(cursor.tooltip, /Other Models · Remaining 100% · Used 0%\nResets: Sep 21/);
 });
 
 test("Cursor compact mode shows two percentages without labels and preserves full semantics", () => {
@@ -752,8 +760,8 @@ test("Cursor compact mode shows two percentages without labels and preserves ful
   assert.equal(korean.primary.labelKey, "limit.cursorModels");
   assert.equal(korean.secondary.labelKey, "limit.otherModels");
   assert.equal(korean.ariaLabel, "Cursor, 99%, 100%");
-  assert.match(korean.tooltip, /Cursor 모델 · 초기화 9월 21일/);
-  assert.match(korean.tooltip, /기타 모델 · 초기화 9월 21일/);
+  assert.match(korean.tooltip, /Cursor 모델 · 잔여 99% · 사용 1%\n초기화: 9월 21일/);
+  assert.match(korean.tooltip, /기타 모델 · 잔여 100% · 사용 0%\n초기화: 9월 21일/);
 
   const english = barToolViewModel(
     statuses,
@@ -764,6 +772,6 @@ test("Cursor compact mode shows two percentages without labels and preserves ful
   assert.equal(english.primary.text, "99%");
   assert.equal(english.secondary.text, "100%");
   assert.equal(english.ariaLabel, "Cursor, 99%, 100%");
-  assert.match(english.tooltip, /Cursor Models · Resets Sep 21/);
-  assert.match(english.tooltip, /Other Models · Resets Sep 21/);
+  assert.match(english.tooltip, /Cursor Models · Remaining 99% · Used 1%\nResets: Sep 21/);
+  assert.match(english.tooltip, /Other Models · Remaining 100% · Used 0%\nResets: Sep 21/);
 });

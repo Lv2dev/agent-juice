@@ -660,7 +660,7 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
   );
   assert.match(
     profileReconcile,
-    /Err\(err\)[\s\S]*set_stable_taskbar_topology\(&app, &\[\]\)[\s\S]*topology_stability\.rearm\(\)[\s\S]*continue/,
+    /Err\(err\)[\s\S]*set_stable_taskbar_topology\(&app, &TaskbarTopology::default\(\)\)[\s\S]*topology_stability\.rearm\(\)[\s\S]*continue/,
   );
   assert.match(
     rustLib,
@@ -677,7 +677,7 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
   );
   assert.match(
     rustLib,
-    /retain\(\|saved\| saved\.monitor_keys != item\.monitor_keys \|\| saved\.tool != item\.tool\)/,
+    /retain\(\|saved\| saved\.topology != item\.topology \|\| saved\.tool != item\.tool\)/,
   );
 });
 
@@ -1806,7 +1806,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.22"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.23"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

@@ -6,7 +6,7 @@ import {
   representativeByTool,
   toolBrandColor,
 } from "./panel-state.js";
-import { formatDuration, resolveLanguage, t } from "./i18n.js";
+import { formatDuration, formatLocalDateTime, resolveLanguage, t } from "./i18n.js";
 import { normalizeTextScale } from "./text-scale.js";
 
 const TOOL_LABELS = {
@@ -167,8 +167,9 @@ function shortReset(iso, now, language) {
   const resetAt = Date.parse(iso);
   if (!Number.isFinite(resetAt)) return "";
 
-  const minutes = Math.round((resetAt - now.getTime()) / 60000);
-  if (minutes <= 0) return t("reset.awaitingRefresh", language);
+  const remaining = resetAt - now.getTime();
+  if (remaining <= 0) return t("reset.awaitingRefresh", language);
+  const minutes = Math.ceil(remaining / 60000);
   return formatDuration(minutes, language);
 }
 
@@ -227,21 +228,66 @@ function taskbarTextColorOn(settings, key) {
   return boolSetting(settings?.taskbar_text_colors?.[`${key}_on`], false);
 }
 
-function tooltipResetLine(labelKey, reset, language, dateOnly = false) {
-  const label = t(labelKey, language);
-  if (!reset) return `${label} –`;
-  if (reset === t("reset.awaitingRefresh", language)) return `${label} ${reset}`;
-  if (dateOnly) return `${label} · ${t("reset.datePrefix", language)} ${reset}`;
-  return `${label} ${t("reset.prefix", language)} ${reset}`;
+function tooltipTimestamp(value) {
+  if (typeof value !== "string" || value.length > 64 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
 }
 
-function toolTooltip(label, primary, secondary, language) {
-  return [label, primary, secondary]
-    .filter((limit) => typeof limit === "string" || limit?.visible)
-    .map((limit) => typeof limit === "string"
-      ? limit
-      : tooltipResetLine(limit.labelKey, limit.reset, language, limit.resetDateOnly))
-    .join("\n");
+function tooltipResetLine(limit, raw, now, language) {
+  const prefix = t("reset.datePrefix", language);
+  if (limit.resetDateOnly) return `${prefix}: ${shortReset(raw?.resets_at, now, language) || "–"}`;
+  const time = tooltipTimestamp(raw?.resets_at);
+  if (time == null) return `${prefix}: –`;
+  const duration = time <= now.getTime()
+    ? t("reset.awaitingRefresh", language)
+    : formatDuration(Math.max(1, Math.ceil((time - now.getTime()) / 60_000)), language);
+  return `${prefix}: ${duration} (${formatLocalDateTime(time, language)})`;
+}
+
+function toolTooltip(label, primary, secondary, settings, now, status) {
+  const language = resolveLanguage(settings);
+  const severity = severityForStatus(status, settings);
+  const stateText = severity === "stale" ? t("state.stale", language) : t(`tooltip.${severity}`, language);
+  const lines = [`${label} · ${stateText}`];
+  for (const [limit, raw] of [[primary, status?.primary], [secondary, status?.secondary]]) {
+    if (!limit.visible || !raw) continue;
+    const displayed = displayPercentFromUsed(raw.used_percent, settings);
+    const usedFirst = normalizeDisplayBasis(settings.display_basis) === "used";
+    // Match the gauge's rounded value; its paired value then completes 100%.
+    const rounded = displayed == null ? null : usedFirst ? Math.round(displayed) : 100 - Math.round(displayed);
+    const pair = [
+      `${t("tooltip.remaining", language)} ${percentText(rounded == null ? null : 100 - rounded)}`,
+      `${t("tooltip.used", language)} ${percentText(rounded)}`,
+    ];
+    if (usedFirst) pair.reverse();
+    lines.push(`${t(limit.labelKey, language)} · ${pair.join(" · ")}`);
+    lines.push(tooltipResetLine(limit, raw, now, language));
+  }
+  if (status) {
+    const captured = tooltipTimestamp(status.captured_at);
+    let record = "–";
+    if (captured != null) {
+      const elapsed = now.getTime() - captured;
+      const age = elapsed < 0 ? t("tooltip.futureRecord", language)
+        : elapsed < 60_000 ? t("tooltip.justNow", language)
+          : `${formatDuration(Math.floor(elapsed / 60_000), language)} ${t("tooltip.ago", language)}`;
+      record = `${formatLocalDateTime(captured, language)} (${age})`;
+    }
+    lines.push(`${t("tooltip.record", language)}: ${record}`);
+    if (typeof status.approx === "boolean") {
+      lines.push(`${t("tooltip.data", language)}: ${t(status.approx ? "meta.approx" : "tooltip.exact", language)}`);
+    }
+    const pc = typeof status.pc_id === "string"
+      ? status.pc_id.replace(/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()
+      : "";
+    if (pc) lines.push(`PC: ${Array.from(pc).slice(0, 40).join("")}`);
+  }
+  return Array.from(lines.join("\n")).slice(0, 512).join("");
 }
 
 function toolAriaLabel(label, primary, secondary, state, language) {
@@ -349,7 +395,7 @@ export function barToolViewModel(
       primary,
       secondary,
       worst: "–",
-      tooltip: toolTooltip(base.label, primary, secondary, language),
+      tooltip: toolTooltip(base.label, primary, secondary, settings, now, status),
       ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
     };
   }
@@ -372,7 +418,7 @@ export function barToolViewModel(
     primary,
     secondary,
     worst: worstText(status.primary, status.secondary, settings),
-    tooltip: toolTooltip(base.label, primary, secondary, language),
+    tooltip: toolTooltip(base.label, primary, secondary, settings, now, status),
     ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
   };
 }

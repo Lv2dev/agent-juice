@@ -673,15 +673,25 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(fields.bar_mode.value, "quad");
 
   deferSaveResponses = false;
+  const savesBeforeDisplayRestore = savedInputs.length;
   eventHandlers["settings-updated"]?.({ payload: {
     ...persistedSettings, theme: "system", bar_mode: "full", indicator_style: "ring", bar_content_gap_px: 14,
-    taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"] }],
+    font_mode: "pretendard", bar_text_font_size_px: 14,
+    taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"], monitor_modes: [
+      { monitor_key: "monitor-a", width: 3840, height: 2160, dpi: 144 },
+    ] }],
   } });
+  assert.equal(fields.font_mode.value, "pretendard", "profile restoration hydrates the font control");
+  assert.equal(fields.bar_text_font_size_px.value, "14", "profile restoration hydrates text size");
+  assert.equal(savedInputs.length, savesBeforeDisplayRestore, "restoring a profile must not trigger autosave");
   fields.theme.value = "dark";
   listeners.change?.({ target: fields.theme });
   eventHandlers["settings-updated"]?.({ payload: {
     ...persistedSettings, bar_mode: "compact", indicator_style: "bar", bar_content_gap_px: 3.1,
-    taskbar_layout_profiles: [{ monitor_keys: ["monitor-b"] }],
+    font_mode: "system", bar_text_font_size_px: 12,
+    taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"], monitor_modes: [
+      { monitor_key: "monitor-a", width: 1920, height: 1080, dpi: 96 },
+    ] }],
   } });
   await new Promise((resolve) => setTimeout(resolve, 160));
   const topologyEdit = saveRequests.at(-1);
@@ -690,8 +700,12 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(topologyEdit.input.bar_mode, topologyEdit.editBaseline.bar_mode,
     "unchanged fields must remain distinguishable from actual user edits");
   assert.equal(topologyEdit.editBaseline.bar_content_gap_px, 14);
-  assert.deepEqual(topologyEdit.editTopology, ["monitor-a"],
-    "a dirty form must keep the topology where the edit started");
+  assert.equal(topologyEdit.editBaseline.font_mode, "pretendard");
+  assert.equal(topologyEdit.editBaseline.bar_text_font_size_px, 14);
+  assert.deepEqual(topologyEdit.editTopology, {
+    monitor_keys: ["monitor-a"],
+    monitor_modes: [{ monitor_key: "monitor-a", width: 3840, height: 2160, dpi: 144 }],
+  }, "a dirty form must keep the resolution and DPI where the edit started, even on the same monitor");
   persistedSettings = { ...savedInputs.at(-1), show_claude: true, show_codex: true };
   failNextSave = true;
   fields.show_claude.checked = false;
