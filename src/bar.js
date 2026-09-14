@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS } from "./panel-state.js";
-import { barViewModel } from "./bar-state.js";
+import { barToolViewModel, barViewModel } from "./bar-state.js";
 import { applyFont } from "./font.js";
 import { createTextScaleState, fittedRingNumberSize, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations } from "./i18n.js";
@@ -24,6 +24,7 @@ const CONTENT_WIDTH_RETRY_DELAY_MS = 250;
 const CONTENT_WIDTH_MAX_RETRIES = 20;
 let lastNativeTooltip = "";
 let pendingNativeTooltip = null;
+let tooltipClockTimer = null;
 let contentWidthSyncTimer = null;
 let lastRequestedContentWidth = "";
 let contentWidthRetryKey = "";
@@ -73,10 +74,16 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 document.addEventListener("mouseout", (event) => {
-  if (!event.relatedTarget) scheduleRefreshMenuClose();
+  if (!event.relatedTarget) {
+    scheduleRefreshMenuClose();
+    stopTooltipClock();
+  }
 });
 
-document.addEventListener("mouseover", cancelRefreshMenuClose);
+document.addEventListener("mouseover", () => {
+  cancelRefreshMenuClose();
+  startTooltipClock();
+});
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") hideRefreshMenu();
@@ -475,6 +482,28 @@ function observeTaskbarContentSize() {
   activeUnlisteners.add(() => removeDpiListener?.());
 }
 
+function refreshTooltipSnapshot() {
+  if (!CURRENT_TOOL || listenersDisposed) return;
+  const vm = barToolViewModel(statuses, CURRENT_TOOL, settings, new Date(), {
+    startupLoading: startupStatusLoading,
+    collectionHealth,
+  });
+  pendingNativeTooltip = { tool: CURRENT_TOOL, text: vm.tooltip };
+  syncNativeTooltip();
+}
+
+function startTooltipClock() {
+  if (!CURRENT_TOOL || listenersDisposed || tooltipClockTimer) return;
+  refreshTooltipSnapshot();
+  tooltipClockTimer = setInterval(refreshTooltipSnapshot, 30_000);
+  tooltipClockTimer?.unref?.();
+}
+
+function stopTooltipClock() {
+  if (tooltipClockTimer) clearInterval(tooltipClockTimer);
+  tooltipClockTimer = null;
+}
+
 function syncNativeTooltip() {
   if (refreshMenuState !== MENU_STATES.CLOSED || !pendingNativeTooltip) return;
   const { tool, text } = pendingNativeTooltip;
@@ -637,6 +666,7 @@ function unlistenSafely(unlisten) {
 function cleanupListeners() {
   if (listenersDisposed) return;
   listenersDisposed = true;
+  stopTooltipClock();
   systemTextScale.dispose();
   listenerLifecycleGeneration += 1;
   clearTimeout(contentWidthSyncTimer);

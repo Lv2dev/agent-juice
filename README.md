@@ -97,6 +97,8 @@ Juice에는 **4가지 바 모드**가 있습니다.
 - 재부팅이나 첫 실행의 최초 수집 중에는 `로딩 중`을 표시합니다. 지난 리셋 시간이 남아 있고 새 한도를 아직 받지 못한 경우에는 `갱신 대기`로 구분합니다.
 - Windows가 잠기거나 모든 디스플레이가 꺼지면 자동 주기 수집을 쉬고, 잠금 해제 또는 화면 ON 시 즉시 한 번 갱신합니다. 사용자가 누른 수동 새로고침은 그대로 동작합니다.
 - 바에 마우스를 올리면 도구명과 실제로 존재하는 5h·주간·월간 한도의 초기화까지 남은 시간을 보여줍니다.
+- hover에는 기간별 **잔여량과 사용량**, 초기화 날짜·시각, 마지막 기록 시각·경과 시간, 정상·경고·위험·오래됨 상태와 근사치 여부, PC 표시명도 함께 표시합니다. 설정한 표시 기준을 먼저 보여주며, 날짜만 제공되는 한도에 임의의 시각을 붙이지 않습니다.
+- 마지막 기록은 데이터에 담긴 기록 시각이며 최근 네트워크 조회 시각과는 다를 수 있습니다. 로그인 필요·최초 로딩에서는 이전 수치를 노출하지 않고, hover 자체가 추가 사용량 조회나 외부 프로세스를 실행하지 않습니다.
 - 바 우클릭 메뉴의 `새로고침`은 일반 캐시를 우회해 로컬 수집을 다시 실행합니다.
 - 트레이 메뉴에서 전체 바 표출을 일시중지하거나 재개할 수 있습니다.
 
@@ -111,6 +113,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡아 다른 모니터의 작업표시줄로 옮길 수 있습니다. 기본으로 켜진 **화면 조합별 프로필**은 현재 연결된 모니터 구성을 구분해 도구별 대상 모니터와 작업표시줄 상대 위치를 따로 저장합니다. **표시 구성과 크기·간격 기억**도 기본으로 켜져 있어 노트북 단독, 집, 사무실 조합마다 넉넉/컴팩트/이중원/링4, 원/가로 바, 표현, 링·글자 크기와 간격을 복원합니다.
 
 - 최근 사용한 모니터 조합을 최대 16개까지 유지합니다.
+- 같은 모니터 조합이라도 **해상도와 Windows 디스플레이 배율**이 다르면 별도 환경으로 기억합니다. 표시 구성 기억이 켜져 있으면 폰트도 함께 복원하며, 기존 모니터 ID 기반 프로필은 새 환경의 초기값으로 보존합니다. 밝게/어둡게 테마와 Windows 접근성 텍스트 크기는 이 환경 프로필로 변경하지 않습니다.
 - 모니터 연결이 바뀌는 동안의 일시적인 구성은 저장하지 않아 기존 배치를 보호합니다.
 - **색상도 기억**은 별도 옵션이며 기본값은 꺼짐입니다. 켜면 팔레트와 도구·기간·글자·트랙 색상도 조합별로 복원합니다.
 - 앱 테마, 언어, 수집주기, 임계값, 도구 활성화와 로그인·수집 상태는 화면 조합과 무관하게 유지됩니다.
@@ -366,6 +369,8 @@ Juice provides **four bar modes**.
 - During the first collection after startup or reboot, the bar shows `Loading`. If a stored reset time has passed but a new limit has not arrived yet, it shows `Waiting for refresh`.
 - Automatic polling pauses while Windows is locked or every display is off, then refreshes once immediately after unlock or display-on. Explicit manual refresh remains available.
 - Hovering a bar shows the tool name and time remaining until each available 5-hour, weekly, or monthly limit resets.
+- The tooltip also includes **remaining and used percentages**, reset dates and times, the last record timestamp and age, ready/warning/danger/stale state, approximation status, and the PC display name. Your selected display basis comes first. Date-only limits keep their original precision.
+- The last record timestamp comes from the data and may differ from the latest network check. Sign-in-required and initial loading states hide previous values. Hovering does not trigger additional usage collection or start external processes.
 - The taskbar context menu `Refresh` action bypasses the normal cache and recollects local status.
 - Pause or resume all taskbar bars from the Juice tray menu.
 
@@ -380,6 +385,7 @@ Juice provides **four bar modes**.
 Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar can be dragged to another monitor's taskbar without moving the others. **Profiles by monitor setup** stores each tool's target monitor and relative taskbar position for every connected-monitor setup. **Remember presentation, size, and spacing** is also on by default, restoring Full/Compact/Dual/Quad, rings or horizontal bars, effects, ring and text sizes, and spacing for familiar laptop-only, home, or office setups.
 
 - Juice keeps up to 16 recently used monitor setups.
+- The same monitors at a different **resolution or Windows display scale** are remembered as separate environments. Presentation memory also restores the font, and existing monitor-ID-only profiles remain available as starting values. Light/dark theme and Windows Accessibility text size are not changed by these profiles.
 - Transient configurations observed while monitors are connecting are not saved over a stable layout.
 - **Remember colors too** is a separate opt-in setting. It restores palette and tool, period, text, and track colors per setup.
 - App theme, language, collection interval, thresholds, tool activation, and provider login or collection state remain global.

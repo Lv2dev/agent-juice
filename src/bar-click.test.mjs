@@ -53,6 +53,91 @@ function toolStub() {
   };
 }
 
+test("hover refreshes cached tooltip time without collecting and disposes its clock", async () => {
+  const RealDate = global.Date;
+  const realSetInterval = global.setInterval;
+  const realClearInterval = global.clearInterval;
+  const intervals = new Map();
+  const documentEvents = {};
+  const windowEvents = {};
+  const appEvents = {};
+  const invocations = [];
+  let clock = RealDate.parse("2026-09-14T03:00:00Z");
+  const root = { dataset: {}, style: { setProperty() {} } };
+  const tool = toolStub();
+  global.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [clock])); }
+    static now() { return clock; }
+  };
+  global.setInterval = (callback, delay) => {
+    const id = { unref() {} };
+    intervals.set(id, { callback, delay });
+    return id;
+  };
+  global.clearInterval = id => intervals.delete(id);
+  global.window = {
+    location: { search: "?tool=codex" },
+    addEventListener(name, callback) { windowEvents[name] = callback; },
+    __TAURI__: {
+      event: { async listen(name, callback) { appEvents[name] = callback; return () => {}; } },
+      core: { async invoke(command, args) {
+        invocations.push({ command, args });
+        if (command === "get_settings") return { language: "en" };
+        if (command === "get_status") return [{ tool: "codex", captured_at: "2026-09-14T02:58:00Z", primary: { used_percent: 20, resets_at: "2026-09-14T04:00:00Z" }, secondary: null, session: { active: true } }];
+        if (command === "get_collection_health") return {};
+        return null;
+      } },
+    },
+  };
+  global.document = {
+    addEventListener(name, callback) { documentEvents[name] = callback; },
+    querySelector(selector) { return selector === "#bar" ? root : selector === '[data-tool="codex"]' ? tool : null; },
+  };
+  try {
+    await import(`./bar.js?test=${RealDate.now()}-tooltip-clock`);
+    await new Promise(resolve => setImmediate(resolve));
+    const reads = () => invocations.filter(item => item.command.startsWith("get_")).length;
+    const text = () => invocations.filter(item => item.command === "set_taskbar_tooltip").at(-1)?.args.text;
+    const initialReads = reads();
+    assert.match(text(), /2m ago/);
+    assert.equal(intervals.size, 0);
+    clock += 61000;
+    documentEvents.mouseover({});
+    assert.match(text(), /3m ago/);
+    assert.equal(intervals.size, 1);
+    const timer = [...intervals.values()][0];
+    assert.equal(timer.delay, 30000);
+    documentEvents.mouseover({});
+    assert.equal(intervals.size, 1);
+    clock += 61000;
+    timer.callback();
+    assert.match(text(), /4m ago/);
+    assert.equal(reads(), initialReads);
+    assert.ok(!invocations.some(item => item.command === "refresh_status"));
+    appEvents["collection-health-updated"]({ payload: { codex: "login_required" } });
+    assert.equal(text(), "Codex\nSign in required");
+    timer.callback();
+    assert.equal(text(), "Codex\nSign in required");
+    assert.equal(tool.getAttribute("title"), null);
+    documentEvents.mouseout({ relatedTarget: null });
+    assert.equal(intervals.size, 0);
+    documentEvents.mouseover({});
+    assert.equal(intervals.size, 1);
+    windowEvents.pagehide();
+    assert.equal(intervals.size, 0);
+    const count = invocations.length;
+    timer.callback();
+    assert.equal(invocations.length, count);
+  } finally {
+    windowEvents.pagehide?.();
+    global.Date = RealDate;
+    global.setInterval = realSetInterval;
+    global.clearInterval = realClearInterval;
+    delete global.window;
+    delete global.document;
+  }
+});
+
 test("bar render writes severity attributes for animation states", async () => {
   const root = { dataset: {} };
   const tools = {
@@ -1173,10 +1258,8 @@ test("bar render exposes ring CSS variables on each tool for quad mode", async (
   assert.equal(tools.claude.style.getPropertyValue("--secondary-percent"), "59%");
   assert.equal(tools.claude.textContentFor(".quad-primary-number"), "12");
   assert.equal(tools.claude.textContentFor(".quad-secondary-number"), "59");
-  assert.deepEqual(tooltipCalls.at(-1), {
-    tool: "claude",
-    text: "Claude\n5h –\n주간 –",
-  });
+  assert.equal(tooltipCalls.at(-1).tool, "claude");
+  assert.match(tooltipCalls.at(-1).text, /^Claude · 경고\n5h · 잔여 12% · 사용 88%\n초기화: –\n주간 · 잔여 59% · 사용 41%\n초기화: –\n마지막 기록:/);
   delete global.window;
   delete global.document;
 });

@@ -36,7 +36,7 @@ let isHydrating = false;
 let hasLoadedSettings = false;
 let localRevision = 0;
 let savedRevision = 0;
-let editSession = { baseline: null, topology: [] };
+let editSession = { baseline: null, topology: { monitor_keys: [], monitor_modes: [] } };
 let saveQueue = Promise.resolve();
 let currentDisplayBasis = "remaining";
 let currentUpdateStatus = null;
@@ -493,7 +493,11 @@ function fillForm(settings) {
   renderUpdateStatus(currentUpdateStatus);
   editSession = {
     baseline: payloadFromEntries(new FormData(form)),
-    topology: [...(settings?.taskbar_layout_profiles?.at(-1)?.monitor_keys ?? [])],
+    topology: {
+      monitor_keys: [...(settings?.taskbar_layout_profiles?.at(-1)?.monitor_keys ?? [])],
+      monitor_modes: (settings?.taskbar_layout_profiles?.at(-1)?.monitor_modes ?? [])
+        .map((mode) => ({ ...mode })),
+    },
   };
   isHydrating = false;
 }

@@ -124,6 +124,8 @@ pub struct TaskbarPlacement {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TaskbarPresentationProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_mode: Option<String>,
     pub bar_mode: String,
     pub full_reset_time_on: bool,
     pub limit_order: String,
@@ -147,6 +149,7 @@ pub struct TaskbarPresentationProfile {
 impl Default for TaskbarPresentationProfile {
     fn default() -> Self {
         Self {
+            font_mode: None,
             bar_mode: default_bar_mode(),
             full_reset_time_on: default_full_reset_time_on(),
             limit_order: default_limit_order(),
@@ -193,10 +196,75 @@ impl Default for TaskbarAppearanceProfile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TaskbarLayoutProfile {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TaskbarMonitorMode {
+    pub monitor_key: String,
+    pub width: i32,
+    pub height: i32,
+    pub dpi: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskbarTopology {
     #[serde(default)]
     pub monitor_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitor_modes: Vec<TaskbarMonitorMode>,
+}
+
+impl From<Vec<String>> for TaskbarTopology {
+    fn from(monitor_keys: Vec<String>) -> Self {
+        Self {
+            monitor_keys: canonical_taskbar_monitor_keys(monitor_keys),
+            monitor_modes: Vec::new(),
+        }
+    }
+}
+
+impl TaskbarTopology {
+    pub fn from_modes(monitor_modes: Vec<TaskbarMonitorMode>) -> Self {
+        Self {
+            monitor_keys: monitor_modes
+                .iter()
+                .map(|mode| mode.monitor_key.clone())
+                .collect(),
+            monitor_modes,
+        }
+        .canonicalized()
+    }
+
+    pub fn canonicalized(mut self) -> Self {
+        self.monitor_keys = canonical_taskbar_monitor_keys(self.monitor_keys);
+        self.monitor_modes.sort();
+        self.monitor_modes.dedup();
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.monitor_keys.is_empty()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.is_empty()
+            && (self.monitor_modes.is_empty()
+                || (self.monitor_modes.len() == self.monitor_keys.len()
+                    && self
+                        .monitor_modes
+                        .iter()
+                        .zip(&self.monitor_keys)
+                        .all(|(mode, key)| {
+                            &mode.monitor_key == key
+                                && mode.width > 0
+                                && mode.height > 0
+                                && mode.dpi > 0
+                        })))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskbarLayoutProfile {
+    #[serde(flatten)]
+    pub topology: TaskbarTopology,
     #[serde(default)]
     pub claude: Option<TaskbarPlacement>,
     #[serde(default)]
@@ -351,6 +419,7 @@ pub struct Settings {
 impl TaskbarPresentationProfile {
     pub fn from_settings(settings: &Settings) -> Self {
         Self {
+            font_mode: Some(settings.font_mode.clone()),
             bar_mode: settings.bar_mode.clone(),
             full_reset_time_on: settings.full_reset_time_on,
             limit_order: settings.limit_order.clone(),
@@ -373,6 +442,9 @@ impl TaskbarPresentationProfile {
     }
 
     pub fn apply_to(&self, settings: &mut Settings) {
+        if let Some(font_mode) = &self.font_mode {
+            settings.font_mode = font_mode.clone();
+        }
         settings.bar_mode = self.bar_mode.clone();
         settings.full_reset_time_on = self.full_reset_time_on;
         settings.limit_order = self.limit_order.clone();
@@ -836,14 +908,18 @@ fn default_tool_threshold_color_on() -> bool {
 fn normalize_taskbar_layout_profile(
     mut profile: TaskbarLayoutProfile,
 ) -> Option<TaskbarLayoutProfile> {
-    profile.monitor_keys = canonical_taskbar_monitor_keys(profile.monitor_keys);
-    if profile.monitor_keys.is_empty() {
+    profile.topology = profile.topology.canonicalized();
+    if !profile.topology.is_valid() {
         return None;
     }
 
     let normalize_placement = |placement: Option<TaskbarPlacement>| {
         placement.and_then(|mut placement| {
-            if !profile.monitor_keys.contains(&placement.monitor_key) {
+            if !profile
+                .topology
+                .monitor_keys
+                .contains(&placement.monitor_key)
+            {
                 return None;
             }
             placement.offset_ratio = clamp_ratio(placement.offset_ratio);
@@ -855,6 +931,9 @@ fn normalize_taskbar_layout_profile(
     profile.grok = normalize_placement(profile.grok);
     profile.cursor = normalize_placement(profile.cursor);
     if let Some(presentation) = &mut profile.presentation {
+        if let Some(mode) = &mut presentation.font_mode {
+            *mode = normalize_font_mode(mode).into();
+        }
         presentation.bar_mode = normalize_bar_mode(&presentation.bar_mode).into();
         presentation.limit_order = normalize_limit_order(&presentation.limit_order).into();
         presentation.indicator_style =
@@ -1592,7 +1671,7 @@ impl Settings {
             };
             if let Some(index) = normalized
                 .iter()
-                .position(|saved: &TaskbarLayoutProfile| saved.monitor_keys == profile.monitor_keys)
+                .position(|saved: &TaskbarLayoutProfile| saved.topology == profile.topology)
             {
                 let previous = normalized.remove(index);
                 if profile.claude.is_none() {
@@ -1622,23 +1701,39 @@ impl Settings {
         self.taskbar_layout_profiles = normalized;
     }
 
-    pub fn taskbar_layout_profile(&self, monitor_keys: &[String]) -> Option<&TaskbarLayoutProfile> {
+    pub fn taskbar_layout_profile(
+        &self,
+        topology: &TaskbarTopology,
+    ) -> Option<&TaskbarLayoutProfile> {
         self.taskbar_layout_profiles
             .iter()
-            .find(|profile| profile.monitor_keys == monitor_keys)
+            .find(|profile| &profile.topology == topology)
     }
 
-    pub fn taskbar_layout_profile_is_most_recent(&self, monitor_keys: &[String]) -> bool {
+    pub fn taskbar_layout_profile_is_most_recent(&self, topology: &TaskbarTopology) -> bool {
         self.taskbar_layout_profiles
             .last()
-            .is_some_and(|profile| profile.monitor_keys == monitor_keys)
+            .is_some_and(|profile| &profile.topology == topology)
     }
 
-    pub fn touch_taskbar_layout_profile(&mut self, monitor_keys: &[String]) -> bool {
+    pub fn inherit_legacy_taskbar_layout_profile(&mut self, topology: &TaskbarTopology) -> bool {
+        if topology.monitor_modes.is_empty() || self.taskbar_layout_profile(topology).is_some() {
+            return false;
+        }
+        let legacy = TaskbarTopology::from(topology.monitor_keys.clone());
+        let Some(mut profile) = self.taskbar_layout_profile(&legacy).cloned() else {
+            return false;
+        };
+        // Keep the old profile as a fallback for other, not-yet-seen display modes.
+        profile.topology = topology.clone();
+        self.upsert_taskbar_layout_profile(profile)
+    }
+
+    pub fn touch_taskbar_layout_profile(&mut self, topology: &TaskbarTopology) -> bool {
         let Some(index) = self
             .taskbar_layout_profiles
             .iter()
-            .position(|profile| profile.monitor_keys == monitor_keys)
+            .position(|profile| &profile.topology == topology)
         else {
             return false;
         };
@@ -1657,7 +1752,7 @@ impl Settings {
         if let Some(index) = self
             .taskbar_layout_profiles
             .iter()
-            .position(|saved| saved.monitor_keys == profile.monitor_keys)
+            .position(|saved| saved.topology == profile.topology)
         {
             let previous = self.taskbar_layout_profiles.remove(index);
             if profile.claude.is_none() {
@@ -1722,7 +1817,10 @@ impl Settings {
             replace_key(&mut self.cursor_taskbar_monitor_key, replacements);
         }
         for profile in &mut self.taskbar_layout_profiles {
-            for key in &mut profile.monitor_keys {
+            for mode in &mut profile.topology.monitor_modes {
+                replace_key(&mut mode.monitor_key, replacements);
+            }
+            for key in &mut profile.topology.monitor_keys {
                 if !key.is_empty() {
                     replace_key(key, replacements);
                 }
@@ -2527,6 +2625,91 @@ mod parser_tests {
     }
 
     #[test]
+    fn monitor_modes_are_canonical_complete_and_keep_different_scales_separate() {
+        let a = super::TaskbarMonitorMode {
+            monitor_key: "monitor-a".into(),
+            width: 3840,
+            height: 2160,
+            dpi: 144,
+        };
+        let b = super::TaskbarMonitorMode {
+            monitor_key: "monitor-b".into(),
+            width: 1920,
+            height: 1080,
+            dpi: 96,
+        };
+        let ordered = super::TaskbarTopology::from_modes(vec![a.clone(), b.clone()]);
+        assert!(ordered.is_valid());
+        assert_eq!(
+            ordered,
+            super::TaskbarTopology::from_modes(vec![b.clone(), a.clone(), a.clone()])
+        );
+        let mut incomplete = ordered.clone();
+        incomplete.monitor_modes.pop();
+        assert!(!incomplete.is_valid());
+        let mut zero_dpi = a.clone();
+        zero_dpi.dpi = 0;
+        assert!(!super::TaskbarTopology::from_modes(vec![zero_dpi]).is_valid());
+        let mut zero_width = a.clone();
+        zero_width.width = 0;
+        assert!(!super::TaskbarTopology::from_modes(vec![zero_width]).is_valid());
+        let mut changed = a.clone();
+        changed.dpi = 96;
+        assert_ne!(
+            ordered,
+            super::TaskbarTopology::from_modes(vec![changed.clone(), b])
+        );
+        assert!(
+            !super::TaskbarTopology::from_modes(vec![a, changed]).is_valid(),
+            "conflicting modes for one monitor cannot form a profile"
+        );
+    }
+
+    #[test]
+    fn monitor_alias_migration_preserves_mode_variants_and_serialized_profile_shape() {
+        let mut settings = Settings::default();
+        for dpi in [96, 144] {
+            let profile: TaskbarLayoutProfile = serde_json::from_value(serde_json::json!({
+                "monitor_keys": ["device:display1"],
+                "monitor_modes": [{ "monitor_key": "device:display1", "width": 3840, "height": 2160, "dpi": dpi }],
+                "claude": { "monitor_key": "device:display1", "offset_ratio": 0.2 },
+                "presentation": { "font_mode": "pretendard" }
+            })).unwrap();
+            assert!(settings.upsert_taskbar_layout_profile(profile));
+        }
+        assert!(settings.migrate_taskbar_monitor_key_aliases(&[(
+            "device:display1".into(),
+            "monitor-path:stable".into()
+        )]));
+        assert_eq!(settings.taskbar_layout_profiles.len(), 2);
+        for profile in &settings.taskbar_layout_profiles {
+            assert_eq!(profile.topology.monitor_keys, ["monitor-path:stable"]);
+            assert_eq!(
+                profile.topology.monitor_modes[0].monitor_key,
+                "monitor-path:stable"
+            );
+            assert_eq!(
+                profile.claude.as_ref().unwrap().monitor_key,
+                "monitor-path:stable"
+            );
+            let json = serde_json::to_value(profile).unwrap();
+            assert!(
+                json.get("topology").is_none(),
+                "existing JSON monitor_keys stays at the profile root"
+            );
+            assert_eq!(json["monitor_keys"][0], "monitor-path:stable");
+            assert_eq!(json["presentation"]["font_mode"], "pretendard");
+        }
+        let invalid: TaskbarLayoutProfile = serde_json::from_value(serde_json::json!({
+            "monitor_keys": ["monitor-path:stable"],
+            "monitor_modes": [{ "monitor_key": "other-monitor", "width": 3840, "height": 2160, "dpi": 144 }],
+            "claude": { "monitor_key": "monitor-path:stable", "offset_ratio": 0.8 }
+        })).unwrap();
+        assert!(!settings.upsert_taskbar_layout_profile(invalid));
+        assert_eq!(settings.taskbar_layout_profiles.len(), 2);
+    }
+
+    #[test]
     fn taskbar_profile_snapshots_are_normalized_with_legacy_safe_defaults() {
         let mut presentation = TaskbarPresentationProfile {
             bar_mode: "unknown".into(),
@@ -2552,7 +2735,7 @@ mod parser_tests {
         };
         let mut settings = Settings {
             taskbar_layout_profiles: vec![TaskbarLayoutProfile {
-                monitor_keys: vec!["monitor-a".into()],
+                topology: vec!["monitor-a".into()].into(),
                 claude: Some(TaskbarPlacement {
                     monitor_key: "monitor-a".into(),
                     offset_ratio: 0.5,
@@ -2704,7 +2887,7 @@ mod parser_tests {
         let mut settings = Settings::try_load_from(&path).unwrap();
         assert_eq!(settings.taskbar_layout_profiles.len(), 1);
         let loaded = &settings.taskbar_layout_profiles[0];
-        assert_eq!(loaded.monitor_keys, ["monitor-a", "monitor-b"]);
+        assert_eq!(loaded.topology.monitor_keys, ["monitor-a", "monitor-b"]);
         assert_eq!(loaded.claude.as_ref().unwrap().offset_ratio, 1.0);
         assert_eq!(loaded.codex.as_ref().unwrap().offset_ratio, 0.0);
         assert!(loaded.presentation.is_none());
@@ -2714,7 +2897,7 @@ mod parser_tests {
             let monitor_key = format!("monitor-{index:02}");
             assert!(
                 settings.upsert_taskbar_layout_profile(TaskbarLayoutProfile {
-                    monitor_keys: vec![monitor_key.clone()],
+                    topology: vec![monitor_key.clone()].into(),
                     claude: Some(TaskbarPlacement {
                         monitor_key,
                         offset_ratio: 0.5,
@@ -2735,16 +2918,16 @@ mod parser_tests {
         }
         assert_eq!(settings.taskbar_layout_profiles.len(), 16);
         assert_eq!(
-            settings.taskbar_layout_profiles[0].monitor_keys,
+            settings.taskbar_layout_profiles[0].topology.monitor_keys,
             ["monitor-02"]
         );
         assert_eq!(
-            settings.taskbar_layout_profiles[15].monitor_keys,
+            settings.taskbar_layout_profiles[15].topology.monitor_keys,
             ["monitor-17"]
         );
-        assert!(settings.touch_taskbar_layout_profile(&["monitor-02".into()]));
-        assert!(settings.taskbar_layout_profile_is_most_recent(&["monitor-02".into()]));
-        assert!(!settings.touch_taskbar_layout_profile(&["monitor-02".into()]));
+        assert!(settings.touch_taskbar_layout_profile(&vec!["monitor-02".into()].into()));
+        assert!(settings.taskbar_layout_profile_is_most_recent(&vec!["monitor-02".into()].into()));
+        assert!(!settings.touch_taskbar_layout_profile(&vec!["monitor-02".into()].into()));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2757,7 +2940,7 @@ mod parser_tests {
             codex_taskbar_target_initialized: false,
             taskbar_layout_profiles: vec![
                 TaskbarLayoutProfile {
-                    monitor_keys: vec!["device:display1".into()],
+                    topology: vec!["device:display1".into()].into(),
                     claude: Some(TaskbarPlacement {
                         monitor_key: "device:display1".into(),
                         offset_ratio: 0.2,
@@ -2775,7 +2958,7 @@ mod parser_tests {
                     }),
                 },
                 TaskbarLayoutProfile {
-                    monitor_keys: vec!["monitor-path:primary".into()],
+                    topology: vec!["monitor-path:primary".into()].into(),
                     claude: None,
                     codex: Some(TaskbarPlacement {
                         monitor_key: "monitor-path:primary".into(),
@@ -2799,7 +2982,7 @@ mod parser_tests {
         assert_eq!(settings.codex_taskbar_monitor_key, "");
         assert_eq!(settings.taskbar_layout_profiles.len(), 1);
         assert_eq!(
-            settings.taskbar_layout_profiles[0].monitor_keys,
+            settings.taskbar_layout_profiles[0].topology.monitor_keys,
             vec!["monitor-path:primary".to_string()]
         );
         assert_eq!(
