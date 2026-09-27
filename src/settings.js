@@ -733,7 +733,13 @@ async function rollbackFailedSave(revision, error) {
   } catch {
     // Keep the original save error when the recovery read also fails.
   }
-  if (revision === localRevision) setStatus(String(error), "error");
+  if (revision === localRevision) {
+    const message = error instanceof Error ? error.message : String(error);
+    const displayChanged = message === "monitor layout changed; settings reloaded, please retry the edit";
+    setStatus(recovered && displayChanged
+      ? t("status.displayChangedRetry", currentLanguageSettings())
+      : String(error), "error");
+  }
   if (!recovered) throw error;
 }
 

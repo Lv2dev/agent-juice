@@ -35,6 +35,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   let deferSaveResponses = false;
   let deferClearResponse = false;
   let failNextSave = false;
+  let nextSaveError = null;
+  let failSettingsRead = false;
   let checkForUpdatesCalls = 0;
   let installUpdateCalls = 0;
   let resolveInstallUpdate = null;
@@ -269,7 +271,13 @@ test("settings form auto-saves changed values without a submit button", async ()
         },
         async invoke(command, args) {
           invokedCommands.push(command);
-          if (command === "get_settings") return persistedSettings;
+          if (command === "get_settings") {
+            if (failSettingsRead) {
+              failSettingsRead = false;
+              throw new Error("settings unavailable");
+            }
+            return persistedSettings;
+          }
           if (command === "get_update_status") {
             return {
               status: "update_available",
@@ -290,6 +298,11 @@ test("settings form auto-saves changed values without a submit button", async ()
           if (command === "save_settings") {
             saveRequests.push(args);
             savedInputs.push(args.input);
+            if (nextSaveError !== null) {
+              const error = nextSaveError;
+              nextSaveError = null;
+              throw error;
+            }
             if (failNextSave) {
               failNextSave = false;
               throw new Error("Claude statusline conflict");
@@ -714,6 +727,51 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fields.show_claude.checked, true, "a failed collection toggle must roll back");
   assert.match(statusEl.textContent, /Claude statusline conflict/);
+
+  const displayConflict = "monitor layout changed; settings reloaded, please retry the edit";
+  const beforeTopology = {
+    monitor_keys: ["monitor-a"],
+    monitor_modes: [{ monitor_key: "monitor-a", width: 3840, height: 2160, dpi: 144 }],
+  };
+  const afterTopology = {
+    monitor_keys: ["monitor-a"],
+    monitor_modes: [{ monitor_key: "monitor-a", width: 1920, height: 1080, dpi: 96 }],
+  };
+  for (const language of ["ko", "en"]) {
+    persistedSettings = { ...persistedSettings, language, bar_mode: "full", taskbar_layout_profiles: [beforeTopology] };
+    eventHandlers["settings-updated"]({ payload: persistedSettings });
+    const beforeSaves = saveRequests.length;
+    nextSaveError = language === "ko" ? displayConflict : new Error(displayConflict);
+    fields.bar_mode.value = "compact";
+    listeners.change({ target: fields.bar_mode });
+    persistedSettings = { ...persistedSettings, taskbar_layout_profiles: [afterTopology] };
+    eventHandlers["settings-updated"]({ payload: persistedSettings });
+    assert.equal(fields.bar_mode.value, "compact", "a display event must not silently overwrite dirty input");
+    await new Promise(resolve => setTimeout(resolve, 180));
+    assert.equal(fields.bar_mode.value, "full", "a rejected edit restores the persisted display profile");
+    assert.equal(statusEl.textContent, language === "ko" ? "화면 변경됨 · 다시 선택" : "Display change: retry");
+    assert.equal(statusHost.dataset.state, "error");
+    assert.deepEqual(saveRequests.at(-1).editTopology, beforeTopology);
+    await new Promise(resolve => setTimeout(resolve, 160));
+    assert.equal(saveRequests.length, beforeSaves + 1, "do not replay an edit into another display environment");
+    fields.bar_mode.value = "compact";
+    listeners.change({ target: fields.bar_mode });
+    await new Promise(resolve => setTimeout(resolve, 180));
+    assert.deepEqual(saveRequests.at(-1).editTopology, afterTopology);
+    assert.equal(saveRequests.at(-1).editBaseline.bar_mode, "full");
+    assert.equal(persistedSettings.bar_mode, "compact");
+    assert.equal(statusHost.hidden, true, "a successful explicit retry clears the conflict notice");
+  }
+
+  nextSaveError = new Error(displayConflict);
+  failSettingsRead = true;
+  fields.bar_mode.value = "full";
+  listeners.change({ target: fields.bar_mode });
+  const quitsBeforeFailedRecovery = invokedCommands.filter(command => command === "complete_app_quit").length;
+  eventHandlers["app-quit-requested"]({ payload: null });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(statusEl.textContent, `Error: ${displayConflict}`, "failed recovery retains the original error");
+  assert.equal(invokedCommands.filter(command => command === "complete_app_quit").length, quitsBeforeFailedRecovery);
 
   fields.bar_mode.value = "compact";
   listeners.input?.({ target: fields.bar_mode });
