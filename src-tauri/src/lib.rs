@@ -3002,8 +3002,7 @@ impl TaskbarTopologyStability {
 
     fn observe(&mut self, topology: TaskbarTopology) -> Option<TaskbarTopology> {
         if !topology.is_valid() {
-            self.candidate = TaskbarTopology::default();
-            self.observations = 0;
+            self.rearm();
             return None;
         }
         if self.candidate == topology {
@@ -3011,6 +3010,8 @@ impl TaskbarTopologyStability {
         } else {
             self.candidate = topology;
             self.observations = 1;
+            // The published topology is invalidated on a change, including a brief one.
+            self.active = None;
         }
         if self.observations < TASKBAR_TOPOLOGY_STABLE_OBSERVATIONS
             || self.active.as_ref() == Some(&self.candidate)
@@ -7579,6 +7580,96 @@ mod tests {
             .any(|item| item.topology.monitor_keys == ["monitor-1"]));
         assert!(state.pending_placements.contains(&refreshed));
         assert_eq!(state.pending_placements.last(), Some(&newest));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskbar_topology_republishes_after_interrupted_display_changes() {
+        let original = display_topology(3840, 2160, 144);
+        for interruption in [
+            display_topology(1920, 1080, 144),
+            display_topology(3840, 2160, 96),
+            TaskbarTopology::default(),
+        ] {
+            for samples in [1, 2] {
+                let mut observer = super::TaskbarTopologyStability::default();
+                let mut published = super::TaskbarStableTopologyData::default();
+                let mut tick = |topology: &TaskbarTopology| {
+                    if published.topology != *topology {
+                        assert!(super::try_publish_stable_taskbar_topology(
+                            &mut published,
+                            &TaskbarTopology::default()
+                        ));
+                    }
+                    if let Some(stable) = observer.observe(topology.clone()) {
+                        assert!(super::try_publish_stable_taskbar_topology(
+                            &mut published,
+                            &stable
+                        ));
+                    }
+                    published.topology.clone()
+                };
+                for _ in 0..3 {
+                    tick(&original);
+                }
+                assert_eq!(tick(&original), original);
+                for _ in 0..samples {
+                    assert!(tick(&interruption).is_empty());
+                }
+                let baseline = Settings::default();
+                let requested = Settings {
+                    bar_mode: "compact".into(),
+                    ..baseline.clone()
+                };
+                for _ in 0..2 {
+                    let unstable = tick(&original);
+                    assert!(unstable.is_empty());
+                    assert!(super::validate_settings_edit_topology(
+                        &baseline,
+                        Some(&baseline),
+                        &requested,
+                        Some(&original),
+                        &unstable
+                    )
+                    .is_err());
+                }
+                let stable = tick(&original);
+                assert_eq!(
+                    stable, original,
+                    "the returned display must become editable"
+                );
+                assert!(super::validate_settings_edit_topology(
+                    &baseline,
+                    Some(&baseline),
+                    &requested,
+                    Some(&original),
+                    &stable
+                )
+                .is_ok());
+                assert_eq!(observer.observe(original.clone()), None);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskbar_topology_waits_for_consecutive_samples_after_a_read_failure() {
+        let original = display_topology(3840, 2160, 144);
+        let changed = display_topology(1920, 1080, 96);
+        let mut observer = super::TaskbarTopologyStability::default();
+        for _ in 0..3 {
+            observer.observe(original.clone());
+        }
+        assert_eq!(observer.observe(TaskbarTopology::default()), None);
+        assert_eq!(observer.observe(original.clone()), None);
+        assert_eq!(observer.observe(changed.clone()), None);
+        assert_eq!(observer.observe(original.clone()), None);
+        assert_eq!(observer.observe(original.clone()), None);
+        assert_eq!(observer.observe(original.clone()), Some(original.clone()));
+        assert_eq!(observer.observe(changed.clone()), None);
+        assert_eq!(observer.observe(changed.clone()), None);
+        assert_eq!(observer.observe(changed.clone()), Some(changed.clone()));
+        assert_eq!(observer.observe(changed), None);
     }
 
     #[cfg(windows)]
