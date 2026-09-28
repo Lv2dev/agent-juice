@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Claude Code, Codex, Grok Build, Cursor의 잔여량 또는 사용량을 Windows 작업표시줄에서 바로 확인하세요.</strong><br>
+  <strong>Claude Code, Codex, Grok Build, Cursor, Antigravity의 잔여량 또는 사용량을 Windows 작업표시줄에서 바로 확인하세요.</strong><br>
   기존 로컬 로그인을 사용하는 Windows 11용 경량 사용량 모니터입니다.
 </p>
 
@@ -27,17 +27,20 @@
 
 Juice는 현재 PC에 로그인된 Claude Code의 **5시간/주간 한도**, Codex 계정이 현재 제공하는 **5시간·주간 한도**, Grok Build의 **현재 주간 또는 월간 한도**, Cursor의 **Cursor Models/Other Models 월간 풀**을 읽어 작업표시줄과 설정 패널에 표시합니다. Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
 
+Antigravity는 실행 중인 데스크톱 앱이 보고하는 **Gemini / Claude·GPT 모델 한도**를 별도로 표시합니다. 앱이 닫힌 상태의 독립 계정 조회와 토큰 활동은 아직 지원하지 않습니다.
+
 | 기능 | 동작 |
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
 | 로컬 로그인 기반 수집 | 현재 PC의 Claude Code 로그인/statusline, 자동 탐색한 Codex Desktop 또는 CLI의 persistent app-server와 rollout, Grok Build 공식 ACP, Cursor GUI 또는 Agent CLI 로그인을 사용합니다. |
+| Antigravity GUI 수집 | 실행 중인 Antigravity 데스크톱의 상태를 읽습니다. 별도 CLI나 모델 프롬프트를 실행하지 않습니다. |
 | 로그인 상태 안내 | 명시적인 인증 실패가 확인되면 오래된 값을 현재값처럼 표시하지 않고 해당 카드와 바에 `로그인 필요`를 표시합니다. 네트워크·timeout·형식 오류와는 구분합니다. |
 | 토큰 활동 | Claude·Grok의 현재 PC 로컬 기록과 Codex·Cursor 계정의 공식 token activity를 일별로 집계해 최근 4~52주 히트맵으로 표시합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
-| 도구별 색상 | Claude와 Codex가 제공하는 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀 기본색과 경고·위험색을 지정합니다. |
+| 도구별 색상 | Claude·Codex의 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀, Antigravity의 두 모델 풀에 기본색과 경고·위험색을 지정합니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
-| 도구별 독립 바 | 네 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok과 Cursor는 기존 사용자를 위해 기본 OFF입니다. |
+| 도구별 독립 바 | 다섯 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok, Cursor, Antigravity는 기본 OFF입니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
 | 원클릭 업데이트 | 하루 한 번 최신 정식 릴리즈를 확인하고, 사용자가 승인하면 서명을 검증한 설치 파일을 내려받아 업데이트 후 재시작합니다. |
 
@@ -49,6 +52,7 @@ Juice는 현재 PC에 로그인된 Claude Code의 **5시간/주간 한도**, Cod
 | Codex | 자동 탐색한 Codex Desktop 또는 CLI의 공식 app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | 한 번 연결한 app-server를 재사용해 현재 한도를 정확값으로 표시하며, rollout fallback은 근사치입니다. |
 | Grok Build | 공식 ACP `_x.ai/billing` | 없음 | ACP가 반환한 현재 단일 주간/월간 크레딧 period를 정확값으로 표시합니다. 세션·프롬프트·모델 호출은 만들지 않습니다. |
 | Cursor | Cursor GUI 또는 Agent CLI 로컬 credential로 Dashboard usage 조회 | credential이 없는 구버전 Agent의 bounded `/usage` | 같은 계정의 Auto/API 월간 풀을 정확값으로 표시하며 어느 경로도 모델 프롬프트를 보내지 않습니다. |
+| Antigravity | 실행 중인 Antigravity 데스크톱의 로컬 상태 조회 | 없음 | Gemini와 Claude/GPT 모델 한도를 별도로 표시합니다. GUI가 보고한 값이며 독립 계정 API 조회가 아닙니다. |
 
 Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다. Codex의 한도와 활동 조회는 하나의 persistent stdio connection을 공유합니다.
 
@@ -162,7 +166,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 | 기본 | 시스템/라이트/다크 테마, 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
 | 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
 | 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 화면 조합별 위치·표시 구성·크기·간격 프로필과 선택적 색상 기억, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
-| 색상 | 9개 팔레트, 네 도구·기간별 기본 8색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
+| 색상 | 9개 팔레트, 다섯 도구의 한도별 기본 10색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 세부 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
 | 업데이트 카드 | 업데이트 자동 확인, 수동 확인, 서명 검증 업데이트·재시작, 릴리즈 페이지 fallback, 최근 확인 결과 |
 | 정보 카드 | 프로그램 설명, 현재 버전, 로컬 처리 원칙 |
@@ -209,6 +213,17 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 - 토큰 활동은 현재 PC의 `~/.grok/sessions/**/updates.jsonl`에서 완료된 응답 usage를 읽습니다. 캐시 토큰은 포함하고 output에 포함된 reasoning token은 중복 가산하지 않습니다.
 - Juice는 Grok `auth.json`을 직접 읽거나 저장하지 않습니다. 공식 실행 파일을 찾을 수 없거나 미로그인·구버전·timeout인 경우 Grok만 마지막 정상값 또는 빈 상태로 남고 Claude/Codex 수집은 계속됩니다.
 
+### Antigravity GUI 한도
+
+`표시줄` 탭의 **Antigravity 활성화**를 켜면 실행 중인 Antigravity 데스크톱의 **Gemini / Claude·GPT** 잔여량과 리셋 시각을 표시합니다. 기존 Claude Code나 Codex의 한도와는 합치지 않습니다.
+
+- 현재 Windows의 기본 사용자 설치 경로에 설치된 새 Antigravity 데스크톱을 지원합니다. Antigravity IDE와 CLI는 이 수집 경로의 대상이 아닙니다.
+- GUI가 실행 중이어야 합니다. 미실행이면 **Antigravity 실행 필요**, 인증이 없으면 **로그인 필요**로 표시합니다. Juice가 앱이나 CLI를 대신 실행하지 않습니다.
+- 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. 수동 새로고침도 GUI의 상태를 다시 읽으며, Google 계정 서버의 즉시 갱신을 보장하지 않습니다.
+- 한도 응답에 없는 5시간·주간 항목을 만들지 않습니다. 모델별 값이 서로 충돌하거나 응답을 읽지 못하면 이전 숫자를 현재 값처럼 유지하지 않습니다.
+- 링·막대, 네 표시 모드, 색상과 글자 설정, 독립 이동 및 화면 프로필을 지원합니다. Antigravity 토큰 활동 잔디는 아직 포함하지 않습니다.
+- Antigravity의 외부 개발자용 공식 API가 아니라 앱 내부 인터페이스를 사용하므로, 앱 업데이트로 형식이 바뀌면 조회가 중단될 수 있습니다. 응답 오류를 Google 계정의 로그아웃으로 취급하지 않습니다.
+
 ### Cursor 사용량과 토큰 활동 자동 수집
 
 Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않도록 기본값이 **꺼짐**입니다. `표시줄` 탭에서 **Cursor 활성화**를 켜면 두 월간 풀과 Cursor 계정 토큰 활동을 함께 수집합니다.
@@ -241,10 +256,10 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 - **언어:** 시스템 언어를 따르거나 한국어/영어를 고정할 수 있습니다.
 - **폰트:** Windows 작업표시줄과 맞춘 시스템 폰트가 기본이며 Pretendard를 선택할 수 있습니다.
 - **Windows 텍스트 크기:** 접근성의 텍스트 크기 100~225%를 자동 반영합니다. 설정창은 큰 글자에 맞춰 줄바꿈하고 바는 실제 내용에 맞춰 폭을 조정합니다. 작업표시줄 높이와 링 중앙 공간이 제한되는 경우 숫자는 그 안에 맞추며, Juice에 저장한 글자 크기 설정은 그대로 유지됩니다.
-- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 네 도구·기간별 여덟 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
+- **팔레트:** 도구별, 신호등, 바다, 숲, 노을, 색각 보정, 오로라, 단색, 사용자 지정을 제공합니다. 도구별은 다섯 도구의 한도별 열 가지 기본색과 경고·위험색을 지정하고 단계별 전환을 따로 끌 수 있으며, 단색은 정상 상태를 한 색으로 통일합니다.
 - **전체화면 숨김:** 신규 설치 기본값은 꺼짐입니다. 켜면 같은 모니터의 전체화면 앱을 감지할 때 해당 작업표시줄 바를 숨깁니다. 최대화 창 숨김은 별도 옵션입니다.
 - **다중 모니터:** 각 바를 원하는 모니터 작업표시줄로 직접 끌어 놓으면 모니터와 상대 위치를 기억합니다.
-- **오래됨 표시:** 마지막 기록이 설정한 시간보다 오래되면 값이 오래된 상태임을 표시합니다.
+- **오래됨 표시:** 마지막 기록이 설정한 시간보다 오래되면 hover에 오래됨 상태를 안내합니다. 작업표시줄 글자색은 정상 상태와 같은 자동·사용자 지정 색을 유지하고, 게이지 농도만 낮춥니다.
 - **업데이트:** 최신 정식 릴리즈를 하루 한 번 확인하고, 사용자가 승인한 경우에만 서명 검증·설치·재시작을 진행합니다.
 
 ### 다른 PC에서 값이 안 보일 때
@@ -299,17 +314,20 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 
 Juice reads Claude Code's **5-hour and weekly limits**, whichever **5-hour or weekly windows the Codex account currently provides**, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor. When Codex exposes only one window, Juice renders that real limit without an empty placeholder. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
 
+Antigravity adds separate **Gemini / Claude·GPT model quotas** reported by its running desktop app. Independent account reads while the app is closed and token activity are not supported yet.
+
 | Feature | Behavior |
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
 | Local-login collection | Uses the local Claude Code login/statusline, an auto-detected Codex Desktop or CLI persistent app-server plus rollout data, official Grok Build ACP, and an existing Cursor GUI or Agent CLI login. |
+| Antigravity GUI collection | Reads state from the running Antigravity desktop without starting a CLI or sending a model prompt. |
 | Sign-in status | When an explicit authentication failure is confirmed, Juice shows `Sign in required` on that card and bar instead of presenting stale values as current. Network, timeout, and format errors remain distinct. |
 | Token activity | Aggregates local Claude/Grok records and official Codex/Cursor account activity by date for a 4 to 52 week heatmap. |
 | Live settings | Changes are saved and applied without a Save button. |
-| Per-tool colors | Assign separate base colors to the Claude and Codex 5-hour/weekly windows they provide, Grok weekly/monthly, and Cursor's two monthly pools, with customizable warning and danger colors. |
+| Per-tool colors | Assign base colors to Claude/Codex 5-hour and weekly windows, Grok weekly/monthly, Cursor's two monthly pools, and Antigravity's two model pools, with customizable warning and danger colors. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
-| Independent tool bars | All four tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok and Cursor default to off for existing users. |
+| Independent tool bars | All five tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok, Cursor, and Antigravity default to off. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
 | One-click updates | Checks the latest stable release once a day and, after user approval, downloads a signed installer, verifies it, updates Juice, and restarts. |
 
@@ -321,6 +339,7 @@ Juice reads Claude Code's **5-hour and weekly limits**, whichever **5-hour or we
 | Codex | Official `account/rateLimits/read` through an auto-detected Codex Desktop or CLI app-server | Latest rollout JSONL under `~/.codex/sessions` | Reuses one app-server connection for exact current limits; rollout fallback is approximate. |
 | Grok Build | Official ACP `_x.ai/billing` | None | Shows the exact current single weekly/monthly credit period returned by ACP without creating a session, prompt, or model call. |
 | Cursor | Dashboard usage through local Cursor GUI or Agent CLI credentials | Bounded `/usage` for legacy Agents without usable credentials | Shows the same account Auto/API monthly pools without sending a model prompt. |
+| Antigravity | Local status from the running Antigravity desktop | None | Separate Gemini and Claude/GPT model quotas reported by the GUI, not an independent account API request. |
 
 Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok and Cursor start collecting after you first enable them in the Taskbar tab. Codex limit and activity requests share one persistent stdio connection.
 
@@ -434,7 +453,7 @@ The settings card is split into five task-focused tabs. Updates and About remain
 | General | System/light/dark theme, system/Korean/English language, Windows/Pretendard font, Windows autostart |
 | Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
 | Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup profiles for position, presentation, size, spacing, and optional colors, fullscreen/maximized hiding, per-tool display and collection |
-| Colors | Nine palettes, eight tool/period base colors, warning/danger colors and toggles, name/info/ring-number text colors |
+| Colors | Nine palettes, ten per-limit base colors across five tools, warning/danger colors and toggles, name/info/ring-number text colors |
 | Details | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
 | Updates card | Automatic and manual checks, signed update and restart, Releases fallback, and the latest check result |
 | About card | Product description, current version, and local-processing policy |
@@ -481,6 +500,17 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 - Token activity comes from completed response usage under `~/.grok/sessions/**/updates.jsonl`. Cache tokens are included, while reasoning tokens already contained in output are not added twice.
 - Juice never reads or stores Grok `auth.json`. If the official executable is unavailable, logged out, too old, malformed, or times out, only Grok remains on its last known or empty state; Claude and Codex collection continue.
 
+### Antigravity GUI quotas
+
+Enable **Antigravity** in the `Taskbar` tab to display **Gemini / Claude·GPT** quotas and reset times from the running Antigravity desktop. These are separate from your Claude Code or Codex account limits.
+
+- This initial integration supports the new Windows Antigravity desktop installed in its default per-user location, not the separate Antigravity IDE or CLI.
+- The app must be running. Juice shows **Open Antigravity** when it is absent and **Sign in required** when it explicitly reports no valid login. It never starts the app or CLI for you.
+- Automatic reads follow your collection interval, with a minimum of 60 seconds. Manual refresh rereads GUI-reported state; it does not guarantee a fresh request to Google's account servers.
+- Juice does not invent missing 5-hour or weekly slots. Conflicting model quotas or failed reads clear the displayed numbers rather than presenting old values as current.
+- Rings, bars, all four modes, custom colors and text, independent dragging, and display profiles are supported. Antigravity token activity is not included yet.
+- This uses an internal app interface, not a public developer API. An Antigravity update may change that interface and interrupt collection. Response errors are not treated as a Google account sign-out.
+
 ### Automatic Cursor usage and token activity collection
 
 Cursor defaults to **off** so existing users do not suddenly receive an empty fourth bar. Enabling **Cursor** in the `Taskbar` tab starts its two monthly pools and account token activity together.
@@ -513,10 +543,10 @@ Cursor defaults to **off** so existing users do not suddenly receive an empty fo
 - **Language:** Follows the system or locks the UI to Korean or English.
 - **Font:** Uses the Windows taskbar-style system font by default, with Pretendard available.
 - **Windows text size:** Automatically follows the Accessibility text size setting from 100% to 225%. Settings reflow for larger text, and bars resize to their measured content. Numbers fit within the available taskbar height and ring center; your saved Juice font-size settings are preserved.
-- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes eight tool/period base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
+- **Palette:** Choose Per tool, Traffic, Ocean, Forest, Sunset, Color-blind safe, Aurora, Monochrome, or Custom. Per tool exposes ten per-limit base colors plus warning and danger colors with independent recolor toggles; Monochrome unifies normal values.
 - **Fullscreen hiding:** Off by default on a new installation. When enabled, it hides each bar while a fullscreen app covers its target monitor. Maximized-window hiding is a separate option.
 - **Multiple monitors:** Drag each bar onto a monitor's taskbar to remember that monitor and relative position.
-- **Stale state:** Marks data as old after the configured time since the last record.
+- **Stale state:** The tooltip identifies old records after the configured interval. Taskbar text keeps its normal automatic or custom colors; only the gauge is dimmed.
 - **Updates:** Checks the latest stable release once a day and performs signature verification, installation, and restart only after user approval.
 
 ### If another PC shows no data

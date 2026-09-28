@@ -139,6 +139,12 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       showCodex: true,
       showGrok: true,
       showCursor: true,
+      showAntigravity: false,
+      antigravityPrimaryColor: "#4285f4",
+      antigravitySecondaryColor: "#b27be8",
+      antigravityTaskbarOffsetRatio: 0.25,
+      antigravityTextColor: "#4285f4",
+      antigravityTextColorOn: false,
       claudeAccountAutoCollectOn: true,
       monoColor: "#4f8a73",
       customSafe: "#22c55e",
@@ -266,6 +272,12 @@ test("payloadFromEntries creates save_settings input payload", () => {
   });
 
   assert.deepEqual(payload, {
+    show_antigravity: false,
+    antigravity_primary_color: "#4285f4",
+    antigravity_secondary_color: "#b27be8",
+    antigravity_taskbar_offset_ratio: 0,
+    antigravity_text_color: "#4285f4",
+    antigravity_text_color_on: false,
     palette: "custom",
     display_basis: "remaining",
     warn_threshold: 72,

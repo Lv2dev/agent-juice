@@ -29,7 +29,7 @@ let contentWidthSyncTimer = null;
 let lastRequestedContentWidth = "";
 let contentWidthRetryKey = "";
 let contentWidthRetryCount = 0;
-const TOOLS = ["claude", "codex", "grok", "cursor"];
+const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 
 function currentWindowTool() {
   const search = window.location?.search ?? globalThis.location?.search ?? "";
@@ -540,6 +540,7 @@ function renderBar() {
   root.dataset.codexTextColor = vm.codexTextColorOn ? "custom" : "auto";
   root.dataset.grokTextColor = vm.grokTextColorOn ? "custom" : "auto";
   root.dataset.cursorTextColor = vm.cursorTextColorOn ? "custom" : "auto";
+  root.dataset.antigravityTextColor = vm.antigravityTextColorOn ? "custom" : "auto";
   root.dataset.infoTextColor = vm.infoTextColorOn ? "custom" : "auto";
   root.dataset.ringTextColor = vm.ringTextColorOn ? "custom" : "auto";
   root.dataset.ring = vm.ringOn ? "on" : "off";
@@ -558,6 +559,7 @@ function renderBar() {
   root.style?.setProperty("--codex-text-color", vm.codexTextColor);
   root.style?.setProperty("--grok-text-color", vm.grokTextColor);
   root.style?.setProperty("--cursor-text-color", vm.cursorTextColor);
+  root.style?.setProperty("--antigravity-text-color", vm.antigravityTextColor);
   root.style?.setProperty("--info-text-color", vm.infoTextColor);
   root.style?.setProperty("--ring-text-color", vm.ringTextColor);
   root.style?.setProperty("--ring-size", `${vm.ringSizePx}px`);

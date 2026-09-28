@@ -15,7 +15,9 @@ export const DEFAULT_SETTINGS = {
     grok: [0xd9, 0x57, 0x8b],
     grok_on: false,
     cursor: [0x85, 0x84, 0x7f],
+    antigravity: [0x42, 0x85, 0xf4],
     cursor_on: false,
+    antigravity_on: false,
     info: [0x6b, 0x72, 0x80],
     info_on: false,
     ring: [0x6b, 0x72, 0x80],
@@ -29,10 +31,12 @@ export const DEFAULT_SETTINGS = {
   codex_taskbar_offset_ratio: 0,
   grok_taskbar_offset_ratio: 0,
   cursor_taskbar_offset_ratio: 0,
+  antigravity_taskbar_offset_ratio: 0,
   show_claude: true,
   show_codex: true,
   show_grok: false,
   show_cursor: false,
+  show_antigravity: false,
   claude_account_auto_collect_on: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
@@ -81,6 +85,7 @@ const TOOL_SAFE = {
   codex: ["#2fac7d", "#4d86d6"],
   grok: ["#d9578b", "#8a6fd1"],
   cursor: ["#85847f", "#0891b2"],
+  antigravity: ["#4285f4", "#b27be8"],
 };
 
 function rgbColor(value, fallback) {
@@ -306,6 +311,10 @@ function grokLimitLabel(limit) {
 function limitLabels(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
+  if (tool === "antigravity") return [
+    status && !status.primary ? null : "limit.geminiModels",
+    status && !status.secondary ? null : "limit.claudeGptModels",
+  ];
   if (tool === "codex" && status) {
     return [
       status.primary == null ? null : "limit.fiveHour",
@@ -325,6 +334,7 @@ function emptyHintForTool(tool, settings, language) {
   }
   if (tool === "grok") return t("empty.grok", language);
   if (tool === "cursor") return t("empty.cursor", language);
+  if (tool === "antigravity") return t("empty.antigravity", language);
   return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
 }
 
@@ -340,7 +350,7 @@ export function viewModelForTool(
   const [primaryLabel, secondaryLabel] = limitLabels(tool, status);
   const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
 
-  if (collectionHealth?.[tool] === "login_required") {
+  if (["login_required", "app_required"].includes(collectionHealth?.[tool])) {
     return {
       state: "login_required",
       active: false,
@@ -351,7 +361,7 @@ export function viewModelForTool(
       context: `${t("context.label", language)} -`,
       pcId: "",
       meta: "",
-      emptyHint: t("state.loginRequired", language),
+      emptyHint: t(collectionHealth?.[tool] === "app_required" ? "state.antigravityRequired" : "state.loginRequired", language),
     };
   }
 

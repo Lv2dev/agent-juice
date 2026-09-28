@@ -433,6 +433,9 @@ h1::before {
 .tool-card[data-tool="cursor"] {
   --tool-brand: #85847f;
 }
+.tool-card[data-tool="antigravity"] {
+  --tool-brand: #4285f4;
+}
 
 .tool-card[data-state="stale"],
 .tool-card[data-state="empty"] {
@@ -480,6 +483,9 @@ h2 {
 .codex-dot,
 .grok-dot,
 .cursor-dot {
+  background: var(--tool-brand);
+}
+.antigravity-dot {
   background: var(--tool-brand);
 }
 
@@ -921,6 +927,7 @@ h2 {
   --codex-text-color: #2fac7d;
   --grok-text-color: #d9578b;
   --cursor-text-color: #85847f;
+  --antigravity-text-color: #4285f4;
   --info-text-color: #6b7280;
   --ring-text-color: #6b7280;
   --bar-text-font-size: calc(11px * var(--system-text-scale, 1));
@@ -1025,6 +1032,9 @@ html[data-panel-visible="false"] * {
 
 .bar-tool[data-tool="cursor"] {
   --tool-brand: #85847f;
+}
+.bar-tool[data-tool="antigravity"] {
+  --tool-brand: #4285f4;
 }
 
 .bar-tool[data-state="stale"],
@@ -1491,6 +1501,9 @@ html[data-panel-visible="false"] * {
 .bar-shell[data-cursor-text-color="custom"] .bar-tool[data-tool="cursor"] .bar-tool-name {
   color: var(--cursor-text-color);
 }
+.bar-shell[data-antigravity-text-color="custom"] .bar-tool[data-tool="antigravity"] .bar-tool-name {
+  color: var(--antigravity-text-color);
+}
 
 .bar-shell[data-info-text-color="custom"] .bar-line,
 .bar-shell[data-info-text-color="custom"] .primary-reset,
@@ -1515,42 +1528,6 @@ html[data-panel-visible="false"] * {
 .bar-shell[data-mode="full"][data-full-reset-time="on"] .primary-reset,
 .bar-shell[data-mode="full"][data-full-reset-time="on"] .secondary-reset {
   display: inline;
-}
-
-.bar-tool[data-state="stale"] .bar-tool-name,
-.bar-tool[data-state="stale"] .bar-line,
-.bar-tool[data-state="stale"] .bar-worst,
-.bar-tool[data-state="stale"] .quad-number,
-.bar-tool[data-state="stale"] .primary-reset,
-.bar-tool[data-state="stale"] .secondary-reset {
-  color: var(--text-muted);
-}
-
-.bar-shell[data-claude-text-color="custom"] .bar-tool[data-tool="claude"][data-state="stale"] .bar-tool-name {
-  color: color-mix(in srgb, var(--claude-text-color) 62%, var(--text-muted));
-}
-
-.bar-shell[data-codex-text-color="custom"] .bar-tool[data-tool="codex"][data-state="stale"] .bar-tool-name {
-  color: color-mix(in srgb, var(--codex-text-color) 62%, var(--text-muted));
-}
-
-.bar-shell[data-grok-text-color="custom"] .bar-tool[data-tool="grok"][data-state="stale"] .bar-tool-name {
-  color: color-mix(in srgb, var(--grok-text-color) 62%, var(--text-muted));
-}
-
-.bar-shell[data-cursor-text-color="custom"] .bar-tool[data-tool="cursor"][data-state="stale"] .bar-tool-name {
-  color: color-mix(in srgb, var(--cursor-text-color) 62%, var(--text-muted));
-}
-
-.bar-shell[data-info-text-color="custom"] .bar-tool[data-state="stale"] .bar-line,
-.bar-shell[data-info-text-color="custom"] .bar-tool[data-state="stale"] .primary-reset,
-.bar-shell[data-info-text-color="custom"] .bar-tool[data-state="stale"] .secondary-reset {
-  color: color-mix(in srgb, var(--info-text-color) 62%, var(--text-muted));
-}
-
-.bar-shell[data-ring-text-color="custom"] .bar-tool[data-state="stale"] .bar-worst,
-.bar-shell[data-ring-text-color="custom"] .bar-tool[data-state="stale"] .quad-number {
-  color: color-mix(in srgb, var(--ring-text-color) 62%, var(--text-muted));
 }
 
 .bar-shell[data-ring="off"][data-mode="full"] .bar-ring,

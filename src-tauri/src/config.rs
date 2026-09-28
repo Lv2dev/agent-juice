@@ -25,7 +25,9 @@ pub struct ToolColors {
     pub grok_primary: [u8; 3],
     pub grok_secondary: [u8; 3],
     pub cursor_primary: [u8; 3],
+    pub antigravity_primary: [u8; 3],
     pub cursor_secondary: [u8; 3],
+    pub antigravity_secondary: [u8; 3],
     pub warning: [u8; 3],
     pub danger: [u8; 3],
     pub warning_on: bool,
@@ -38,6 +40,8 @@ const V0_1_19_CURSOR_PRIMARY: [u8; 3] = [0x72, 0x71, 0x6d];
 const V0_1_19_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
 const DEFAULT_CURSOR_PRIMARY: [u8; 3] = [0x85, 0x84, 0x7f];
 const DEFAULT_CURSOR_SECONDARY: [u8; 3] = [0x08, 0x91, 0xb2];
+const DEFAULT_ANTIGRAVITY_PRIMARY: [u8; 3] = [0x42, 0x85, 0xf4];
+const DEFAULT_ANTIGRAVITY_SECONDARY: [u8; 3] = [0xb2, 0x7b, 0xe8];
 const TOOL_COLORS_VERSION: u8 = 1;
 
 const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
@@ -48,7 +52,9 @@ const LEGACY_DEFAULT_TOOL_COLORS: ToolColors = ToolColors {
     grok_primary: [0xd9, 0x57, 0x8b],
     grok_secondary: [0x8a, 0x6f, 0xd1],
     cursor_primary: DEFAULT_CURSOR_PRIMARY,
+    antigravity_primary: DEFAULT_ANTIGRAVITY_PRIMARY,
     cursor_secondary: DEFAULT_CURSOR_SECONDARY,
+    antigravity_secondary: DEFAULT_ANTIGRAVITY_SECONDARY,
     warning: [0xf5, 0x9e, 0x0b],
     danger: [0xef, 0x44, 0x44],
     warning_on: true,
@@ -65,7 +71,9 @@ impl Default for ToolColors {
             grok_primary: [0xd9, 0x57, 0x8b],
             grok_secondary: [0x8a, 0x6f, 0xd1],
             cursor_primary: DEFAULT_CURSOR_PRIMARY,
+            antigravity_primary: DEFAULT_ANTIGRAVITY_PRIMARY,
             cursor_secondary: DEFAULT_CURSOR_SECONDARY,
+            antigravity_secondary: DEFAULT_ANTIGRAVITY_SECONDARY,
             warning: [0xf5, 0x9e, 0x0b],
             danger: [0xef, 0x44, 0x44],
             warning_on: true,
@@ -84,7 +92,9 @@ pub struct TaskbarTextColors {
     pub grok: [u8; 3],
     pub grok_on: bool,
     pub cursor: [u8; 3],
+    pub antigravity: [u8; 3],
     pub cursor_on: bool,
+    pub antigravity_on: bool,
     pub info: [u8; 3],
     pub info_on: bool,
     pub ring: [u8; 3],
@@ -101,7 +111,9 @@ impl Default for TaskbarTextColors {
             grok: [0xd9, 0x57, 0x8b],
             grok_on: false,
             cursor: DEFAULT_CURSOR_PRIMARY,
+            antigravity: DEFAULT_ANTIGRAVITY_PRIMARY,
             cursor_on: false,
+            antigravity_on: false,
             info: [0x6b, 0x72, 0x80],
             info_on: false,
             ring: [0x6b, 0x72, 0x80],
@@ -273,6 +285,8 @@ pub struct TaskbarLayoutProfile {
     pub grok: Option<TaskbarPlacement>,
     #[serde(default)]
     pub cursor: Option<TaskbarPlacement>,
+    #[serde(default)]
+    pub antigravity: Option<TaskbarPlacement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<TaskbarPresentationProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,6 +399,8 @@ pub struct Settings {
     pub grok_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub cursor_taskbar_offset_ratio: f32,
+    #[serde(default = "default_taskbar_offset_ratio")]
+    pub antigravity_taskbar_offset_ratio: f32,
     #[serde(default)]
     pub claude_taskbar_monitor_key: String,
     #[serde(default)]
@@ -394,6 +410,8 @@ pub struct Settings {
     #[serde(default)]
     pub cursor_taskbar_monitor_key: String,
     #[serde(default)]
+    pub antigravity_taskbar_monitor_key: String,
+    #[serde(default)]
     pub claude_taskbar_target_initialized: bool,
     #[serde(default)]
     pub codex_taskbar_target_initialized: bool,
@@ -401,6 +419,8 @@ pub struct Settings {
     pub grok_taskbar_target_initialized: bool,
     #[serde(default)]
     pub cursor_taskbar_target_initialized: bool,
+    #[serde(default)]
+    pub antigravity_taskbar_target_initialized: bool,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
@@ -409,6 +429,8 @@ pub struct Settings {
     pub show_grok: bool,
     #[serde(default)]
     pub show_cursor: bool,
+    #[serde(default)]
+    pub show_antigravity: bool,
     #[serde(
         default = "default_claude_account_auto_collect_on",
         alias = "claude_usage_auto_refresh_lab_on"
@@ -582,6 +604,8 @@ pub struct SettingsInput {
     pub grok_taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub cursor_taskbar_offset_ratio: f32,
+    #[serde(default = "default_taskbar_offset_ratio")]
+    pub antigravity_taskbar_offset_ratio: f32,
     #[serde(default)]
     pub claude_taskbar_monitor_key: String,
     #[serde(default)]
@@ -590,6 +614,8 @@ pub struct SettingsInput {
     pub grok_taskbar_monitor_key: String,
     #[serde(default)]
     pub cursor_taskbar_monitor_key: String,
+    #[serde(default)]
+    pub antigravity_taskbar_monitor_key: String,
     #[serde(default = "default_show_tool")]
     pub show_claude: bool,
     #[serde(default = "default_show_tool")]
@@ -598,6 +624,8 @@ pub struct SettingsInput {
     pub show_grok: bool,
     #[serde(default)]
     pub show_cursor: bool,
+    #[serde(default)]
+    pub show_antigravity: bool,
     #[serde(
         default = "default_claude_account_auto_collect_on",
         alias = "claude_usage_auto_refresh_lab_on"
@@ -626,7 +654,11 @@ pub struct SettingsInput {
     #[serde(default)]
     pub cursor_primary_color: Option<String>,
     #[serde(default)]
+    pub antigravity_primary_color: Option<String>,
+    #[serde(default)]
     pub cursor_secondary_color: Option<String>,
+    #[serde(default)]
+    pub antigravity_secondary_color: Option<String>,
     #[serde(default)]
     pub tool_warning_color: Option<String>,
     #[serde(default)]
@@ -650,7 +682,11 @@ pub struct SettingsInput {
     #[serde(default)]
     pub cursor_text_color: Option<String>,
     #[serde(default)]
+    pub antigravity_text_color: Option<String>,
+    #[serde(default)]
     pub cursor_text_color_on: bool,
+    #[serde(default)]
+    pub antigravity_text_color_on: bool,
     #[serde(default)]
     pub info_text_color: Option<String>,
     #[serde(default)]
@@ -930,6 +966,7 @@ fn normalize_taskbar_layout_profile(
     profile.codex = normalize_placement(profile.codex);
     profile.grok = normalize_placement(profile.grok);
     profile.cursor = normalize_placement(profile.cursor);
+    profile.antigravity = normalize_placement(profile.antigravity);
     if let Some(presentation) = &mut profile.presentation {
         if let Some(mode) = &mut presentation.font_mode {
             *mode = normalize_font_mode(mode).into();
@@ -984,7 +1021,8 @@ fn normalize_taskbar_layout_profile(
     (profile.claude.is_some()
         || profile.codex.is_some()
         || profile.grok.is_some()
-        || profile.cursor.is_some())
+        || profile.cursor.is_some()
+        || profile.antigravity.is_some())
     .then_some(profile)
 }
 
@@ -1051,18 +1089,22 @@ impl Default for Settings {
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             cursor_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            antigravity_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
             grok_taskbar_monitor_key: String::new(),
             cursor_taskbar_monitor_key: String::new(),
+            antigravity_taskbar_monitor_key: String::new(),
             claude_taskbar_target_initialized: false,
             codex_taskbar_target_initialized: false,
             grok_taskbar_target_initialized: false,
             cursor_taskbar_target_initialized: false,
+            antigravity_taskbar_target_initialized: false,
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
             show_grok: false,
             show_cursor: false,
+            show_antigravity: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
         }
     }
@@ -1117,14 +1159,17 @@ impl Default for SettingsInput {
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             cursor_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            antigravity_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
             grok_taskbar_monitor_key: String::new(),
             cursor_taskbar_monitor_key: String::new(),
+            antigravity_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
             show_grok: false,
             show_cursor: false,
+            show_antigravity: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
             mono_color: None,
             custom_safe: None,
@@ -1137,7 +1182,9 @@ impl Default for SettingsInput {
             grok_primary_color: None,
             grok_secondary_color: None,
             cursor_primary_color: None,
+            antigravity_primary_color: None,
             cursor_secondary_color: None,
+            antigravity_secondary_color: None,
             tool_warning_color: None,
             tool_danger_color: None,
             tool_warning_color_on: default_tool_threshold_color_on(),
@@ -1149,7 +1196,9 @@ impl Default for SettingsInput {
             grok_text_color: None,
             grok_text_color_on: false,
             cursor_text_color: None,
+            antigravity_text_color: None,
             cursor_text_color_on: false,
+            antigravity_text_color_on: false,
             info_text_color: None,
             info_text_color_on: false,
             ring_text_color: None,
@@ -1386,14 +1435,17 @@ impl Settings {
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             grok_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             cursor_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
+            antigravity_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_monitor_key: String::new(),
             codex_taskbar_monitor_key: String::new(),
             grok_taskbar_monitor_key: String::new(),
             cursor_taskbar_monitor_key: String::new(),
+            antigravity_taskbar_monitor_key: String::new(),
             show_claude: default_show_tool(),
             show_codex: default_show_tool(),
             show_grok: false,
             show_cursor: false,
+            show_antigravity: false,
             claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
             mono_color: None,
             custom_safe: None,
@@ -1406,7 +1458,9 @@ impl Settings {
             grok_primary_color: None,
             grok_secondary_color: None,
             cursor_primary_color: None,
+            antigravity_primary_color: None,
             cursor_secondary_color: None,
+            antigravity_secondary_color: None,
             tool_warning_color: None,
             tool_danger_color: None,
             tool_warning_color_on: default_tool_threshold_color_on(),
@@ -1418,7 +1472,9 @@ impl Settings {
             grok_text_color: None,
             grok_text_color_on: false,
             cursor_text_color: None,
+            antigravity_text_color: None,
             cursor_text_color_on: false,
+            antigravity_text_color_on: false,
             info_text_color: None,
             info_text_color_on: false,
             ring_text_color: None,
@@ -1506,18 +1562,22 @@ impl Settings {
             codex_taskbar_offset_ratio: clamp_ratio(input.codex_taskbar_offset_ratio),
             grok_taskbar_offset_ratio: clamp_ratio(input.grok_taskbar_offset_ratio),
             cursor_taskbar_offset_ratio: clamp_ratio(input.cursor_taskbar_offset_ratio),
+            antigravity_taskbar_offset_ratio: clamp_ratio(input.antigravity_taskbar_offset_ratio),
             claude_taskbar_monitor_key: input.claude_taskbar_monitor_key,
             codex_taskbar_monitor_key: input.codex_taskbar_monitor_key,
             grok_taskbar_monitor_key: input.grok_taskbar_monitor_key,
             cursor_taskbar_monitor_key: input.cursor_taskbar_monitor_key,
+            antigravity_taskbar_monitor_key: input.antigravity_taskbar_monitor_key,
             claude_taskbar_target_initialized: false,
             codex_taskbar_target_initialized: false,
             grok_taskbar_target_initialized: false,
             cursor_taskbar_target_initialized: false,
+            antigravity_taskbar_target_initialized: false,
             show_claude: input.show_claude,
             show_codex: input.show_codex,
             show_grok: input.show_grok,
             show_cursor: input.show_cursor,
+            show_antigravity: input.show_antigravity,
             claude_account_auto_collect_on: input.claude_account_auto_collect_on,
         }
     }
@@ -1661,6 +1721,7 @@ impl Settings {
         self.codex_taskbar_offset_ratio = clamp_ratio(self.codex_taskbar_offset_ratio);
         self.grok_taskbar_offset_ratio = clamp_ratio(self.grok_taskbar_offset_ratio);
         self.cursor_taskbar_offset_ratio = clamp_ratio(self.cursor_taskbar_offset_ratio);
+        self.antigravity_taskbar_offset_ratio = clamp_ratio(self.antigravity_taskbar_offset_ratio);
     }
 
     fn normalize_taskbar_layout_profiles(&mut self) {
@@ -1685,6 +1746,9 @@ impl Settings {
                 }
                 if profile.cursor.is_none() {
                     profile.cursor = previous.cursor;
+                }
+                if profile.antigravity.is_none() {
+                    profile.antigravity = previous.antigravity;
                 }
                 if profile.presentation.is_none() {
                     profile.presentation = previous.presentation;
@@ -1767,6 +1831,9 @@ impl Settings {
             if profile.cursor.is_none() {
                 profile.cursor = previous.cursor;
             }
+            if profile.antigravity.is_none() {
+                profile.antigravity = previous.antigravity;
+            }
             if profile.presentation.is_none() {
                 profile.presentation = previous.presentation;
             }
@@ -1801,6 +1868,7 @@ impl Settings {
             self.codex_taskbar_monitor_key.clone(),
             self.grok_taskbar_monitor_key.clone(),
             self.cursor_taskbar_monitor_key.clone(),
+            self.antigravity_taskbar_monitor_key.clone(),
             self.taskbar_layout_profiles.clone(),
         );
 
@@ -1815,6 +1883,11 @@ impl Settings {
         }
         if self.cursor_taskbar_target_initialized || !self.cursor_taskbar_monitor_key.is_empty() {
             replace_key(&mut self.cursor_taskbar_monitor_key, replacements);
+        }
+        if self.antigravity_taskbar_target_initialized
+            || !self.antigravity_taskbar_monitor_key.is_empty()
+        {
+            replace_key(&mut self.antigravity_taskbar_monitor_key, replacements);
         }
         for profile in &mut self.taskbar_layout_profiles {
             for mode in &mut profile.topology.monitor_modes {
@@ -1845,6 +1918,11 @@ impl Settings {
                     replace_key(&mut placement.monitor_key, replacements);
                 }
             }
+            if let Some(placement) = &mut profile.antigravity {
+                if !placement.monitor_key.is_empty() {
+                    replace_key(&mut placement.monitor_key, replacements);
+                }
+            }
         }
         self.normalize_taskbar_layout_profiles();
 
@@ -1854,6 +1932,7 @@ impl Settings {
                 self.codex_taskbar_monitor_key.clone(),
                 self.grok_taskbar_monitor_key.clone(),
                 self.cursor_taskbar_monitor_key.clone(),
+                self.antigravity_taskbar_monitor_key.clone(),
                 self.taskbar_layout_profiles.clone(),
             )
     }
@@ -2419,8 +2498,12 @@ fn tool_colors_from_input(input: &SettingsInput) -> ToolColors {
             .unwrap_or(defaults.grok_secondary),
         cursor_primary: parse_hex_rgb(input.cursor_primary_color.as_deref())
             .unwrap_or(defaults.cursor_primary),
+        antigravity_primary: parse_hex_rgb(input.antigravity_primary_color.as_deref())
+            .unwrap_or(defaults.antigravity_primary),
         cursor_secondary: parse_hex_rgb(input.cursor_secondary_color.as_deref())
             .unwrap_or(defaults.cursor_secondary),
+        antigravity_secondary: parse_hex_rgb(input.antigravity_secondary_color.as_deref())
+            .unwrap_or(defaults.antigravity_secondary),
         warning: parse_hex_rgb(input.tool_warning_color.as_deref()).unwrap_or(defaults.warning),
         danger: parse_hex_rgb(input.tool_danger_color.as_deref()).unwrap_or(defaults.danger),
         warning_on: input.tool_warning_color_on,
@@ -2438,7 +2521,10 @@ fn taskbar_text_colors_from_input(input: &SettingsInput) -> TaskbarTextColors {
         grok: parse_hex_rgb(input.grok_text_color.as_deref()).unwrap_or(defaults.grok),
         grok_on: input.grok_text_color_on,
         cursor: parse_hex_rgb(input.cursor_text_color.as_deref()).unwrap_or(defaults.cursor),
+        antigravity: parse_hex_rgb(input.antigravity_text_color.as_deref())
+            .unwrap_or(defaults.antigravity),
         cursor_on: input.cursor_text_color_on,
+        antigravity_on: input.antigravity_text_color_on,
         info: parse_hex_rgb(input.info_text_color.as_deref()).unwrap_or(defaults.info),
         info_on: input.info_text_color_on,
         ring: parse_hex_rgb(input.ring_text_color.as_deref()).unwrap_or(defaults.ring),
@@ -2521,6 +2607,34 @@ fn replace_existing_file(path: &Path, tmp: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod parser_tests {
+    #[test]
+    fn antigravity_is_opt_in_and_keeps_colors_and_monitor_profile() {
+        use super::*;
+        assert!(!Settings::default().show_antigravity);
+        let settings = Settings::from_input(SettingsInput {
+            show_antigravity: true,
+            antigravity_primary_color: Some("#010203".into()),
+            antigravity_secondary_color: Some("#040506".into()),
+            antigravity_text_color: Some("#070809".into()),
+            antigravity_text_color_on: true,
+            antigravity_taskbar_monitor_key: "monitor:antigravity".into(),
+            antigravity_taskbar_offset_ratio: 0.7,
+            ..SettingsInput::default()
+        });
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(restored.show_antigravity);
+        assert_eq!(restored.tool_colors.antigravity_primary, [1, 2, 3]);
+        assert_eq!(restored.tool_colors.antigravity_secondary, [4, 5, 6]);
+        assert_eq!(restored.taskbar_text_colors.antigravity, [7, 8, 9]);
+        assert!(restored.taskbar_text_colors.antigravity_on);
+        assert_eq!(
+            restored.antigravity_taskbar_monitor_key,
+            "monitor:antigravity"
+        );
+        assert_eq!(restored.antigravity_taskbar_offset_ratio, 0.7);
+        assert!(!restored.antigravity_taskbar_target_initialized);
+    }
     use super::{
         parse_hex_rgb, remove_file_if_exists, Settings, SettingsInput, TaskbarAppearanceProfile,
         TaskbarLayoutProfile, TaskbarPlacement, TaskbarPresentationProfile, ToolColors,
@@ -2743,6 +2857,7 @@ mod parser_tests {
                 codex: None,
                 grok: None,
                 cursor: None,
+                antigravity: None,
                 presentation: Some(presentation),
                 appearance: Some(appearance),
             }],
@@ -2905,6 +3020,7 @@ mod parser_tests {
                     codex: None,
                     grok: None,
                     cursor: None,
+                    antigravity: None,
                     presentation: Some(TaskbarPresentationProfile {
                         bar_mode: "compact".into(),
                         ..TaskbarPresentationProfile::default()
@@ -2948,6 +3064,7 @@ mod parser_tests {
                     codex: None,
                     grok: None,
                     cursor: None,
+                    antigravity: None,
                     presentation: Some(TaskbarPresentationProfile {
                         bar_mode: "compact".into(),
                         ..TaskbarPresentationProfile::default()
@@ -2966,6 +3083,7 @@ mod parser_tests {
                     }),
                     grok: None,
                     cursor: None,
+                    antigravity: None,
                     presentation: None,
                     appearance: None,
                 },

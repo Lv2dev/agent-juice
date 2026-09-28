@@ -14,10 +14,11 @@ const TOOL_LABELS = {
   codex: "Codex",
   grok: "Grok",
   cursor: "Cursor",
+  antigravity: "Antigravity",
 };
 
 const MODES = new Set(["full", "compact", "dual", "quad"]);
-const TOOLS = ["claude", "codex", "grok", "cursor"];
+const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 const INDICATOR_STYLES = new Set(["ring", "bar"]);
 const INDICATOR_EFFECT_STYLES = new Set(["flat", "soft", "depth", "glow", "breathe"]);
 const LIMIT_ORDERS = new Set(["primary_first", "secondary_first"]);
@@ -31,6 +32,7 @@ function toolEnabled(settings, tool) {
   if (tool === "codex") return settings.show_codex !== false;
   if (tool === "grok") return settings.show_grok === true;
   if (tool === "cursor") return settings.show_cursor === true;
+  if (tool === "antigravity") return settings.show_antigravity === true;
   return true;
 }
 
@@ -176,7 +178,7 @@ function shortReset(iso, now, language) {
 function limitModel(labelKey, limit, settings, now, language, tool, secondary = false) {
   const used = finiteNumber(limit?.used_percent);
   const displayed = displayPercentFromUsed(used, settings);
-  const compactCursor = tool === "cursor" && normalizeBarMode(settings?.bar_mode) === "compact";
+  const compactCursor = (tool === "cursor" || tool === "antigravity") && normalizeBarMode(settings?.bar_mode) === "compact";
   const displayLabel = !compactCursor && labelKey ? t(labelKey, language) : "";
   return {
     text: labelKey ? [displayLabel, percentText(displayed)].filter(Boolean).join(" ") : "",
@@ -202,6 +204,10 @@ function grokLimitLabel(limit) {
 function limitLabelKeys(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
+  if (tool === "antigravity") return [
+    status && !status.primary ? null : "limit.geminiModels",
+    status && !status.secondary ? null : "limit.claudeGptModels",
+  ];
   if (tool === "codex" && status) {
     return [
       status.primary == null ? null : "limit.fiveHour",
@@ -282,6 +288,7 @@ function toolTooltip(label, primary, secondary, settings, now, status) {
     if (typeof status.approx === "boolean") {
       lines.push(`${t("tooltip.data", language)}: ${t(status.approx ? "meta.approx" : "tooltip.exact", language)}`);
     }
+    if (status.tool === "antigravity") lines.push(t("tooltip.antigravitySource", language));
     const pc = typeof status.pc_id === "string"
       ? status.pc_id.replace(/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()
       : "";
@@ -324,12 +331,13 @@ export function barToolViewModel(
     brandColor: toolBrandColor(tool, settings),
   };
 
-  if (options.collectionHealth?.[tool] === "login_required") {
+  if (["login_required", "app_required"].includes(options.collectionHealth?.[tool])) {
     const primary = limitModel(primaryLabel, null, settings, now, language, tool, false);
     const secondary = limitModel(secondaryLabel, null, settings, now, language, tool, true);
     primary.visible = true;
     secondary.visible = false;
-    const loginText = t("state.loginRequired", language);
+    const appRequired = options.collectionHealth?.[tool] === "app_required";
+    const loginText = t(appRequired ? "state.antigravityRequired" : "state.loginRequired", language);
     return {
       ...base,
       state: "login_required",
@@ -484,7 +492,9 @@ export function barViewModel(
     grokTextColor: taskbarTextColor(merged, "grok", "#d9578b"),
     grokTextColorOn: taskbarTextColorOn(merged, "grok"),
     cursorTextColor: taskbarTextColor(merged, "cursor", "#85847f"),
+    antigravityTextColor: taskbarTextColor(merged, "antigravity", "#4285f4"),
     cursorTextColorOn: taskbarTextColorOn(merged, "cursor"),
+    antigravityTextColorOn: taskbarTextColorOn(merged, "antigravity"),
     infoTextColor: taskbarTextColor(merged, "info", "#6b7280"),
     infoTextColorOn: taskbarTextColorOn(merged, "info"),
     ringTextColor: taskbarTextColor(merged, "ring", "#6b7280"),

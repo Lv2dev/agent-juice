@@ -185,6 +185,36 @@
         <p class="empty-hint"></p>
         <p class="meta"></p>
       </section>
+      <section class="tool-card" data-tool="antigravity" data-state="empty" hidden>
+        <header class="tool-head">
+          <div class="tool-title">
+            <span class="tool-dot antigravity-dot"></span>
+            <h2>Antigravity</h2>
+          </div>
+          <span class="pc"></span>
+        </header>
+
+        <div class="metric p5h">
+          <div class="metric-row">
+            <span data-i18n="limit.geminiModels">Gemini</span>
+            <strong class="val">-</strong>
+          </div>
+          <div class="track"><span class="fill"></span></div>
+          <p class="reset"></p>
+        </div>
+
+        <div class="metric pweek">
+          <div class="metric-row">
+            <span data-i18n="limit.claudeGptModels">Claude/GPT</span>
+            <strong class="val">-</strong>
+          </div>
+          <div class="track"><span class="fill"></span></div>
+          <p class="reset"></p>
+        </div>
+
+        <p class="empty-hint"></p>
+        <p class="meta"></p>
+      </section>
 
       <section id="activity-card" class="activity-card" data-state="loading" data-filter="all">
         <header class="activity-head">
@@ -405,6 +435,14 @@
                     <span data-i18n="field.cursorSecondaryColor">기타 모델</span>
                     <input type="color" name="cursor_secondary_color" value="#0891b2" />
                   </label>
+                  <label>
+                    <span data-i18n="field.antigravityPrimaryColor">Antigravity Gemini</span>
+                    <input type="color" name="antigravity_primary_color" value="#4285f4" />
+                  </label>
+                  <label>
+                    <span data-i18n="field.antigravitySecondaryColor">Antigravity Claude/GPT</span>
+                    <input type="color" name="antigravity_secondary_color" value="#b27be8" />
+                  </label>
                 </div>
                 <div class="tool-threshold-grid">
                   <label class="tool-threshold-color">
@@ -467,6 +505,16 @@
                     <label class="taskbar-text-color-picker">
                       <span data-i18n="field.textColorValue">색상</span>
                       <input type="color" name="cursor_text_color" value="#85847f" />
+                    </label>
+                  </div>
+                  <div class="taskbar-text-color-item" data-taskbar-text-color="antigravity">
+                    <label class="toggle-row taskbar-text-color-toggle">
+                      <input type="checkbox" name="antigravity_text_color_on" />
+                      <span data-i18n="field.antigravityTextColor">Antigravity 이름</span>
+                    </label>
+                    <label class="taskbar-text-color-picker">
+                      <span data-i18n="field.textColorValue">색상</span>
+                      <input type="color" name="antigravity_text_color" value="#4285f4" />
                     </label>
                   </div>
                   <div class="taskbar-text-color-item" data-taskbar-text-color="info">
@@ -791,6 +839,13 @@
                   <small class="field-help" data-i18n="help.showCursor">Cursor Agent의 월간 두 사용량 풀을 5분 간격으로 수집합니다.</small>
                 </span>
               </label>
+              <label class="toggle-row">
+                <input type="checkbox" name="show_antigravity" />
+                <span class="toggle-copy">
+                  <span class="toggle-title" data-i18n="field.showAntigravity">Antigravity 활성화</span>
+                  <small class="field-help" data-i18n="help.showAntigravity">실행 중인 Antigravity 데스크톱의 모델 한도를 수집합니다. 최소 60초 간격이며 토큰 활동은 포함하지 않습니다.</small>
+                </span>
+              </label>
             </div>
           </fieldset>
 
@@ -1077,6 +1132,7 @@
           <input type="hidden" name="codex_taskbar_offset_ratio" value="0" />
           <input type="hidden" name="grok_taskbar_offset_ratio" value="0" />
           <input type="hidden" name="cursor_taskbar_offset_ratio" value="0" />
+          <input type="hidden" name="antigravity_taskbar_offset_ratio" value="0" />
           </div>
         </details>
 
@@ -1115,7 +1171,7 @@
             <strong>Juice</strong>
             <span><span data-i18n="about.version">버전</span> <b data-app-version>–</b></span>
           </div>
-          <p data-i18n="about.description">Claude Code, Codex, Grok Build, Cursor Agent의 사용량을 Windows 작업표시줄에서 확인하는 로컬 모니터입니다.</p>
+          <p data-i18n="about.description">Claude Code, Codex, Grok Build, Cursor, Antigravity의 사용량을 Windows 작업표시줄에서 확인하는 로컬 모니터입니다.</p>
           <p data-i18n="about.privacy">Juice는 사용량이나 로그인 정보를 별도 Juice 서버에 저장하지 않습니다.</p>
         </div>
       </section>
