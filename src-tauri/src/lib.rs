@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod adapters;
 pub mod antigravity;
+mod claude_desktop;
 pub mod codex_activity;
 pub mod collector;
 pub mod config;
@@ -444,6 +445,8 @@ static CURSOR_COLLECTION_COORDINATOR: Lazy<CollectionCoordinator> =
 static CODEX_ACCOUNT_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static CLAUDE_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
+    Lazy::new(|| Mutex::new(None));
+static CLAUDE_SOURCE_REVISION: Lazy<Mutex<Option<claude_desktop::Revision>>> =
     Lazy::new(|| Mutex::new(None));
 static GROK_BILLING_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
@@ -1302,6 +1305,7 @@ fn collect_representatives_runtime(
     } else {
         None
     };
+    let desktop_source = plan.claude_account && claude_desktop::selected();
     let claude_usage = if plan.claude_account {
         collect_claude_usage_status(
             settings,
@@ -1309,11 +1313,14 @@ fn collect_representatives_runtime(
             now,
             plan.force_claude_account,
             deadlines.claude,
+            desktop_source,
         )
     } else {
         None
     };
-    if let Some(status) = merge_claude_usage_status(claude_status, claude_usage) {
+    if let Some(status) =
+        merge_claude_usage_status(claude_status.filter(|_| !desktop_source), claude_usage)
+    {
         statuses.push(status);
     }
 
@@ -1739,14 +1746,37 @@ fn collect_claude_usage_status(
     now: DateTime<Utc>,
     force: bool,
     deadline: std::time::Instant,
+    desktop_source: bool,
 ) -> Option<AgentStatus> {
-    let mut status = cached_status_attempt(
+    let revision = claude_desktop::revision(desktop_source);
+    reconcile_claude_source(&CLAUDE_USAGE_CACHE, &CLAUDE_SOURCE_REVISION, revision);
+    let status = cached_status_attempt(
         &CLAUDE_USAGE_CACHE,
         now,
         CLAUDE_USAGE_CACHE_MIN_SECS,
         force,
         || {
             let captured_at = now.to_rfc3339();
+            if desktop_source {
+                let timeout = remaining_refresh_budget(
+                    deadline,
+                    std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
+                )?;
+                let raw = claude_desktop::usage(std::time::Instant::now() + timeout).map_err(
+                    |e| match e {
+                        claude_desktop::Error::LoginRequired => CollectionErrorKind::LoginRequired,
+                        claude_desktop::Error::Deadline => CollectionErrorKind::Deadline,
+                        claude_desktop::Error::Transport => CollectionErrorKind::Transport,
+                        claude_desktop::Error::Parse => CollectionErrorKind::Parse,
+                        _ => CollectionErrorKind::Unavailable,
+                    },
+                )?;
+                let mut status =
+                    adapters::claude::parse_oauth_usage_response(&raw, pc_id, &captured_at)
+                        .map_err(|_| CollectionErrorKind::Parse)?;
+                status.session_id = "claude-desktop-usage".into();
+                return Ok(status);
+            }
             let oauth_timeout = remaining_refresh_budget_with_reserve(
                 deadline,
                 std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
@@ -1793,9 +1823,38 @@ fn collect_claude_usage_status(
             }
             parse_claude_fallback_usage(&raw, pc_id, &captured_at, oauth_error)
         },
-    )?;
+    );
+    let mut status = if desktop_source {
+        discard_failed_desktop_status(&CLAUDE_USAGE_CACHE, status)
+    } else {
+        status
+    }?;
     derive_active(&mut status, settings.stale_after_secs, now);
     Some(status)
+}
+
+fn reconcile_claude_source(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    previous: &Mutex<Option<claude_desktop::Revision>>,
+    revision: claude_desktop::Revision,
+) {
+    let mut previous = previous.lock().unwrap_or_else(|e| e.into_inner());
+    if previous.as_ref() != Some(&revision) {
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *previous = Some(revision);
+    }
+}
+
+fn discard_failed_desktop_status(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    status: Option<AgentStatus>,
+) -> Option<AgentStatus> {
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(attempt) = cache.as_mut().filter(|attempt| attempt.error.is_some()) {
+        attempt.last_good = None;
+        return None;
+    }
+    status
 }
 
 fn claude_legacy_fallback_allowed(error: &CollectionErrorKind, force: bool) -> bool {
@@ -2092,6 +2151,7 @@ fn merge_claude_usage_status(
     usage: Option<AgentStatus>,
 ) -> Option<AgentStatus> {
     match (statusline, usage) {
+        (_, Some(usage)) if usage.session_id == "claude-desktop-usage" => Some(usage),
         (Some(statusline), Some(usage)) if statusline.session.active && !usage.session.active => {
             Some(statusline)
         }
@@ -9081,6 +9141,44 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].session_id, "older-valid");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_values_never_merge_an_unrelated_statusline_or_survive_failure() {
+        use crate::model;
+        use chrono::Utc;
+        use std::sync::Mutex;
+        let mut desktop = status_for_signature("claude-desktop-usage");
+        desktop.tool = Tool::Claude;
+        desktop.primary = Some(model::AccountLimit {
+            label: "5h".into(),
+            used_percent: Some(20.0),
+            resets_at: None,
+        });
+        desktop.secondary = None;
+        desktop.session.active = false;
+        let mut statusline = desktop.clone();
+        statusline.session_id = "another-account".into();
+        statusline.session.active = true;
+        statusline.secondary = Some(model::AccountLimit {
+            label: "week".into(),
+            used_percent: Some(99.0),
+            resets_at: None,
+        });
+        statusline.cost_estimate_usd = Some(123.0);
+        let merged =
+            super::merge_claude_usage_status(Some(statusline), Some(desktop.clone())).unwrap();
+        assert_eq!(merged.session_id, "claude-desktop-usage");
+        assert!(merged.secondary.is_none());
+        assert_eq!(merged.cost_estimate_usd, desktop.cost_estimate_usd);
+        let cache = Mutex::new(None);
+        let now = Utc::now();
+        super::cached_status_attempt(&cache, now, 60, true, || Ok(desktop));
+        let result = super::cached_status_attempt(&cache, now, 60, true, || {
+            Err(super::CollectionErrorKind::Unavailable)
+        });
+        assert!(super::discard_failed_desktop_status(&cache, result).is_none());
+        assert!(cache.lock().unwrap().as_ref().unwrap().last_good.is_none());
     }
 
     #[test]

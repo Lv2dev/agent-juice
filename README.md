@@ -25,14 +25,14 @@
 
 ### 무엇을 보여주나요?
 
-Juice는 현재 PC에 로그인된 Claude Code의 **5시간/주간 한도**, Codex 계정이 현재 제공하는 **5시간·주간 한도**, Grok Build의 **현재 주간 또는 월간 한도**, Cursor의 **Cursor Models/Other Models 월간 풀**을 읽어 작업표시줄과 설정 패널에 표시합니다. Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
+Juice는 현재 PC의 Claude Code 또는 Claude 데스크톱 로그인으로 조회한 **5시간/주간 한도**, Codex 계정이 현재 제공하는 **5시간·주간 한도**, Grok Build의 **현재 주간 또는 월간 한도**, Cursor의 **Cursor Models/Other Models 월간 풀**을 읽어 작업표시줄과 설정 패널에 표시합니다. Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
 
 Antigravity는 실행 중인 데스크톱 앱을 통해 **Gemini의 5시간·주간 한도**를 갱신해 표시합니다. 앱이 닫힌 상태의 독립 계정 조회와 토큰 활동은 아직 지원하지 않습니다.
 
 | 기능 | 동작 |
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
-| 로컬 로그인 기반 수집 | 현재 PC의 Claude Code 로그인/statusline, 자동 탐색한 Codex Desktop 또는 CLI의 persistent app-server와 rollout, Grok Build 공식 ACP, Cursor GUI 또는 Agent CLI 로그인을 사용합니다. |
+| 로컬 로그인 기반 수집 | Claude Code 또는 Claude 데스크톱 로그인, Codex Desktop/CLI의 persistent app-server와 rollout, Grok Build 공식 ACP, Cursor GUI/Agent 로그인을 사용합니다. |
 | Antigravity GUI 수집 | 실행 중인 Antigravity 데스크톱의 상태를 읽습니다. 별도 CLI나 모델 프롬프트를 실행하지 않습니다. |
 | 로그인 상태 안내 | 명시적인 인증 실패가 확인되면 오래된 값을 현재값처럼 표시하지 않고 해당 카드와 바에 `로그인 필요`를 표시합니다. 네트워크·timeout·형식 오류와는 구분합니다. |
 | 토큰 활동 | Claude·Grok의 현재 PC 로컬 기록과 Codex·Cursor 계정의 공식 token activity를 일별로 집계해 최근 4~52주 히트맵으로 표시합니다. |
@@ -48,7 +48,7 @@ Antigravity는 실행 중인 데스크톱 앱을 통해 **Gemini의 5시간·주
 
 | 도구 | 우선 수집원 | 보조 수집원 | 표시 정확도 |
 | --- | --- | --- | --- |
-| Claude | Claude Code 로컬 로그인의 OAuth usage 조회 | statusline `rate_limits`, 구버전 `/usage` fallback | OAuth 조회는 계정 한도이며, statusline과 fallback 일부 값은 근사치일 수 있습니다. |
+| Claude | Claude Code 로그인 우선, 없거나 만료되면 Claude 데스크톱의 기존 로그인으로 계정 조회 | Code 경로에서만 statusline `rate_limits`, 구버전 `/usage` fallback | GUI 경로는 계정·조직을 확인하며 Code 세션 한도와 합치지 않습니다. |
 | Codex | 자동 탐색한 Codex Desktop 또는 CLI의 공식 app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | 한 번 연결한 app-server를 재사용해 현재 한도를 정확값으로 표시하며, rollout fallback은 근사치입니다. |
 | Grok Build | 공식 ACP `_x.ai/billing` | 없음 | ACP가 반환한 현재 단일 주간/월간 크레딧 period를 정확값으로 표시합니다. 세션·프롬프트·모델 호출은 만들지 않습니다. |
 | Cursor | Cursor GUI 또는 Agent CLI 로컬 credential로 Dashboard usage 조회 | credential이 없는 구버전 Agent의 bounded `/usage` | 같은 계정의 Auto/API 월간 풀을 정확값으로 표시하며 어느 경로도 모델 프롬프트를 보내지 않습니다. |
@@ -197,11 +197,14 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 
 **Claude 계정 사용량 자동 수집**은 `수집` 탭의 일반 기능이며 기본값은 **켜짐**입니다.
 
-- 옵션을 켜면 Claude Code가 관리하는 로컬 로그인을 사용해 계정의 5시간·주간 usage를 직접 조회합니다. Claude 채팅이나 모델 턴은 전송하지 않습니다.
-- OAuth 토큰은 Claude Code 자격 증명 파일에서 호출 시점에만 읽고, 프로세스 인자나 로그에 기록하지 않습니다.
+- 유효한 로컬 Claude Code 로그인이 있으면 우선 사용합니다. Code 로그인이 없거나 만료되면 Claude 데스크톱이 저장한 기존 로그인으로 계정의 5시간·주간 usage를 조회합니다. 추가 로그인이나 채팅 전송은 필요하지 않습니다.
+- Windows 일반 설치와 Microsoft Store 설치의 기본 Claude 프로필을 확인합니다. 앱이 생성한 호환되는 유효 인증 캐시가 필요하며, 캐시가 없거나 만료되었다면 Claude 앱을 열어 로그인 상태를 확인하세요. Juice는 인증 갱신이나 권한 추가를 대신하지 않습니다.
+- 데스크톱 인증은 동일 Windows 사용자의 표준 암호화 API로 메모리에서만 읽습니다. CLI·PowerShell을 반복 실행하거나 토큰을 인자·로그·별도 인증 파일에 저장하지 않습니다.
+- GUI 경로는 서버의 계정·조직이 인증 캐시와 일치하는지 확인합니다. 복수 프로필·조직이 모호하거나 조회 중 인증 파일이 바뀌면 값을 표시하지 않습니다. Code와 GUI의 한도를 합산하지 않고, GUI 조회 실패 시 오래된 Code statusline 값으로 대체하지 않습니다.
 - 명시적인 인증 실패는 legacy CLI를 자동 실행하지 않고 `로그인 필요`로 표시합니다. endpoint 형식이 호환되지 않거나 사용자가 강제 새로고침한 경우에만 bounded `/usage` fallback을 사용할 수 있습니다.
 - 정확 OAuth 계정 한도는 statusline의 오래된 계정 값보다 우선합니다. 구버전 `/usage` fallback은 비어 있는 값만 보충하며, endpoint 또는 CLI 형식이 바뀌면 기존 statusline 결과를 유지합니다.
-- 기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다.
+- 기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다. 인증 파일이나 수집 소스가 바뀌면 이전 캐시와 실패 대기 상태를 버리고 다시 조회합니다.
+- GUI 일반 채팅의 토큰 활동 잔디는 포함하지 않습니다. Claude 활동 집계는 기존 Code 로컬 기록 범위입니다. GUI 인증 저장 형식은 내부 구현이므로 앱 업데이트에 따라 지원이 달라질 수 있습니다.
 - 표시줄 탭에서 Claude를 끄면 계정 조회와 statusline 수집이 모두 중단되고 기존 Claude statusline 설정이 복원됩니다. 다시 켜면 수집 연결을 자동 복구하고 즉시 새 값을 조회합니다.
 
 ### Grok Build 사용량 자동 수집
@@ -265,10 +268,10 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 
 ### 다른 PC에서 값이 안 보일 때
 
-Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude Code·Codex·Grok Build·Cursor의 로컬 로그인을 각각 확인해야 합니다. 단, Cursor 활동 필터는 Cursor 계정 자체가 제공하는 event라 같은 계정의 다른 PC·Cloud Agent 사용도 포함합니다.
+Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude 앱/Code·Codex·Grok Build·Cursor의 로컬 로그인을 각각 확인해야 합니다. 단, Cursor 활동 필터는 Cursor 계정 자체가 제공하는 event라 같은 계정의 다른 PC·Cloud Agent 사용도 포함합니다.
 
 1. Juice에서 Claude가 활성화되어 있는지 확인해 statusline 자동 연결과 수집을 시작합니다.
-2. 기본 Claude 자동 수집을 유지하거나 Claude Code를 한 번 사용해 statusline forward 파일을 생성합니다.
+2. Claude 계정 자동 수집을 켜고 Code 또는 Claude 앱의 로그인을 확인합니다. GUI 경로에서는 Code 사용이나 statusline 파일 생성이 필요하지 않습니다.
 3. Codex Desktop 또는 Codex CLI 로그인을 확인합니다. Juice는 둘 중 사용 가능한 공식 app-server runtime을 자동 탐색합니다.
 4. exact 조회가 일시적으로 실패할 때 사용할 rollout JSONL은 해당 PC에서 Codex를 사용한 적이 있는 경우에만 생성됩니다.
 5. Grok을 사용한다면 Grok Build 로그인을 확인하고 Juice에서 Grok을 활성화합니다.
@@ -278,8 +281,8 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 
 ### 문제 해결
 
-- **로그인 필요가 표시됨:** 해당 Claude Code·Codex Desktop/CLI·Grok Build·Cursor GUI/Agent에 다시 로그인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
-- **Claude가 비어 있음:** 표시줄 탭에서 Claude가 활성화되어 있고 Claude 계정 자동 수집이 켜져 있는지 확인하거나, Juice를 다시 실행한 뒤 Claude Code를 한 번 사용하세요.
+- **로그인 필요가 표시됨:** 사용 중인 Claude 앱/Code·Codex Desktop/CLI·Grok Build·Cursor GUI/Agent의 로그인 상태를 확인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
+- **Claude가 비어 있음:** Claude 표시와 계정 자동 수집을 켜세요. GUI만 사용하는 경우 Claude 앱의 로그인을 확인하고 강제 새로고침하면 됩니다. 만료·미지원·모호한 GUI 인증을 무조건 로그아웃으로 단정하지는 않습니다.
 - **Codex가 비어 있음:** 현재 PC의 Codex Desktop 또는 CLI 설치·로그인을 확인하고 강제 새로고침하세요. Juice는 Desktop versioned runtime을 우선 탐색하고 CLI로 fallback합니다.
 - **Grok이 비어 있음:** 표시줄 탭에서 Grok을 활성화하고 현재 PC의 Grok Build 설치·로그인을 확인하세요. Grok은 기본 OFF이며 공식 ACP billing을 사용할 수 있을 때 표시됩니다.
 - **Cursor가 비어 있음:** 표시줄 탭에서 Cursor를 활성화하고 Cursor GUI 또는 Agent CLI 로그인을 확인한 뒤 강제 새로고침하세요. Juice는 GUI credential, CLI credential, bounded `/usage` 순서로 시도합니다.
@@ -290,7 +293,7 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 ### 개인정보와 한계
 
 - Juice가 저장하는 설정과 수집 결과는 현재 PC에만 남으며 별도 Juice 서버로 전송하지 않습니다.
-- Claude 계정 자동 수집은 로컬 Claude Code OAuth token을 Anthropic의 Claude usage endpoint에만 보내 계정 한도를 조회합니다.
+- Claude 계정 자동 수집은 로컬 Code/데스크톱 access token을 Anthropic의 고정 usage endpoint에만 보내며, GUI 경로에서는 같은 서버의 profile endpoint로 계정·조직을 검증합니다. refresh token은 사용하거나 저장하지 않습니다.
 - Grok 한도 수집은 로그인된 공식 Grok Build 실행 파일의 로컬 ACP만 호출하며 Juice가 Grok 인증 token이나 `auth.json`을 읽지 않습니다.
 - Cursor 한도는 GUI 또는 Agent CLI의 local access token을 고정 Cursor Dashboard usage endpoint에만 전달합니다. refresh token은 사용·보관하지 않으며, credential 기반 조회가 불가능할 때만 Agent PTY `/usage`를 사용합니다.
 - Cursor 토큰 활동은 같은 account Dashboard의 event를 읽으며 계정 전체 범위입니다. Juice는 날짜별 네 token component 합계만 local cache에 남기고 email·model·conversation/request ID와 raw response를 저장하지 않습니다.
@@ -313,14 +316,14 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 
 ### What does Juice show?
 
-Juice reads Claude Code's **5-hour and weekly limits**, whichever **5-hour or weekly windows the Codex account currently provides**, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor. When Codex exposes only one window, Juice renders that real limit without an empty placeholder. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
+Juice reads Claude's **5-hour and weekly limits** through a local Code or desktop login, whichever **5-hour or weekly windows the Codex account currently provides**, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor. When Codex exposes only one window, Juice renders that real limit without an empty placeholder. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
 
 Antigravity refreshes and displays **Gemini's five-hour and weekly quotas** through its running desktop app. Independent account reads while the app is closed and token activity are not supported yet.
 
 | Feature | Behavior |
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
-| Local-login collection | Uses the local Claude Code login/statusline, an auto-detected Codex Desktop or CLI persistent app-server plus rollout data, official Grok Build ACP, and an existing Cursor GUI or Agent CLI login. |
+| Local-login collection | Uses a Claude Code or desktop login, Codex Desktop/CLI persistent app-server and rollout data, official Grok Build ACP, and a Cursor GUI/Agent login. |
 | Antigravity GUI collection | Reads state from the running Antigravity desktop without starting a CLI or sending a model prompt. |
 | Sign-in status | When an explicit authentication failure is confirmed, Juice shows `Sign in required` on that card and bar instead of presenting stale values as current. Network, timeout, and format errors remain distinct. |
 | Token activity | Aggregates local Claude/Grok records and official Codex/Cursor account activity by date for a 4 to 52 week heatmap. |
@@ -336,7 +339,7 @@ Antigravity refreshes and displays **Gemini's five-hour and weekly quotas** thro
 
 | Tool | Preferred source | Fallback source | Accuracy |
 | --- | --- | --- | --- |
-| Claude | OAuth usage lookup through the local Claude Code login | statusline `rate_limits`, then legacy `/usage` fallback | OAuth values are account limits; some statusline and fallback values may be approximate. |
+| Claude | Local Code login first; existing desktop login when Code login is absent or expired | Code path only: statusline `rate_limits` and legacy `/usage` fallback | Desktop reads validate account and organization without merging Code session limits. |
 | Codex | Official `account/rateLimits/read` through an auto-detected Codex Desktop or CLI app-server | Latest rollout JSONL under `~/.codex/sessions` | Reuses one app-server connection for exact current limits; rollout fallback is approximate. |
 | Grok Build | Official ACP `_x.ai/billing` | None | Shows the exact current single weekly/monthly credit period returned by ACP without creating a session, prompt, or model call. |
 | Cursor | Dashboard usage through local Cursor GUI or Agent CLI credentials | Bounded `/usage` for legacy Agents without usable credentials | Shows the same account Auto/API monthly pools without sending a model prompt. |
@@ -485,11 +488,14 @@ The `About` card contains only the current version, product purpose, and local-p
 
 **Claude account usage auto-collection** is a regular option in the `Collection` tab and is **on by default**.
 
-- When enabled, Juice uses the local Claude Code login to read the account 5-hour and weekly usage directly. It sends no Claude chat or model turn.
-- OAuth tokens are read only at request time from Claude Code credentials and are never placed in process arguments or logs.
+- Juice prefers an available, unexpired local Claude Code login. If it is absent or expired, Juice reads the account's five-hour and weekly usage through the existing Claude desktop login, without another sign-in or chat message.
+- Default Windows profiles for regular and Microsoft Store installations are supported. A compatible, valid authentication cache created by Claude is required. If it is absent or expired, open Claude and check its login. Juice does not renew credentials or request additional permissions.
+- Desktop credentials are decoded in memory using standard Windows cryptography for the same user. Collection does not repeatedly start a CLI or PowerShell, or put tokens in arguments, logs, or a separate credential file.
+- Desktop reads validate the server account and organization against the cache. Ambiguous profiles/organizations or credentials changing during a request suppress the result. Desktop limits are neither summed with Code limits nor replaced by old Code statusline data after a failure.
 - Explicit authentication failures show `Sign in required` without automatically starting the legacy CLI. A bounded `/usage` fallback remains only for incompatible endpoint formats or a user-forced refresh.
 - Exact OAuth account limits take priority over stale statusline account values. Legacy `/usage` only fills missing values; if the endpoint or CLI format changes, Juice keeps the statusline result.
-- The default collection interval and Claude account cache are both 60 seconds.
+- The default collection interval and Claude account cache are both 60 seconds. Credential file or source changes invalidate the previous cache and retry backoff.
+- General GUI chat token activity is not included in the heatmap; Claude activity still comes from local Code records. Desktop credential storage is an internal interface and may change with app updates.
 - Disabling Claude in the Taskbar tab stops account and statusline collection and restores the previous Claude statusline configuration. Enabling it reconnects collection and requests fresh data immediately.
 
 ### Automatic Grok Build usage collection
@@ -553,10 +559,10 @@ Cursor defaults to **off** so existing users do not suddenly receive an empty fo
 
 ### If another PC shows no data
 
-Juice v1 has no Juice server and does not synchronize its cache between PCs. Install Juice and verify the local Claude Code, Codex, Grok Build, and Cursor logins on every PC. The Cursor activity filter is the exception in scope: Cursor account events include other PCs and Cloud Agents on the same account.
+Juice v1 has no Juice server and does not synchronize its cache between PCs. Install Juice and verify the local Claude app/Code, Codex, Grok Build, and Cursor logins on every PC. The Cursor activity filter is the exception in scope: Cursor account events include other PCs and Cloud Agents on the same account.
 
 1. Confirm that Claude is enabled in Juice so automatic statusline connection and collection can start.
-2. Keep the default Claude auto-collection enabled or use Claude Code once to create statusline forward data.
+2. Enable Claude account auto-collection and check the Code or desktop login. The desktop path does not require Code usage or a statusline file.
 3. Confirm a Codex Desktop or Codex CLI login. Juice automatically discovers either official app-server runtime.
 4. Rollout JSONL fallback exists only after Codex has produced local records on that PC.
 5. If you use Grok, confirm the Grok Build login and enable Grok in Juice.
@@ -566,8 +572,8 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
 ### Troubleshooting
 
-- **Sign in required is shown:** Sign in again to the affected Claude Code, Codex Desktop/CLI, Grok Build, or Cursor GUI/Agent account, then force a refresh in Juice. The state clears automatically after the next successful collection.
-- **Claude is empty:** Confirm that Claude is enabled in the Taskbar tab and account auto-collection is on, or restart Juice and use Claude Code once.
+- **Sign in required is shown:** Check the affected Claude app/Code, Codex Desktop/CLI, Grok Build, or Cursor GUI/Agent login, then force a refresh in Juice. The state clears after a successful collection.
+- **Claude is empty:** Enable Claude and account auto-collection. GUI-only users can check the Claude app login and force a refresh. Expired, unsupported, or ambiguous desktop caches are not automatically treated as a sign-out.
 - **Codex is empty:** Confirm the local Codex Desktop or CLI installation and login, then force a refresh. Juice prefers the Desktop versioned runtime and falls back to the CLI.
 - **Grok is empty:** Enable Grok in the Taskbar tab and confirm the local Grok Build installation and login. Grok defaults to off and appears when official ACP billing is available.
 - **Cursor is empty:** Enable Cursor in the Taskbar tab, confirm a Cursor GUI or Agent CLI login, then force a refresh. Juice tries GUI credentials, CLI credentials, and bounded `/usage` in that order.
@@ -578,7 +584,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 ### Privacy and limitations
 
 - Settings and collected results stored by Juice remain on the current PC and are not sent to a separate Juice server.
-- Claude account auto-collection sends the local Claude Code OAuth token only to Anthropic's Claude usage endpoint to read account limits.
+- Claude account auto-collection sends the local Code/desktop access token only to Anthropic's fixed usage endpoint; the desktop path also checks the account and organization through the same server's profile endpoint. Refresh tokens are never used or stored.
 - Grok limit collection calls only the logged-in official Grok Build local ACP; Juice never reads its authentication token or `auth.json`.
 - Cursor limits send the GUI or Agent CLI local access token only to the fixed Cursor Dashboard usage endpoint. Juice never uses or retains the refresh token and invokes Agent PTY `/usage` only when credential-based lookup is unavailable.
 - Cursor token activity is account-wide. Juice stores only daily totals of the four token components and discards email, model, conversation/request IDs, and raw responses.
