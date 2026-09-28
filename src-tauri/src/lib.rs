@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod adapters;
+pub mod antigravity;
 pub mod codex_activity;
 pub mod collector;
 pub mod config;
@@ -55,7 +56,7 @@ const TASKBAR_DRAG_THRESHOLD_PX: i32 = 3;
 const TASKBAR_TOOLTIP_DELAY_MS: u64 = 450;
 const TASKBAR_TOPOLOGY_STABLE_OBSERVATIONS: u8 = 3;
 const MAX_PENDING_TASKBAR_PROFILE_PLACEMENTS: usize = 32;
-const TASKBAR_TOOLS: [&str; 4] = ["claude", "codex", "grok", "cursor"];
+const TASKBAR_TOOLS: [&str; 5] = ["claude", "codex", "grok", "cursor", "antigravity"];
 const CODEX_REPRESENTATIVE_CANDIDATES: usize = 32;
 const CODEX_ACCOUNT_CACHE_MIN_SECS: i64 = 30;
 const CODEX_ACCOUNT_API_TIMEOUT_SECS: u64 = 5;
@@ -118,6 +119,7 @@ struct TaskbarMenuState {
     codex: Mutex<TaskbarMenuLayout>,
     grok: Mutex<TaskbarMenuLayout>,
     cursor: Mutex<TaskbarMenuLayout>,
+    antigravity: Mutex<TaskbarMenuLayout>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -185,6 +187,7 @@ struct TaskbarContentLayoutState {
     codex: Mutex<Option<TaskbarContentLayout>>,
     grok: Mutex<Option<TaskbarContentLayout>>,
     cursor: Mutex<Option<TaskbarContentLayout>>,
+    antigravity: Mutex<Option<TaskbarContentLayout>>,
 }
 
 #[derive(Default)]
@@ -193,6 +196,7 @@ struct TaskbarWindowState {
     codex: Mutex<Option<TaskbarWindowHandle>>,
     grok: Mutex<Option<TaskbarWindowHandle>>,
     cursor: Mutex<Option<TaskbarWindowHandle>>,
+    antigravity: Mutex<Option<TaskbarWindowHandle>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +269,7 @@ enum CollectionErrorKind {
 #[serde(rename_all = "snake_case")]
 enum CollectionHealth {
     Ready,
+    AppRequired,
     LoginRequired,
     Unavailable,
     TransientError,
@@ -276,6 +281,7 @@ struct CollectionHealthSnapshot {
     codex: CollectionHealth,
     grok: CollectionHealth,
     cursor: CollectionHealth,
+    antigravity: CollectionHealth,
 }
 
 #[derive(Clone)]
@@ -1003,7 +1009,11 @@ fn collect_representatives_with_options_and_late_app(
     force_cursor_usage: bool,
     late_cursor_app: Option<tauri::AppHandle>,
 ) -> Vec<AgentStatus> {
-    if !settings.show_claude && !settings.show_codex && !settings.show_grok && !settings.show_cursor
+    if !settings.show_claude
+        && !settings.show_codex
+        && !settings.show_grok
+        && !settings.show_cursor
+        && !settings.show_antigravity
     {
         return Vec::new();
     }
@@ -1015,6 +1025,21 @@ fn collect_representatives_with_options_and_late_app(
         started + std::time::Duration::from_secs(COLLECTION_REFRESH_DEADLINE_SECS);
     let cursor_deadline = started + std::time::Duration::from_secs(CURSOR_USAGE_TIMEOUT_SECS);
     let on_time_cursor_app = late_cursor_app.clone();
+    let antigravity_result = settings.show_antigravity.then(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let force =
+            force_codex_account || force_claude_usage || force_grok_billing || force_cursor_usage;
+        let thread = std::thread::Builder::new()
+            .name("juice-antigravity-usage".into())
+            .spawn(move || {
+                antigravity::refresh(force, started + antigravity::COLLECTION_TIMEOUT);
+                // Queue completion only: a toggle can retire this result while
+                // the other providers are still being collected.
+                let _ = sender.send(());
+            })
+            .ok();
+        (receiver, thread)
+    });
     let cursor_result = settings.show_cursor.then(|| {
         let cursor_settings = settings.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(0);
@@ -1032,7 +1057,7 @@ fn collect_representatives_with_options_and_late_app(
                         let Some(app) = late_cursor_app else {
                             return;
                         };
-                        let mut snapshot = COLLECTION_COORDINATOR.last_result();
+                        let mut snapshot = combined_collection_last_result();
                         snapshot.extend(result.statuses);
                         let snapshot =
                             filter_enabled_statuses(latest_per_tool(&snapshot), &cursor_settings);
@@ -1075,6 +1100,12 @@ fn collect_representatives_with_options_and_late_app(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
         }
+        drop(thread);
+    }
+    if let Some((receiver, thread)) = antigravity_result {
+        let remaining = provider_deadline.saturating_duration_since(std::time::Instant::now());
+        let _ = receiver.recv_timeout(remaining);
+        statuses.extend(antigravity::cached());
         drop(thread);
     }
     let statuses = filter_enabled_statuses(latest_per_tool(&statuses), settings);
@@ -1153,6 +1184,7 @@ fn filter_enabled_statuses(
         Tool::Codex => settings.show_codex,
         Tool::Grok => settings.show_grok,
         Tool::Cursor => settings.show_cursor,
+        Tool::Antigravity => settings.show_antigravity,
     });
     statuses
 }
@@ -1160,6 +1192,7 @@ fn filter_enabled_statuses(
 fn combined_collection_last_result() -> Vec<AgentStatus> {
     let mut statuses = COLLECTION_COORDINATOR.last_result();
     statuses.extend(CURSOR_COLLECTION_COORDINATOR.last_result());
+    statuses.extend(antigravity::cached());
     latest_per_tool(&statuses)
 }
 
@@ -1622,6 +1655,13 @@ fn collection_health_snapshot() -> CollectionHealthSnapshot {
         codex: cached_collection_health(&CODEX_ACCOUNT_CACHE),
         grok: cached_collection_health(&GROK_BILLING_CACHE),
         cursor: cursor_collection_health(),
+        antigravity: match antigravity::last_error() {
+            Some(antigravity::Error::AppRequired) => CollectionHealth::AppRequired,
+            Some(antigravity::Error::LoginRequired) => CollectionHealth::LoginRequired,
+            Some(antigravity::Error::Unavailable) => CollectionHealth::TransientError,
+            None if antigravity::cached().is_some() => CollectionHealth::Ready,
+            None => CollectionHealth::Unavailable,
+        },
     }
 }
 
@@ -2158,6 +2198,7 @@ pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
     let mut codex: Option<&AgentStatus> = None;
     let mut grok: Option<&AgentStatus> = None;
     let mut cursor: Option<&AgentStatus> = None;
+    let mut antigravity: Option<&AgentStatus> = None;
 
     for status in all {
         let slot = match &status.tool {
@@ -2165,6 +2206,7 @@ pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
             Tool::Codex => &mut codex,
             Tool::Grok => &mut grok,
             Tool::Cursor => &mut cursor,
+            Tool::Antigravity => &mut antigravity,
         };
 
         if slot
@@ -2175,7 +2217,7 @@ pub fn latest_per_tool(all: &[AgentStatus]) -> Vec<AgentStatus> {
         }
     }
 
-    [claude, codex, grok, cursor]
+    [claude, codex, grok, cursor, antigravity]
         .into_iter()
         .flatten()
         .cloned()
@@ -2452,6 +2494,7 @@ fn normalize_taskbar_tool(tool: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "grok" => Some("grok"),
         "cursor" => Some("cursor"),
+        "antigravity" => Some("antigravity"),
         _ => None,
     }
 }
@@ -2471,6 +2514,7 @@ fn taskbar_bar_label(tool: &str) -> Option<&'static str> {
         "codex" => Some("bar-codex"),
         "grok" => Some("bar-grok"),
         "cursor" => Some("bar-cursor"),
+        "antigravity" => Some("bar-antigravity"),
         _ => None,
     }
 }
@@ -2484,6 +2528,7 @@ fn taskbar_window_slot<'a>(
         "codex" => Some(&state.codex),
         "grok" => Some(&state.grok),
         "cursor" => Some(&state.cursor),
+        "antigravity" => Some(&state.antigravity),
         _ => None,
     }
 }
@@ -2713,6 +2758,7 @@ fn taskbar_offset_ratio(settings: &Settings, tool: &str) -> f32 {
         Some("codex") => settings.codex_taskbar_offset_ratio,
         Some("grok") => settings.grok_taskbar_offset_ratio,
         Some("cursor") => settings.cursor_taskbar_offset_ratio,
+        Some("antigravity") => settings.antigravity_taskbar_offset_ratio,
         _ => settings.taskbar_offset_ratio,
     }
 }
@@ -2724,6 +2770,7 @@ fn set_taskbar_offset_ratio(settings: &mut Settings, tool: &str, ratio: f32) {
         Some("codex") => settings.codex_taskbar_offset_ratio = ratio,
         Some("grok") => settings.grok_taskbar_offset_ratio = ratio,
         Some("cursor") => settings.cursor_taskbar_offset_ratio = ratio,
+        Some("antigravity") => settings.antigravity_taskbar_offset_ratio = ratio,
         _ => settings.taskbar_offset_ratio = ratio,
     }
 }
@@ -2734,6 +2781,7 @@ fn taskbar_monitor_key<'a>(settings: &'a Settings, tool: &str) -> &'a str {
         Some("codex") => &settings.codex_taskbar_monitor_key,
         Some("grok") => &settings.grok_taskbar_monitor_key,
         Some("cursor") => &settings.cursor_taskbar_monitor_key,
+        Some("antigravity") => &settings.antigravity_taskbar_monitor_key,
         _ => "",
     }
 }
@@ -2744,6 +2792,7 @@ fn taskbar_target_initialized(settings: &Settings, tool: &str) -> bool {
         Some("codex") => settings.codex_taskbar_target_initialized,
         Some("grok") => settings.grok_taskbar_target_initialized,
         Some("cursor") => settings.cursor_taskbar_target_initialized,
+        Some("antigravity") => settings.antigravity_taskbar_target_initialized,
         _ => true,
     }
 }
@@ -2754,6 +2803,7 @@ fn set_taskbar_target_initialized(settings: &mut Settings, tool: &str, initializ
         Some("codex") => settings.codex_taskbar_target_initialized = initialized,
         Some("grok") => settings.grok_taskbar_target_initialized = initialized,
         Some("cursor") => settings.cursor_taskbar_target_initialized = initialized,
+        Some("antigravity") => settings.antigravity_taskbar_target_initialized = initialized,
         _ => {}
     }
 }
@@ -2771,6 +2821,7 @@ fn set_taskbar_target(settings: &mut Settings, tool: &str, monitor_key: &str, ra
         Some("codex") => settings.codex_taskbar_monitor_key = monitor_key.to_string(),
         Some("grok") => settings.grok_taskbar_monitor_key = monitor_key.to_string(),
         Some("cursor") => settings.cursor_taskbar_monitor_key = monitor_key.to_string(),
+        Some("antigravity") => settings.antigravity_taskbar_monitor_key = monitor_key.to_string(),
         _ => {}
     }
     set_taskbar_target_initialized(settings, tool, true);
@@ -2803,6 +2854,7 @@ fn taskbar_layout_profile_from_current(
         codex: taskbar_profile_placement(settings, "codex", topology),
         grok: taskbar_profile_placement(settings, "grok", topology),
         cursor: taskbar_profile_placement(settings, "cursor", topology),
+        antigravity: taskbar_profile_placement(settings, "antigravity", topology),
         presentation: settings
             .taskbar_profile_presentation_on
             .then(|| TaskbarPresentationProfile::from_settings(settings)),
@@ -2813,7 +2865,8 @@ fn taskbar_layout_profile_from_current(
     (profile.claude.is_some()
         || profile.codex.is_some()
         || profile.grok.is_some()
-        || profile.cursor.is_some())
+        || profile.cursor.is_some()
+        || profile.antigravity.is_some())
     .then_some(profile)
 }
 
@@ -2850,6 +2903,14 @@ fn apply_taskbar_layout_profile(settings: &mut Settings, topology: &TaskbarTopol
         set_taskbar_target(
             settings,
             "cursor",
+            &placement.monitor_key,
+            placement.offset_ratio,
+        );
+    }
+    if let Some(placement) = profile.antigravity {
+        set_taskbar_target(
+            settings,
+            "antigravity",
             &placement.monitor_key,
             placement.offset_ratio,
         );
@@ -2914,6 +2975,10 @@ fn complete_taskbar_layout_profile(settings: &mut Settings, topology: &TaskbarTo
         profile.cursor = current.cursor;
         changed = true;
     }
+    if profile.antigravity.is_none() && current.antigravity.is_some() {
+        profile.antigravity = current.antigravity;
+        changed = true;
+    }
     if settings.taskbar_profile_presentation_on
         && profile.presentation.is_none()
         && current.presentation.is_some()
@@ -2949,6 +3014,7 @@ fn apply_pending_taskbar_profile_placements(
             codex: None,
             grok: None,
             cursor: None,
+            antigravity: None,
             presentation: settings
                 .taskbar_profile_presentation_on
                 .then(|| TaskbarPresentationProfile::from_settings(settings)),
@@ -2969,6 +3035,7 @@ fn apply_pending_taskbar_profile_placements(
             "codex" => profile.codex = Some(item.placement.clone()),
             "grok" => profile.grok = Some(item.placement.clone()),
             "cursor" => profile.cursor = Some(item.placement.clone()),
+            "antigravity" => profile.antigravity = Some(item.placement.clone()),
             _ => {}
         }
     }
@@ -3026,8 +3093,8 @@ impl TaskbarTopologyStability {
 fn pending_taskbar_target_ratios(
     settings: &Settings,
     taskbar_rect: taskbar::DockRect,
-    tool_lengths: [Option<i32>; 4],
-) -> Option<[Option<f32>; 4]> {
+    tool_lengths: [Option<i32>; TASKBAR_TOOLS.len()],
+) -> Option<[Option<f32>; TASKBAR_TOOLS.len()]> {
     if taskbar_rect.width <= 0 || taskbar_rect.height <= 0 {
         return None;
     }
@@ -3045,12 +3112,14 @@ fn pending_taskbar_target_ratios(
         settings.codex_taskbar_target_initialized,
         settings.grok_taskbar_target_initialized,
         settings.cursor_taskbar_target_initialized,
+        settings.antigravity_taskbar_target_initialized,
     ];
     let existing_ratios = [
         settings.claude_taskbar_offset_ratio,
         settings.codex_taskbar_offset_ratio,
         settings.grok_taskbar_offset_ratio,
         settings.cursor_taskbar_offset_ratio,
+        settings.antigravity_taskbar_offset_ratio,
     ];
     let mut occupied = Vec::new();
 
@@ -3075,7 +3144,7 @@ fn pending_taskbar_target_ratios(
         occupied.push((start, start.saturating_add(length)));
     }
 
-    let mut ratios = [None; 4];
+    let mut ratios = [None; TASKBAR_TOOLS.len()];
 
     for (index, length) in tool_lengths.into_iter().enumerate() {
         let Some(length) = length.filter(|_| !initialized[index]) else {
@@ -3138,7 +3207,7 @@ fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
         width: taskbar.right - taskbar.left,
         height: taskbar.bottom - taskbar.top,
     };
-    let mut tool_lengths = [None; 4];
+    let mut tool_lengths = [None; TASKBAR_TOOLS.len()];
     for (index, tool) in TASKBAR_TOOLS.into_iter().enumerate() {
         tool_lengths[index] = taskbar_dock_width_for_manager(manager, settings, tool)
             .map(|length| taskbar_physical_length_for_window(length, taskbar.hwnd));
@@ -3225,6 +3294,7 @@ fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
         "codex" => settings.show_codex,
         "grok" => settings.show_grok,
         "cursor" => settings.show_cursor,
+        "antigravity" => settings.show_antigravity,
         _ => false,
     };
     if !enabled {
@@ -3278,6 +3348,7 @@ fn taskbar_content_layout_slot<'a>(
         "codex" => Some(&state.codex),
         "grok" => Some(&state.grok),
         "cursor" => Some(&state.cursor),
+        "antigravity" => Some(&state.antigravity),
         _ => None,
     }
 }
@@ -3626,6 +3697,7 @@ fn taskbar_menu_is_open<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, too
                 Some("codex") => Some(&state.codex),
                 Some("grok") => Some(&state.grok),
                 Some("cursor") => Some(&state.cursor),
+                Some("antigravity") => Some(&state.antigravity),
                 _ => None,
             }?;
             Some(target.lock().unwrap_or_else(|err| err.into_inner()).open)
@@ -3655,6 +3727,7 @@ fn set_taskbar_menu_layout<R: tauri::Runtime>(
         Some("codex") => Some(&state.codex),
         Some("grok") => Some(&state.grok),
         Some("cursor") => Some(&state.cursor),
+        Some("antigravity") => Some(&state.antigravity),
         _ => None,
     };
     if let Some(target) = target {
@@ -3676,6 +3749,7 @@ fn taskbar_layout_ratio<R: tauri::Runtime>(
             Some("codex") => Some(&state.codex),
             Some("grok") => Some(&state.grok),
             Some("cursor") => Some(&state.cursor),
+            Some("antigravity") => Some(&state.antigravity),
             _ => None,
         }?;
         let layout = *target.lock().unwrap_or_else(|err| err.into_inner());
@@ -4534,14 +4608,18 @@ fn taskbar_targets_match(left: &Settings, right: &Settings) -> bool {
         && left.codex_taskbar_offset_ratio == right.codex_taskbar_offset_ratio
         && left.grok_taskbar_offset_ratio == right.grok_taskbar_offset_ratio
         && left.cursor_taskbar_offset_ratio == right.cursor_taskbar_offset_ratio
+        && left.antigravity_taskbar_offset_ratio == right.antigravity_taskbar_offset_ratio
         && left.claude_taskbar_monitor_key == right.claude_taskbar_monitor_key
         && left.codex_taskbar_monitor_key == right.codex_taskbar_monitor_key
         && left.grok_taskbar_monitor_key == right.grok_taskbar_monitor_key
         && left.cursor_taskbar_monitor_key == right.cursor_taskbar_monitor_key
+        && left.antigravity_taskbar_monitor_key == right.antigravity_taskbar_monitor_key
         && left.claude_taskbar_target_initialized == right.claude_taskbar_target_initialized
         && left.codex_taskbar_target_initialized == right.codex_taskbar_target_initialized
         && left.grok_taskbar_target_initialized == right.grok_taskbar_target_initialized
         && left.cursor_taskbar_target_initialized == right.cursor_taskbar_target_initialized
+        && left.antigravity_taskbar_target_initialized
+            == right.antigravity_taskbar_target_initialized
 }
 
 fn preserve_taskbar_targets(current: &Settings, requested: &mut Settings) {
@@ -4554,14 +4632,18 @@ fn preserve_taskbar_positions(current: &Settings, requested: &mut Settings) {
     requested.codex_taskbar_offset_ratio = current.codex_taskbar_offset_ratio;
     requested.grok_taskbar_offset_ratio = current.grok_taskbar_offset_ratio;
     requested.cursor_taskbar_offset_ratio = current.cursor_taskbar_offset_ratio;
+    requested.antigravity_taskbar_offset_ratio = current.antigravity_taskbar_offset_ratio;
     requested.claude_taskbar_monitor_key = current.claude_taskbar_monitor_key.clone();
     requested.codex_taskbar_monitor_key = current.codex_taskbar_monitor_key.clone();
     requested.grok_taskbar_monitor_key = current.grok_taskbar_monitor_key.clone();
     requested.cursor_taskbar_monitor_key = current.cursor_taskbar_monitor_key.clone();
+    requested.antigravity_taskbar_monitor_key = current.antigravity_taskbar_monitor_key.clone();
     requested.claude_taskbar_target_initialized = current.claude_taskbar_target_initialized;
     requested.codex_taskbar_target_initialized = current.codex_taskbar_target_initialized;
     requested.grok_taskbar_target_initialized = current.grok_taskbar_target_initialized;
     requested.cursor_taskbar_target_initialized = current.cursor_taskbar_target_initialized;
+    requested.antigravity_taskbar_target_initialized =
+        current.antigravity_taskbar_target_initialized;
 }
 
 fn preserve_taskbar_layout_memory(current: &Settings, requested: &mut Settings) {
@@ -4801,13 +4883,15 @@ async fn save_settings(
     let codex_enabled_now = !baseline.show_codex && requested.show_codex;
     let grok_enabled_now = !baseline.show_grok && requested.show_grok;
     let cursor_enabled_now = !baseline.show_cursor && requested.show_cursor;
+    let antigravity_enabled_now = !baseline.show_antigravity && requested.show_antigravity;
     let cursor_activity_range_changed = baseline.show_cursor
         && requested.show_cursor
         && baseline.activity_weeks != requested.activity_weeks;
     let tool_collection_changed = baseline.show_claude != requested.show_claude
         || baseline.show_codex != requested.show_codex
         || baseline.show_grok != requested.show_grok
-        || baseline.show_cursor != requested.show_cursor;
+        || baseline.show_cursor != requested.show_cursor
+        || baseline.show_antigravity != requested.show_antigravity;
     if let Some(enabled) = claude_collection_transition {
         reconcile_claude_statusline_off_thread(enabled).await?;
     }
@@ -4897,6 +4981,7 @@ async fn save_settings(
             eprintln!("[grok] ACP broker state update failed: {error}");
         }
     }
+    antigravity::set_enabled(settings.show_antigravity);
     if !taskbar_drag_active(&app) {
         sync_taskbar_content_layout_ratios(&app, &settings);
     }
@@ -4924,7 +5009,12 @@ async fn save_settings(
     if tool_collection_changed {
         let visible = filter_enabled_statuses(combined_collection_last_result(), &settings);
         emit_collection_snapshot(&app, &visible);
-        if claude_enabled_now || codex_enabled_now || grok_enabled_now || cursor_enabled_now {
+        if claude_enabled_now
+            || codex_enabled_now
+            || grok_enabled_now
+            || cursor_enabled_now
+            || antigravity_enabled_now
+        {
             let refresh_app = app.clone();
             let refresh_settings = settings.clone();
             tauri::async_runtime::spawn(async move {
@@ -5139,6 +5229,7 @@ fn ensure_matching_bar_command(label: &str, tool: &str) -> Result<(), String> {
         Some("codex") if label == "bar-codex" => Ok(()),
         Some("grok") if label == "bar-grok" => Ok(()),
         Some("cursor") if label == "bar-cursor" => Ok(()),
+        Some("antigravity") if label == "bar-antigravity" => Ok(()),
         Some(_) => Err("command is restricted to its taskbar bar window".into()),
         None => Err("unknown taskbar tool".into()),
     }
@@ -6614,6 +6705,11 @@ pub fn run() {
             ) {
                 eprintln!("[codex] app-server broker startup failed: {error}");
             }
+            antigravity::set_enabled(
+                settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.show_antigravity),
+            );
             if let Err(error) = collector::set_grok_acp_enabled(
                 settings.as_ref().is_some_and(|settings| settings.show_grok),
             ) {
@@ -7363,6 +7459,7 @@ mod tests {
                 codex: None,
                 grok: None,
                 cursor: None,
+                antigravity: None,
                 presentation: None,
                 appearance: None,
             })
@@ -7408,6 +7505,7 @@ mod tests {
                 }),
                 grok: None,
                 cursor: None,
+                antigravity: None,
                 presentation: None,
                 appearance: None,
             })
@@ -8216,7 +8314,7 @@ mod tests {
         let ratios = super::pending_taskbar_target_ratios(
             &settings,
             horizontal,
-            [Some(320), Some(280), None, None],
+            [Some(320), Some(280), None, None, None],
         )
         .unwrap();
         let claude =
@@ -8232,7 +8330,7 @@ mod tests {
         let scaled = super::pending_taskbar_target_ratios(
             &settings,
             horizontal,
-            [Some(480), Some(420), None, None],
+            [Some(480), Some(420), None, None, None],
         )
         .unwrap();
         let scaled_claude =
@@ -8250,7 +8348,7 @@ mod tests {
         let three = super::pending_taskbar_target_ratios(
             &three_settings,
             horizontal,
-            [Some(320), Some(280), Some(240), None],
+            [Some(320), Some(280), Some(240), None, None],
         )
         .unwrap();
         let grok =
@@ -8266,13 +8364,27 @@ mod tests {
         let four = super::pending_taskbar_target_ratios(
             &four_settings,
             horizontal,
-            [Some(320), Some(280), Some(240), Some(220)],
+            [Some(320), Some(280), Some(240), Some(220), None],
         )
         .unwrap();
         let cursor =
             taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 220, four[3].unwrap())
                 .unwrap();
         assert_eq!(cursor.x, 840);
+        let five_settings = Settings {
+            show_antigravity: true,
+            ..four_settings
+        };
+        let five = super::pending_taskbar_target_ratios(
+            &five_settings,
+            horizontal,
+            [Some(320), Some(280), Some(240), Some(220), Some(200)],
+        )
+        .unwrap();
+        let antigravity =
+            taskbar::dock_rect_for_taskbar_at_offset(0, 1040, 1920, 1080, 200, five[4].unwrap())
+                .unwrap();
+        assert_eq!(antigravity.x, 1060);
     }
 
     #[cfg(windows)]
@@ -8351,7 +8463,7 @@ mod tests {
         let stacked = super::pending_taskbar_target_ratios(
             &settings,
             vertical,
-            [Some(220), Some(180), None, None],
+            [Some(220), Some(180), None, None, None],
         )
         .unwrap();
         let claude =
@@ -8363,7 +8475,7 @@ mod tests {
         let codex_only = super::pending_taskbar_target_ratios(
             &settings,
             vertical,
-            [None, Some(180), None, None],
+            [None, Some(180), None, None, None],
         )
         .unwrap();
 
@@ -8389,7 +8501,7 @@ mod tests {
                 width: 1920,
                 height: 40,
             },
-            [Some(320), Some(280), None, None],
+            [Some(320), Some(280), None, None, None],
         )
         .is_none());
     }
@@ -8409,7 +8521,7 @@ mod tests {
         let codex_only = super::pending_taskbar_target_ratios(
             &settings,
             taskbar_rect,
-            [None, Some(280), None, None],
+            [None, Some(280), None, None, None],
         )
         .unwrap();
         super::set_taskbar_target(
@@ -8425,7 +8537,7 @@ mod tests {
         let enabled = super::pending_taskbar_target_ratios(
             &settings,
             taskbar_rect,
-            [Some(320), Some(280), None, None],
+            [Some(320), Some(280), None, None, None],
         )
         .unwrap();
         let claude =

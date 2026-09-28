@@ -25,6 +25,8 @@ pub enum Tool {
     Grok,
     #[serde(rename = "cursor")]
     Cursor,
+    #[serde(rename = "antigravity")]
+    Antigravity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -272,13 +272,13 @@ test("styles keep the AppBar contract stable", () => {
   assert.match(tool, /min-width: 0/);
   assert.deepEqual(
     barWindows.map((item) => item.label).sort(),
-    ["bar-claude", "bar-codex", "bar-cursor", "bar-grok"],
+    ["bar-antigravity", "bar-claude", "bar-codex", "bar-cursor", "bar-grok"],
   );
   for (const barWindowConfig of barWindows) {
     assert.equal(barWindowConfig?.title, "Juice Bar");
     assert.equal(barWindowConfig?.transparent, true);
     assert.equal(barWindowConfig?.shadow, false);
-    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex|grok|cursor)/);
+    assert.match(barWindowConfig?.url ?? "", /bar\.html\?tool=(claude|codex|grok|cursor|antigravity)$/);
   }
   const capabilityWindows = capabilities.flatMap((item) => item.windows ?? []);
   assert.ok(capabilityWindows.includes("bar-claude"));
@@ -433,18 +433,19 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.doesNotMatch(settingsJs, /tokenField\.disabled = !editable/);
 });
 
-test("stale taskbar state stays legible while looking distinct from live data", () => {
+test("stale taskbar keeps text colors while retaining its gauge treatment", () => {
   const staleIndicator = cssBlock(
     '.bar-tool[data-state="stale"] .ring-arc,\n.bar-tool[data-state="stale"] .limit-bar::before',
   );
   const staleArc = cssBlock('.bar-tool[data-state="stale"] .ring-arc');
-  const staleText = cssBlock(
-    '.bar-tool[data-state="stale"] .bar-tool-name,\n.bar-tool[data-state="stale"] .bar-line,\n.bar-tool[data-state="stale"] .bar-worst,\n.bar-tool[data-state="stale"] .quad-number,\n.bar-tool[data-state="stale"] .primary-reset,\n.bar-tool[data-state="stale"] .secondary-reset',
-  );
+  const staleTextRules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selector]) =>
+    selector.includes('.bar-tool') && selector.includes('[data-state="stale"]')
+      && /\.(?:bar-tool-name|bar-line|bar-worst|quad-number|primary-reset|secondary-reset)\b/.test(selector),
+  ).map(([, selector]) => selector.trim());
 
   assert.match(staleIndicator, /opacity: 0\.62/);
   assert.match(staleArc, /stroke-linecap: butt/);
-  assert.match(staleText, /color: var\(--text-muted\)/);
+  assert.deepEqual(staleTextRules, [], "stale must inherit the same base/custom text styles as live");
 });
 
 test("muted text and focus tokens meet WCAG contrast thresholds in both themes", () => {
@@ -1138,7 +1139,7 @@ test("taskbar text colors are independently configurable without changing automa
   assert.match(settingsJs, /color\.inert = !enabled/);
   assert.doesNotMatch(settingsJs, /(?:claude|codex|info|ring)_text_color[^\n]*\.disabled\s*=/);
   assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.taskbar-text-color-grid\s*\{[\s\S]*grid-template-columns: 1fr/);
-  assert.match(css, /data-state="stale"[\s\S]*color-mix\(in srgb, var\(--ring-text-color\) 62%, var\(--text-muted\)\)/);
+  assert.equal(/color-mix\(in srgb, var\(--(?:claude|codex|grok|cursor|antigravity|info|ring)-text-color\) 62%/.test(css), false);
 });
 
 test("autosave completion uses a centered transient toast outside the scrolling shell", () => {
@@ -1305,7 +1306,7 @@ test("about and update sections keep product copy separate from guarded update c
   const update = markupSection("update");
 
   assert.match(panelMarkup, /id="update-band"[\s\S]*data-action="install-update"/);
-  assert.match(about, /Claude Code, Codex, Grok Build, Cursor Agent의 사용량/);
+  assert.match(about, /Claude Code, Codex, Grok Build, Cursor, Antigravity의 사용량/);
   assert.match(about, /별도 Juice 서버에 저장하지 않습니다/);
   assert.match(update, /name="update_check_on" checked/);
   assert.match(update, /data-action="check-updates"/);
@@ -1634,7 +1635,7 @@ test("statusline bridge verifier uses an isolated data directory", (t) => {
 test("taskbar bar initial paint hides tool sections and placeholder values", () => {
   const hiddenTools = barMarkup.match(/<section class="bar-tool"[^>]*hidden/g) ?? [];
 
-  assert.equal(hiddenTools.length, 4);
+  assert.equal(hiddenTools.length, 5);
   assert.doesNotMatch(barMarkup, /<strong class="bar-worst">[–-]<\/strong>/);
   assert.doesNotMatch(barMarkup, /5h\s*[–-]/);
   assert.doesNotMatch(barMarkup, /주간\s*[–-]/);
@@ -1660,6 +1661,7 @@ test("panel and bar IPC capabilities are split and sensitive commands are label 
   assert.ok(barCapability);
   assert.deepEqual(panelCapability.windows, ["panel"]);
   assert.deepEqual(barCapability.windows.sort(), [
+    "bar-antigravity",
     "bar-claude",
     "bar-codex",
     "bar-cursor",
@@ -1806,7 +1808,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.24"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.25"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

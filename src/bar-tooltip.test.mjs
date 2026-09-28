@@ -87,6 +87,18 @@ test("tooltip marks record age and approximation without claiming a new collecti
   assert.match(view({ ...sample, primary: { used_percent: 91 }, secondary: null }).tooltip, /^Codex · Danger/);
 });
 
+test("stale stays in tooltip and accessibility copy for every tool and mode", () => {
+  for (const tool of ["claude", "codex", "grok", "cursor", "antigravity"]) {
+    for (const language of ["ko", "en"]) for (const bar_mode of ["full", "compact", "dual", "quad"]) {
+      const vm = view({ ...sample, tool, session: { active: false } }, { language, bar_mode });
+      assert.equal(vm.state, "stale");
+      assert.match(vm.tooltip, language === "ko" ? /오래됨/ : /stale/);
+      assert.match(vm.ariaLabel, language === "ko" ? /오래됨/ : /stale/);
+      assert.match(vm.tooltip, language === "ko" ? /마지막 기록/ : /Last record/);
+    }
+  }
+});
+
 test("tooltip sanitizes and bounds display metadata within the native limit", () => {
   for (const language of ["ko", "en"]) {
     const text = view({ ...sample, pc_id: "PC\nInjected\0\u202e" + "🧪".repeat(10000) }, { language }).tooltip;
