@@ -178,7 +178,7 @@ function shortReset(iso, now, language) {
 function limitModel(labelKey, limit, settings, now, language, tool, secondary = false) {
   const used = finiteNumber(limit?.used_percent);
   const displayed = displayPercentFromUsed(used, settings);
-  const compactCursor = (tool === "cursor" || tool === "antigravity") && normalizeBarMode(settings?.bar_mode) === "compact";
+  const compactCursor = tool === "cursor" && normalizeBarMode(settings?.bar_mode) === "compact";
   const displayLabel = !compactCursor && labelKey ? t(labelKey, language) : "";
   return {
     text: labelKey ? [displayLabel, percentText(displayed)].filter(Boolean).join(" ") : "",
@@ -204,11 +204,7 @@ function grokLimitLabel(limit) {
 function limitLabelKeys(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
-  if (tool === "antigravity") return [
-    status && !status.primary ? null : "limit.geminiModels",
-    status && !status.secondary ? null : "limit.claudeGptModels",
-  ];
-  if (tool === "codex" && status) {
+  if ((tool === "codex" || tool === "antigravity") && status) {
     return [
       status.primary == null ? null : "limit.fiveHour",
       status.secondary == null ? null : "limit.weekly",

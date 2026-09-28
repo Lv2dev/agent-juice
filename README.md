@@ -27,7 +27,7 @@
 
 Juice는 현재 PC에 로그인된 Claude Code의 **5시간/주간 한도**, Codex 계정이 현재 제공하는 **5시간·주간 한도**, Grok Build의 **현재 주간 또는 월간 한도**, Cursor의 **Cursor Models/Other Models 월간 풀**을 읽어 작업표시줄과 설정 패널에 표시합니다. Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있으며, 별도 Juice 계정, 클라우드 서버, LLM API 키가 필요하지 않습니다.
 
-Antigravity는 실행 중인 데스크톱 앱이 보고하는 **Gemini / Claude·GPT 모델 한도**를 별도로 표시합니다. 앱이 닫힌 상태의 독립 계정 조회와 토큰 활동은 아직 지원하지 않습니다.
+Antigravity는 실행 중인 데스크톱 앱을 통해 **Gemini의 5시간·주간 한도**를 갱신해 표시합니다. 앱이 닫힌 상태의 독립 계정 조회와 토큰 활동은 아직 지원하지 않습니다.
 
 | 기능 | 동작 |
 | --- | --- |
@@ -52,7 +52,7 @@ Antigravity는 실행 중인 데스크톱 앱이 보고하는 **Gemini / Claude�
 | Codex | 자동 탐색한 Codex Desktop 또는 CLI의 공식 app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | 한 번 연결한 app-server를 재사용해 현재 한도를 정확값으로 표시하며, rollout fallback은 근사치입니다. |
 | Grok Build | 공식 ACP `_x.ai/billing` | 없음 | ACP가 반환한 현재 단일 주간/월간 크레딧 period를 정확값으로 표시합니다. 세션·프롬프트·모델 호출은 만들지 않습니다. |
 | Cursor | Cursor GUI 또는 Agent CLI 로컬 credential로 Dashboard usage 조회 | credential이 없는 구버전 Agent의 bounded `/usage` | 같은 계정의 Auto/API 월간 풀을 정확값으로 표시하며 어느 경로도 모델 프롬프트를 보내지 않습니다. |
-| Antigravity | 실행 중인 Antigravity 데스크톱의 로컬 상태 조회 | 없음 | Gemini와 Claude/GPT 모델 한도를 별도로 표시합니다. GUI가 보고한 값이며 독립 계정 API 조회가 아닙니다. |
+| Antigravity | 실행 중인 Antigravity 데스크톱을 통한 기간별 한도 갱신 | 없음 | Gemini의 5시간·주간 잔여량과 리셋 시각을 표시합니다. Claude/GPT 모델 한도는 포함하지 않습니다. |
 
 Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다. Codex의 한도와 활동 조회는 하나의 persistent stdio connection을 공유합니다.
 
@@ -215,12 +215,13 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 
 ### Antigravity GUI 한도
 
-`표시줄` 탭의 **Antigravity 활성화**를 켜면 실행 중인 Antigravity 데스크톱의 **Gemini / Claude·GPT** 잔여량과 리셋 시각을 표시합니다. 기존 Claude Code나 Codex의 한도와는 합치지 않습니다.
+`표시줄` 탭의 **Antigravity 활성화**를 켜면 **Gemini의 5시간·주간** 잔여량과 각 리셋 시각을 표시합니다. Antigravity의 Claude/GPT 모델 한도는 표시하지 않으며, 기존 Claude Code나 Codex의 한도와도 합치지 않습니다.
 
 - 현재 Windows의 기본 사용자 설치 경로에 설치된 새 Antigravity 데스크톱을 지원합니다. Antigravity IDE와 CLI는 이 수집 경로의 대상이 아닙니다.
 - GUI가 실행 중이어야 합니다. 미실행이면 **Antigravity 실행 필요**, 인증이 없으면 **로그인 필요**로 표시합니다. Juice가 앱이나 CLI를 대신 실행하지 않습니다.
-- 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. 수동 새로고침도 GUI의 상태를 다시 읽으며, Google 계정 서버의 즉시 갱신을 보장하지 않습니다.
-- 한도 응답에 없는 5시간·주간 항목을 만들지 않습니다. 모델별 값이 서로 충돌하거나 응답을 읽지 못하면 이전 숫자를 현재 값처럼 유지하지 않습니다.
+- 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. 자동·수동 조회 모두 실행 중인 앱에 기간별 한도의 갱신을 요청합니다. 채팅이나 모델 요청은 보내지 않습니다.
+- 한도 응답에 없는 기간은 표시하지 않습니다. 구버전 앱이 기간별 조회를 지원하지 않거나 응답을 읽지 못하면, 오래된 모델별 캐시로 대체하지 않고 이전 숫자를 지웁니다.
+- 컴팩트 모드에서도 `5h`와 `주간`을 구분하며, 두 기간의 색상을 각각 설정할 수 있습니다.
 - 링·막대, 네 표시 모드, 색상과 글자 설정, 독립 이동 및 화면 프로필을 지원합니다. Antigravity 토큰 활동 잔디는 아직 포함하지 않습니다.
 - Antigravity의 외부 개발자용 공식 API가 아니라 앱 내부 인터페이스를 사용하므로, 앱 업데이트로 형식이 바뀌면 조회가 중단될 수 있습니다. 응답 오류를 Google 계정의 로그아웃으로 취급하지 않습니다.
 
@@ -314,7 +315,7 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 
 Juice reads Claude Code's **5-hour and weekly limits**, whichever **5-hour or weekly windows the Codex account currently provides**, the **current weekly or monthly limit** from Grok Build, and the **Cursor Models/Other Models monthly pools** from Cursor. When Codex exposes only one window, Juice renders that real limit without an empty placeholder. It displays either remaining or used percentages in the Windows taskbar and a compact settings panel, with no Juice account, cloud backend, or LLM API key.
 
-Antigravity adds separate **Gemini / Claude·GPT model quotas** reported by its running desktop app. Independent account reads while the app is closed and token activity are not supported yet.
+Antigravity refreshes and displays **Gemini's five-hour and weekly quotas** through its running desktop app. Independent account reads while the app is closed and token activity are not supported yet.
 
 | Feature | Behavior |
 | --- | --- |
@@ -339,7 +340,7 @@ Antigravity adds separate **Gemini / Claude·GPT model quotas** reported by its 
 | Codex | Official `account/rateLimits/read` through an auto-detected Codex Desktop or CLI app-server | Latest rollout JSONL under `~/.codex/sessions` | Reuses one app-server connection for exact current limits; rollout fallback is approximate. |
 | Grok Build | Official ACP `_x.ai/billing` | None | Shows the exact current single weekly/monthly credit period returned by ACP without creating a session, prompt, or model call. |
 | Cursor | Dashboard usage through local Cursor GUI or Agent CLI credentials | Bounded `/usage` for legacy Agents without usable credentials | Shows the same account Auto/API monthly pools without sending a model prompt. |
-| Antigravity | Local status from the running Antigravity desktop | None | Separate Gemini and Claude/GPT model quotas reported by the GUI, not an independent account API request. |
+| Antigravity | Period quota refresh through the running Antigravity desktop | None | Gemini's five-hour and weekly remaining quotas and reset times. Claude/GPT model quotas are not included. |
 
 Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok and Cursor start collecting after you first enable them in the Taskbar tab. Codex limit and activity requests share one persistent stdio connection.
 
@@ -502,12 +503,13 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 
 ### Antigravity GUI quotas
 
-Enable **Antigravity** in the `Taskbar` tab to display **Gemini / Claude·GPT** quotas and reset times from the running Antigravity desktop. These are separate from your Claude Code or Codex account limits.
+Enable **Antigravity** in the `Taskbar` tab to display **Gemini's five-hour and weekly** quotas with their separate reset times. Antigravity's Claude/GPT model quotas are not displayed or combined with your Claude Code or Codex account limits.
 
 - This initial integration supports the new Windows Antigravity desktop installed in its default per-user location, not the separate Antigravity IDE or CLI.
 - The app must be running. Juice shows **Open Antigravity** when it is absent and **Sign in required** when it explicitly reports no valid login. It never starts the app or CLI for you.
-- Automatic reads follow your collection interval, with a minimum of 60 seconds. Manual refresh rereads GUI-reported state; it does not guarantee a fresh request to Google's account servers.
-- Juice does not invent missing 5-hour or weekly slots. Conflicting model quotas or failed reads clear the displayed numbers rather than presenting old values as current.
+- Automatic reads follow your collection interval, with a minimum of 60 seconds. Both automatic and manual reads request a period quota refresh through the running app, without sending a chat or model request.
+- Periods missing from the response stay hidden. Unsupported app versions or failed reads clear the displayed numbers instead of falling back to an older model-quota cache.
+- Compact mode also labels the two periods as `5h` and `Weekly`. Their colors can be configured separately.
 - Rings, bars, all four modes, custom colors and text, independent dragging, and display profiles are supported. Antigravity token activity is not included yet.
 - This uses an internal app interface, not a public developer API. An Antigravity update may change that interface and interrupt collection. Response errors are not treated as a Google account sign-out.
 

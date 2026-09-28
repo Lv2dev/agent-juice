@@ -1808,7 +1808,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.25"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.26"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
