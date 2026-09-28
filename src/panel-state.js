@@ -311,11 +311,7 @@ function grokLimitLabel(limit) {
 function limitLabels(tool, status) {
   if (tool === "grok") return [grokLimitLabel(status?.primary), null];
   if (tool === "cursor") return ["limit.cursorModels", "limit.otherModels"];
-  if (tool === "antigravity") return [
-    status && !status.primary ? null : "limit.geminiModels",
-    status && !status.secondary ? null : "limit.claudeGptModels",
-  ];
-  if (tool === "codex" && status) {
+  if ((tool === "codex" || tool === "antigravity") && status) {
     return [
       status.primary == null ? null : "limit.fiveHour",
       status.secondary == null ? null : "limit.weekly",

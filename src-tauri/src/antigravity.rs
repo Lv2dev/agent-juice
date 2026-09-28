@@ -131,51 +131,38 @@ fn authenticated(body: &[u8]) -> Result<bool, Error> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Response {
-    user_status: Option<UserStatus>,
+    response: Option<QuotaSummary>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UserStatus {
-    cascade_model_config_data: Option<ModelConfig>,
-    plan_status: Option<PlanStatus>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanStatus {
-    plan_info: Option<PlanInfo>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PlanInfo {
-    teams_tier: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelConfig {
+struct QuotaSummary {
     #[serde(default)]
-    client_model_configs: Vec<ModelQuota>,
+    groups: Vec<QuotaGroup>,
+    #[serde(default)]
+    buckets: Vec<Quota>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelQuota {
-    label: String,
-    quota_info: Option<Quota>,
+struct QuotaGroup {
     #[serde(default)]
-    allowed_tiers: Vec<String>,
+    buckets: Vec<Quota>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Quota {
+    #[serde(default)]
+    bucket_id: String,
+    #[serde(default, deserialize_with = "remaining_fraction")]
     remaining_fraction: Option<f64>,
     reset_time: Option<String>,
+}
+
+fn remaining_fraction<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    f64::deserialize(deserializer).map(Some)
 }
 
 pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<AgentStatus, Error> {
@@ -183,36 +170,28 @@ pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<Agent
         return Err(Error::Unavailable);
     }
     let response: Response = serde_json::from_slice(body).map_err(|_| Error::Unavailable)?;
-    let status = response.user_status.ok_or(Error::Unavailable)?;
-    let tier = status
-        .plan_status
-        .and_then(|plan| plan.plan_info)
-        .and_then(|plan| plan.teams_tier);
-    let models = status
-        .cascade_model_config_data
-        .ok_or(Error::Unavailable)?
-        .client_model_configs;
-    if models.len() > 256 {
+    let summary = response.response.ok_or(Error::Unavailable)?;
+    if summary.groups.len() > 64
+        || summary.buckets.len()
+            + summary
+                .groups
+                .iter()
+                .map(|group| group.buckets.len())
+                .sum::<usize>()
+            > 256
+    {
         return Err(Error::Unavailable);
     }
     let mut pools: [Option<Quota>; 2] = [None, None];
-    for model in models {
-        if !model.allowed_tiers.is_empty()
-            && !tier
-                .as_ref()
-                .is_some_and(|tier| model.allowed_tiers.contains(tier))
-        {
-            continue;
-        }
-        let index = if model.label.starts_with("Gemini ") {
-            0
-        } else if model.label.starts_with("Claude ") || model.label.starts_with("GPT-OSS ") {
-            1
-        } else {
-            continue;
-        };
-        let Some(mut quota) = model.quota_info else {
-            continue;
+    for mut quota in summary
+        .buckets
+        .into_iter()
+        .chain(summary.groups.into_iter().flat_map(|group| group.buckets))
+    {
+        let index = match quota.bucket_id.as_str() {
+            "gemini-5h" => 0,
+            "gemini-weekly" => 1,
+            _ => continue,
         };
         // Proto3 omits a scalar zero. Require a reset to distinguish an exhausted
         // quota from an empty/default quota object supplied by the GUI.
@@ -227,12 +206,8 @@ pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<Agent
         if let Some(reset) = &quota.reset_time {
             chrono::DateTime::parse_from_rfc3339(reset).map_err(|_| Error::Unavailable)?;
         }
-        if let Some(previous) = &pools[index] {
-            if previous.remaining_fraction != quota.remaining_fraction
-                || previous.reset_time != quota.reset_time
-            {
-                return Err(Error::Unavailable);
-            }
+        if pools[index].is_some() {
+            return Err(Error::Unavailable);
         }
         pools[index] = Some(quota);
     }
@@ -253,8 +228,8 @@ pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<Agent
         tool: Tool::Antigravity,
         session_id: "antigravity-gui".into(),
         captured_at: captured_at.into(),
-        primary: limit(primary, "gemini_models"),
-        secondary: limit(secondary, "claude_gpt_models"),
+        primary: limit(primary, "5h"),
+        secondary: limit(secondary, "week"),
         session: SessionInfo {
             active: true,
             context_used_percent: None,
@@ -284,37 +259,61 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn fixture(models: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(
-            &json!({"userStatus":{"cascadeModelConfigData":{"clientModelConfigs":models}}}),
-        )
-        .unwrap()
+    #[test]
+    fn quota_summary_selects_gemini_periods_not_third_party_pools() {
+        let raw = serde_json::to_vec(&json!({"response":{"groups":[{"buckets":[
+            {"bucketId":"gemini-weekly","remainingFraction":0.90,"resetTime":"2026-10-04T05:13:15Z"},
+            {"bucketId":"3p-5h","remainingFraction":1.0},
+            {"bucketId":"gemini-5h","remainingFraction":0.42,"resetTime":"2026-09-28T06:12:05Z"}
+        ]}]}})).unwrap();
+        let status = parse_status(&raw, "PC", "2026-09-28T03:00:00Z").unwrap();
+        let primary = status.primary.unwrap();
+        let secondary = status.secondary.unwrap();
+        assert_eq!(primary.label, "5h");
+        assert_eq!(primary.used_percent, Some(58.0));
+        assert_eq!(primary.resets_at.as_deref(), Some("2026-09-28T06:12:05Z"));
+        assert_eq!(secondary.label, "week");
+        assert_eq!(secondary.used_percent, Some(10.0));
+        assert_eq!(secondary.resets_at.as_deref(), Some("2026-10-04T05:13:15Z"));
+    }
+
+    fn fixture(buckets: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({"response":{"groups":[{"buckets":buckets}]}})).unwrap()
     }
 
     #[test]
-    fn two_pools_are_remaining_fractions_not_five_hour_week_slots() {
+    fn periods_use_ids_not_display_names_or_response_order() {
         let raw = fixture(json!([
-            {"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.75,"resetTime":"2026-09-27T10:00:00Z"}},
-            {"label":"Gemini Flash","quotaInfo":{"remainingFraction":0.75,"resetTime":"2026-09-27T10:00:00Z"}},
-            {"label":"Claude Opus","quotaInfo":{"remainingFraction":1.0}}
+            {"bucketId":"3p-weekly","displayName":"Gemini","remainingFraction":0.0},
+            {"bucketId":"gemini-weekly","displayName":"Localized weekly","remainingFraction":0.90},
+            {"bucketId":"gemini-5h","displayName":"Localized five hour","remainingFraction":0.75}
         ]));
         let status = parse_status(&raw, "PC", "2026-09-27T09:00:00Z").unwrap();
         assert_eq!(status.tool, Tool::Antigravity);
         assert_eq!(status.primary.as_ref().unwrap().used_percent, Some(25.0));
-        assert_eq!(status.secondary.as_ref().unwrap().used_percent, Some(0.0));
-        assert_eq!(status.primary.unwrap().label, "gemini_models");
+        assert_eq!(status.secondary.as_ref().unwrap().used_percent, Some(10.0));
+        assert_eq!(status.primary.unwrap().label, "5h");
         assert!(status.session.context_used_percent.is_none());
     }
 
     #[test]
-    fn absent_pool_stays_absent_and_zero_is_valid() {
-        let raw = fixture(json!([{"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.0}}]));
+    fn absent_period_stays_absent_and_zero_is_valid() {
+        let raw = fixture(json!([{"bucketId":"gemini-5h","remainingFraction":0.0}]));
         let status = parse_status(&raw, "PC", "now").unwrap();
         assert_eq!(status.primary.unwrap().used_percent, Some(100.0));
         assert!(status.secondary.is_none());
-        let omitted_zero = fixture(
-            json!([{"label":"Gemini Pro","quotaInfo":{"resetTime":"2026-09-27T10:00:00Z"}}]),
-        );
+        let omitted_zero =
+            fixture(json!([{"bucketId":"gemini-5h","resetTime":"2026-09-27T10:00:00Z"}]));
+        let weekly = parse_status(
+            &fixture(json!([
+                {"bucketId":"gemini-weekly","remainingFraction":1.0}
+            ])),
+            "PC",
+            "now",
+        )
+        .unwrap();
+        assert!(weekly.primary.is_none());
+        assert_eq!(weekly.secondary.unwrap().used_percent, Some(0.0));
         assert_eq!(
             parse_status(&omitted_zero, "PC", "now")
                 .unwrap()
@@ -327,17 +326,25 @@ mod tests {
 
     #[test]
     fn missing_invalid_unknown_and_conflicting_values_fail_closed() {
-        for models in [
+        for buckets in [
             json!([]),
-            json!([{"label":"New Model","quotaInfo":{"remainingFraction":0.5}}]),
-            json!([{"label":"Gemini Pro","quotaInfo":{}}]),
-            json!([{"label":"Gemini Pro","quotaInfo":{"remainingFraction":1.5}}]),
-            json!([{"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.5,"resetTime":"bad"}}]),
-            json!([{"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.5}}, {"label":"Gemini Flash","quotaInfo":{"remainingFraction":0.6}}]),
+            json!([{"bucketId":"gemini-unknown","remainingFraction":0.5}]),
+            json!([{"bucketId":"3p-5h","remainingFraction":0.5}]),
+            json!([{"bucketId":"gemini-5h"}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":1.5}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":-0.1}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":"0.5"}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":null,"resetTime":"2026-09-27T10:00:00Z"}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":0.5,"resetTime":"bad"}]),
+            json!([{"bucketId":"gemini-5h","remainingFraction":0.5}, {"bucketId":"gemini-5h","remainingFraction":0.6}]),
+            json!([{"bucketId":"gemini-weekly","remainingFraction":0.5}, {"bucketId":"gemini-weekly","remainingFraction":0.5}]),
         ] {
-            assert!(parse_status(&fixture(models), "PC", "now").is_err());
+            assert!(parse_status(&fixture(buckets), "PC", "now").is_err());
         }
-        assert!(parse_status(br#"{"userStatus":null}"#, "PC", "now").is_err());
+        for body in [br#"{"response":null}"#.as_slice(), br#"{}"#,
+            br#"{"userStatus":{"cascadeModelConfigData":{"clientModelConfigs":[{"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.9}}]}}}"#] {
+            assert!(parse_status(body, "PC", "now").is_err());
+        }
     }
 
     #[test]
@@ -359,17 +366,27 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_restricted_models_are_not_presented_as_available_quota() {
-        let body = serde_json::to_vec(&json!({"userStatus": {
-            "planStatus":{"planInfo":{"teamsTier":"TEAMS_TIER_PRO"}},
-            "cascadeModelConfigData":{"clientModelConfigs":[
-                {"label":"Gemini Pro","allowedTiers":["TEAMS_TIER_PRO"],"quotaInfo":{"remainingFraction":0.8}},
-                {"label":"Claude Opus","allowedTiers":["TEAMS_TIER_PRO_ULTIMATE"],"quotaInfo":{"remainingFraction":1.0}}
-            ]}
-        }})).unwrap();
+    fn summary_supports_flat_buckets_but_rejects_cross_group_duplicates_and_excess() {
+        let bucket = json!({"bucketId":"gemini-5h","remainingFraction":0.8});
+        let body = serde_json::to_vec(&json!({"response":{"buckets":[bucket.clone()]}})).unwrap();
         let status = parse_status(&body, "PC", "now").unwrap();
         assert!(status.primary.is_some());
         assert!(status.secondary.is_none());
+        let duplicate = serde_json::to_vec(&json!({"response":{
+            "buckets":[bucket.clone()],"groups":[{"buckets":[bucket.clone()]}]
+        }}))
+        .unwrap();
+        assert!(parse_status(&duplicate, "PC", "now").is_err());
+        let duplicate_groups = serde_json::to_vec(&json!({"response":{"groups":[
+            {"buckets":[bucket.clone()]},{"buckets":[bucket.clone()]}
+        ]}}))
+        .unwrap();
+        assert!(parse_status(&duplicate_groups, "PC", "now").is_err());
+        assert!(parse_status(&fixture(json!(vec![bucket; 257])), "PC", "now").is_err());
+        let groups =
+            serde_json::to_vec(&json!({"response":{"groups":vec![json!({});65]}})).unwrap();
+        assert!(parse_status(&groups, "PC", "now").is_err());
+        assert!(parse_status(&vec![b' '; 1024 * 1024 + 1], "PC", "now").is_err());
     }
 
     #[test]
@@ -380,7 +397,7 @@ mod tests {
         });
         let status = || {
             parse_status(
-                &fixture(json!([{"label":"Gemini Pro","quotaInfo":{"remainingFraction":0.5}}])),
+                &fixture(json!([{"bucketId":"gemini-5h","remainingFraction":0.5}])),
                 "PC",
                 "now",
             )
@@ -393,6 +410,29 @@ mod tests {
         assert!(refresh_cache(&state, true, || Err(Error::AppRequired)).is_none());
         assert!(state.lock().unwrap().result.as_ref().unwrap().is_err());
         assert!(refresh_cache(&state, false, || panic!("missing app cooldown")).is_none());
+    }
+
+    #[test]
+    fn failed_summary_never_restores_old_quota_on_transport_parse_or_auth_errors() {
+        for error in [Error::Unavailable, Error::LoginRequired, Error::AppRequired] {
+            let state = Mutex::new(Cache {
+                enabled: true,
+                ..Default::default()
+            });
+            let result = || {
+                parse_status(
+                    &fixture(json!([
+                        {"bucketId":"gemini-5h","remainingFraction":0.5}
+                    ])),
+                    "PC",
+                    "now",
+                )
+            };
+            assert!(refresh_cache(&state, true, result).is_some());
+            assert!(refresh_cache(&state, true, || Err(error)).is_none());
+            assert!(refresh_cache(&state, false, || panic!("backoff")).is_none());
+            assert!(refresh_cache(&state, true, result).is_some());
+        }
     }
 
     #[test]

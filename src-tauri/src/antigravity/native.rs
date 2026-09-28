@@ -262,11 +262,33 @@ fn server_owns_port(server: &Server, port: u16) -> bool {
         && ports(server.pid).is_ok_and(|ports| ports.contains(&port))
 }
 
+#[derive(Clone, Copy)]
+enum Rpc {
+    Auth,
+    Quota,
+}
+
+impl Rpc {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Auth => "GetAuthStatus",
+            Self::Quota => "RetrieveUserQuotaSummary",
+        }
+    }
+
+    fn body(self) -> &'static [u8] {
+        match self {
+            Self::Auth => b"{}",
+            Self::Quota => br#"{"request":{},"forceRefresh":true}"#,
+        }
+    }
+}
+
 fn request(
     agent: &ureq::Agent,
     server: &Server,
     port: u16,
-    method: &str,
+    rpc: Rpc,
     deadline: Instant,
 ) -> Result<Vec<u8>, Error> {
     #[cfg(test)]
@@ -274,6 +296,7 @@ fn request(
     if Instant::now() >= deadline || !server_owns_port(server, port) {
         return Err(Error::Unavailable);
     }
+    let method = rpc.method();
     let url =
         format!("https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/{method}");
     let mut response = agent
@@ -288,7 +311,7 @@ fn request(
                 .min(Duration::from_secs(8)),
         ))
         .build()
-        .send(b"{}")
+        .send(rpc.body())
         .map_err(|_| {
             #[cfg(test)]
             eprintln!(
@@ -357,7 +380,7 @@ pub(super) fn collect(
         if Instant::now() >= deadline {
             break;
         }
-        let auth = match request(&agent, server, port, "GetAuthStatus", deadline) {
+        let auth = match request(&agent, server, port, Rpc::Auth, deadline) {
             Ok(body) => body,
             Err(Error::LoginRequired) => return Err(Error::LoginRequired),
             Err(_) => continue,
@@ -365,9 +388,9 @@ pub(super) fn collect(
         if !authenticated(&auth)? {
             return Err(Error::LoginRequired);
         }
-        let body = request(&agent, server, port, "GetUserStatus", deadline)?;
+        let body = request(&agent, server, port, Rpc::Quota, deadline)?;
         let status = parse_status(&body, pc_id, captured_at)?;
-        if !authenticated(&request(&agent, server, port, "GetAuthStatus", deadline)?)? {
+        if !authenticated(&request(&agent, server, port, Rpc::Auth, deadline)?)? {
             return Err(Error::LoginRequired);
         }
         return Ok(status);
@@ -378,6 +401,16 @@ pub(super) fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quota_rpc_requests_a_fresh_summary_and_auth_remains_read_only() {
+        assert_eq!(Rpc::Quota.method(), "RetrieveUserQuotaSummary");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(Rpc::Quota.body()).unwrap(),
+            serde_json::json!({"request":{},"forceRefresh":true})
+        );
+        assert_eq!(Rpc::Auth.method(), "GetAuthStatus");
+        assert_eq!(Rpc::Auth.body(), b"{}");
+    }
     #[test]
     fn csrf_parser_rejects_duplicate_or_header_injection() {
         assert!(csrf_argument("x --csrf_token=12345678-1234-1234").is_some());
@@ -405,6 +438,12 @@ mod tests {
         )
         .unwrap();
         assert!(status.primary.is_some());
-        assert!(status.primary.unwrap().used_percent.is_some());
+        let primary = status.primary.unwrap();
+        assert_eq!(primary.label, "5h");
+        assert!(primary.used_percent.is_some());
+        if let Some(weekly) = status.secondary {
+            assert_eq!(weekly.label, "week");
+            assert!(weekly.used_percent.is_some());
+        }
     }
 }
