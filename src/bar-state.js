@@ -285,6 +285,7 @@ function toolTooltip(label, primary, secondary, settings, now, status) {
       lines.push(`${t("tooltip.data", language)}: ${t(status.approx ? "meta.approx" : "tooltip.exact", language)}`);
     }
     if (status.tool === "antigravity") lines.push(t("tooltip.antigravitySource", language));
+    if (status.tool === "claude" && status.session_id === "claude-desktop-usage") lines.push(t("tooltip.claudeDesktopSource", language));
     const pc = typeof status.pc_id === "string"
       ? status.pc_id.replace(/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim()
       : "";
