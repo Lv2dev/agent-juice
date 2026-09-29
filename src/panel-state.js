@@ -1,5 +1,5 @@
 import { formatDuration, formatLocalDateTime, resolveLanguage, t } from "./i18n.js";
-import { collectionIssue } from "./collection-state.js";
+import { panelCollectionIssue } from "./collection-state.js";
 
 export const DEFAULT_SETTINGS = {
   warn_threshold: 70,
@@ -345,7 +345,7 @@ export function viewModelForTool(
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
-  const issue = collectionIssue(tool, collectionHealth?.[tool], language);
+  const issue = panelCollectionIssue(tool, collectionHealth?.[tool], language);
   const [primaryLabel, secondaryLabel] = limitLabels(tool, status);
   const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
 
@@ -389,8 +389,11 @@ export function viewModelForTool(
 
   const active = status.session?.active === true && !issue;
   const context = percentText(status.session?.context_used_percent);
+  const localCodexSession = tool === "codex" && Boolean(status.session_id)
+    && status.session_id !== "app-server-account";
   const meta = issue ? `${issue.detail} ${t("collection.lastGood", language)}`
-    : status.approx === false ? "" : t("meta.approx", language);
+    : status.approx === false ? active ? "" : t(localCodexSession ? "meta.localSessionStale" : "collection.lastGood", language)
+      : t("meta.approx", language);
 
   const primary = limitModel(status.primary, settings, now, language, tool, primaryUsesSecondaryColor, primaryLabel);
   const secondary = limitModel(status.secondary, settings, now, language, tool, true, secondaryLabel);

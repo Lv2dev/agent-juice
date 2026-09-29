@@ -2,9 +2,7 @@ use crate::{config, cursor_dashboard, paths};
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, TimeZone, Utc,
 };
-use cursor_dashboard::{
-    AccountScope, DashboardCredentials, DashboardErrorKind, TokenUsage, UsageEvent,
-};
+use cursor_dashboard::{AccountScope, DashboardCredentials, DashboardErrorKind, UsageEvent};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -174,13 +172,6 @@ trait UsageSource {
         page_size: u32,
         deadline: Instant,
     ) -> Result<cursor_dashboard::UsageEventPage, ActivityError>;
-
-    fn aggregated(
-        &self,
-        start_ms: i64,
-        end_ms: i64,
-        deadline: Instant,
-    ) -> Result<TokenUsage, ActivityError>;
 }
 
 struct DashboardSource<'a> {
@@ -205,16 +196,6 @@ impl UsageSource for DashboardSource<'_> {
             deadline,
         )
         .map_err(Into::into)
-    }
-
-    fn aggregated(
-        &self,
-        start_ms: i64,
-        end_ms: i64,
-        deadline: Instant,
-    ) -> Result<TokenUsage, ActivityError> {
-        cursor_dashboard::aggregated_usage(self.credentials, start_ms, end_ms, deadline)
-            .map_err(Into::into)
     }
 }
 
@@ -568,10 +549,14 @@ fn fetch_month_with_page_size_at<S: UsageSource, Tz: TimeZone>(
     }
     let initial_signature = page_signature(&first.events);
     let mut event_count = first.events.len();
-    let mut component_total = TokenUsage::default();
     let mut days = BTreeMap::new();
     let mut apply_events = |events: &[UsageEvent]| -> Result<(), ActivityError> {
         for event in events {
+            if event.timestamp_ms < start_ms || event.timestamp_ms >= end_ms {
+                return Err(ActivityError::parse(
+                    "Cursor activity event escaped its query interval",
+                ));
+            }
             let date = event_date(event.timestamp_ms, timezone)
                 .ok_or_else(|| ActivityError::parse("Cursor activity date rejected"))?;
             if !date.starts_with(&month.key()) {
@@ -580,7 +565,6 @@ fn fetch_month_with_page_size_at<S: UsageSource, Tz: TimeZone>(
                 ));
             }
             if let Some(usage) = event.token_usage {
-                component_total = component_total.saturating_add(usage);
                 let total = days.entry(date).or_insert(0u64);
                 *total = total.saturating_add(usage.total());
             }
@@ -615,11 +599,6 @@ fn fetch_month_with_page_size_at<S: UsageSource, Tz: TimeZone>(
     {
         return Err(ActivityError::changed(
             "Cursor activity first page changed during pagination",
-        ));
-    }
-    if source.aggregated(start_ms, end_ms, deadline)? != component_total {
-        return Err(ActivityError::changed(
-            "Cursor activity aggregate changed during pagination",
         ));
     }
     Ok(CursorMonthCache {
@@ -713,13 +692,36 @@ fn checked_refresh_step<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cursor_dashboard::TokenUsage;
     use chrono_tz::America::New_York;
     use std::{cell::RefCell, collections::VecDeque};
+
+    #[test]
+    #[ignore = "read-only account month diagnosis; never changes the activity cache"]
+    fn live_cursor_month_safe_diagnostic() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let credentials = cursor_dashboard::read_credentials(deadline).unwrap();
+        let source = DashboardSource {
+            credentials: &credentials,
+        };
+        let month = Month::from_date(Local::now().date_naive());
+        let result = fetch_month(&source, month, &Local, deadline);
+        match result {
+            Ok(month) => eprintln!(
+                "month_ok=true;days={};nonzero={}",
+                month.days.len(),
+                month.days.values().any(|v| *v > 0)
+            ),
+            Err(error) => {
+                eprintln!("month_error={:?};context={}", error.kind, error);
+                panic!("month activity failed");
+            }
+        }
+    }
 
     struct FakeSource {
         first_pages: RefCell<VecDeque<cursor_dashboard::UsageEventPage>>,
         other_pages: BTreeMap<u32, cursor_dashboard::UsageEventPage>,
-        aggregate: TokenUsage,
     }
 
     impl UsageSource for FakeSource {
@@ -742,15 +744,6 @@ mod tests {
                 .get(&page)
                 .cloned()
                 .ok_or_else(|| ActivityError::parse("missing fake page"))
-        }
-
-        fn aggregated(
-            &self,
-            _start_ms: i64,
-            _end_ms: i64,
-            _deadline: Instant,
-        ) -> Result<TokenUsage, ActivityError> {
-            Ok(self.aggregate)
         }
     }
 
@@ -825,7 +818,6 @@ mod tests {
         let source = FakeSource {
             first_pages: RefCell::new(VecDeque::from([empty.clone(), empty])),
             other_pages: BTreeMap::new(),
-            aggregate: TokenUsage::default(),
         };
         fetch_month_with_page_size_at(
             &source,
@@ -1139,10 +1131,6 @@ mod tests {
                     total_count: 2,
                 },
             )]),
-            aggregate: TokenUsage {
-                input_tokens: 20,
-                ..TokenUsage::default()
-            },
         };
         let timezone = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
         let month = fetch_month_with_page_size(
@@ -1172,10 +1160,6 @@ mod tests {
         let source = FakeSource {
             first_pages: RefCell::new(VecDeque::from([initial, changed])),
             other_pages: BTreeMap::new(),
-            aggregate: TokenUsage {
-                input_tokens: 10,
-                ..TokenUsage::default()
-            },
         };
         let timezone = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
         let error = fetch_month_with_page_size(
@@ -1190,6 +1174,73 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+    }
+
+    #[test]
+    fn pagination_rejects_missing_records_and_changed_counts() {
+        let first = cursor_dashboard::UsageEventPage {
+            events: vec![event("2026-08-21T01:00:00Z", 10)],
+            total_count: 2,
+        };
+        for page in [
+            cursor_dashboard::UsageEventPage {
+                events: vec![],
+                total_count: 2,
+            },
+            cursor_dashboard::UsageEventPage {
+                events: vec![event("2026-08-22T01:00:00Z", 20)],
+                total_count: 3,
+            },
+        ] {
+            let source = FakeSource {
+                first_pages: RefCell::new(VecDeque::from([first.clone(), first.clone()])),
+                other_pages: BTreeMap::from([(2, page)]),
+            };
+            assert_eq!(
+                fetch_month_with_page_size(
+                    &source,
+                    Month {
+                        year: 2026,
+                        month: 8
+                    },
+                    &Utc,
+                    1,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .unwrap_err()
+                .kind,
+                DashboardErrorKind::ScopeChanged
+            );
+        }
+    }
+
+    #[test]
+    fn pagination_enforces_query_cutoff_even_within_the_same_month() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 22, 12, 0, 0).unwrap();
+        let page = cursor_dashboard::UsageEventPage {
+            events: vec![event("2026-08-22T11:59:00Z", 10)],
+            total_count: 1,
+        };
+        let source = FakeSource {
+            first_pages: RefCell::new(VecDeque::from([page])),
+            other_pages: BTreeMap::new(),
+        };
+        assert_eq!(
+            fetch_month_with_page_size_at(
+                &source,
+                Month {
+                    year: 2026,
+                    month: 8
+                },
+                &Utc,
+                500,
+                Instant::now() + Duration::from_secs(1),
+                now
+            )
+            .unwrap_err()
+            .kind,
+            DashboardErrorKind::Parse
+        );
     }
 
     #[cfg(windows)]

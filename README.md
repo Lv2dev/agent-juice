@@ -67,7 +67,7 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 
 - 도구마다 이름과 PC, 기간별 게이지와 초기화까지 남은 시간을 보여줍니다. 큰 숫자는 **가장 제약이 큰 한도**(잔여량은 가장 낮은 기간, 사용량은 가장 높은 기간)와 그 기간명입니다. 한도가 하나뿐이면 해당 한도를 씁니다. 리셋 날짜는 별도 줄에서 줄바꿈됩니다.
 - 제목 옆에는 현재 표시 기준(잔여량 또는 사용량)이 표시됩니다. 경고·위험 임계값에 들어간 게이지는 설정한 경고·위험색으로 바뀝니다.
-- `로그인 필요`, 앱 실행 필요, 아직 값이 없는 상태는 숫자 대신 안내 문구로 표시하고, 오래된 기록은 흐리게 구분합니다.
+- `로그인 필요`, 앱 실행 필요, 아직 값이 없는 상태는 숫자 대신 안내 문구로 표시합니다. 오래된 기록은 문구로 구분하며, 개요의 한도 숫자와 게이지는 흐리게 만들지 않습니다. Codex의 로컬 세션 기록 시각과 계정 한도의 조회 상태는 다를 수 있습니다.
 - 아래쪽의 주간 토큰 막대는 최근 기간의 주별 합계이며 `활동 자세히 보기`로 활동 화면으로 이동합니다.
 
 #### 토큰 활동
@@ -84,6 +84,7 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 - 최초 조회에서는 최근 1년 기록을 백그라운드로 채우고 이후에는 변경분만 갱신합니다. 큰 이력은 `과거 기록 수집 중`으로 표시됩니다.
 - Claude·Grok은 현재 PC의 로컬 기록입니다. Codex는 공식 `account/usage/read`의 계정 전체 daily bucket을 `Codex 계정 사용량`으로, Cursor는 GUI·Agent CLI·Cloud Agent·다른 PC를 포함한 account event를 `Cursor 계정 사용량`으로 구분합니다.
 - Codex 공식 bucket이 없거나 일관성 검증에 실패하면 과대 집계되는 rollout 추정치를 대신 표시하지 않고 일부 기록 상태로 비웁니다.
+- Cursor 잔디는 계정의 날짜별 사용 기록 API만 사용하므로 같은 계정으로 다른 PC에서 사용한 기록도 포함합니다. 페이지 개수·조회 범위·첫 페이지 재확인·계정 검증은 유지하며 별도 요약 API와 합계가 다르다는 이유로 기록 전체를 지우지는 않습니다.
 - local activity index와 Cursor account cache는 현재 PC에 원자적으로 저장됩니다. Codex account bucket은 프로세스 메모리에서만 사용하며 어떤 활동 데이터도 Juice 서버로 업로드하지 않습니다.
 
 #### 설정 구성
@@ -403,7 +404,7 @@ The panel switches between four views with the tabs at the top: **Overview · Ac
 
 - Each tool shows its name, PC, per-period gauges, and time until reset. The large number and its period identify the **most limiting quota**: the lowest remaining percentage or the highest used percentage. A single-limit tool uses its only quota. Reset dates wrap on a separate line.
 - The heading shows the current display basis, remaining or used. Gauges inside the warning or danger threshold switch to your warning or danger colors.
-- `Sign in required`, app-not-running, and not-yet-collected states replace the numbers with a short explanation, and stale records are dimmed.
+- `Sign in required`, app-not-running, and not-yet-collected states replace the numbers with a short explanation. Old records have a text notice rather than dimmed quota numbers and gauges in Overview. Codex local-session freshness can differ from its account-quota collection state.
 - The weekly token bars at the bottom show recent weekly totals, and `View activity` opens the Activity view.
 
 #### Token activity
@@ -420,6 +421,7 @@ The panel switches between four views with the tabs at the top: **Overview · Ac
 - On first view, Juice backfills up to one year in the background and then refreshes only changing ranges. Large histories show `Collecting past records` while backfill continues.
 - Claude and Grok use records from this PC. Codex uses official account-wide `account/usage/read` daily buckets labeled `Codex account usage`; Cursor uses account events across Cursor GUI, Agent CLI, Cloud Agents, automations, and other PCs labeled `Cursor account usage`.
 - If official Codex buckets are unavailable or fail consistency checks, Juice shows a partial empty Codex view instead of falling back to the overcounted rollout estimate.
+- Cursor activity uses account-level dated usage events, including usage from other PCs signed into the same account. Page coverage, interval bounds, first-page revalidation, and account checks remain enforced; a separate summary API is not used to discard otherwise valid event history.
 - The local activity index and Cursor account cache are stored atomically on this PC. Codex account buckets remain process-memory only, and no activity data is uploaded to a Juice server.
 
 #### Settings layout
