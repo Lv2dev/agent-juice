@@ -21,7 +21,7 @@ test("Claude errors are distinct and visible with or without last-good values in
         const bar = barToolViewModel(statuses, "claude", settings, now, { collectionHealth });
         const panel = viewModelForTool(statuses, "claude", settings, now, collectionHealth);
         const issue = collectionIssue("claude", health, language);
-        assert.equal(bar.collectionIssue, issue.short);
+        assert.equal(bar.collectionIssue, health === "rate_limited" ? "" : issue.short);
         assert.ok(bar.tooltip.includes(issue.detail));
         assert.ok(bar.ariaLabel.includes(issue.short));
         assert.equal(bar.primary.number, hasValue ? display_basis === "used" ? "30" : "70" : "–");
@@ -31,6 +31,7 @@ test("Claude errors are distinct and visible with or without last-good values in
           assert.equal(bar.state, "stale");
           assert.ok(panel.meta.includes(t("collection.lastGood", language)));
           assert.ok(bar.tooltip.includes(t("collection.lastGood", language)));
+          assert.ok(bar.tooltip.includes(t("tooltip.record", language)));
         }
       }
   }

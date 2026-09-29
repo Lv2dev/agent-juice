@@ -332,7 +332,8 @@ export function barToolViewModel(
     tool,
     label: TOOL_LABELS[tool] ?? tool,
     brandColor: toolBrandColor(tool, settings),
-    collectionIssue: issue?.short ?? "",
+    collectionIssue: tool === "claude" && options.collectionHealth?.[tool] === "rate_limited"
+      ? "" : issue?.short ?? "",
   };
 
   if (["login_required", "app_required"].includes(options.collectionHealth?.[tool])) {

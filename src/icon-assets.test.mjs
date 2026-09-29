@@ -202,8 +202,8 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   assert.match(readme, /Move to another monitor/);
   assert.match(readme, /합성 데모/);
   assert.match(readme, /synthetic demo/);
-  assert.match(readme, /기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다/);
-  assert.match(readme, /default collection interval and Claude account cache are both 60 seconds/);
+  assert.match(readme, /Claude 계정 자동 조회는 요청을 줄이기 위해 최소 5분 간격/);
+  assert.match(readme, /automatic Claude account queries run no more often than every five minutes/);
 });
 
 test("README uses localized current UI assets with bounded motion", () => {
