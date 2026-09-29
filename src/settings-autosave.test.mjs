@@ -533,7 +533,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(savedInputs[0].tool_danger_color_on, false);
   assert.equal(toolColorRow.hidden, false);
   assert.equal(fullResetRow.hidden, true);
-  assert.equal(dispatched.at(-1)?.type, "settings-updated");
+  assert.ok(dispatched.some(event => event.type === "settings-updated"));
+  assert.equal(dispatched.at(-1)?.type, "settings-preview");
   assert.equal(statusEl.textContent, "");
   assert.equal(statusHost.hidden, true);
   assert.equal(toastLayer.hidden, false);

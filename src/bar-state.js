@@ -8,6 +8,7 @@ import {
 } from "./panel-state.js";
 import { formatDuration, formatLocalDateTime, resolveLanguage, t } from "./i18n.js";
 import { normalizeTextScale } from "./text-scale.js";
+import { collectionIssue } from "./collection-state.js";
 
 const TOOL_LABELS = {
   claude: "Claude",
@@ -251,11 +252,15 @@ function tooltipResetLine(limit, raw, now, language) {
   return `${prefix}: ${duration} (${formatLocalDateTime(time, language)})`;
 }
 
-function toolTooltip(label, primary, secondary, settings, now, status) {
+function toolTooltip(label, primary, secondary, settings, now, status, issue) {
   const language = resolveLanguage(settings);
   const severity = severityForStatus(status, settings);
-  const stateText = severity === "stale" ? t("state.stale", language) : t(`tooltip.${severity}`, language);
+  const stateText = severity === "stale" || issue ? t("state.stale", language) : t(`tooltip.${severity}`, language);
   const lines = [`${label} · ${stateText}`];
+  if (issue) {
+    lines.push(issue.detail);
+    if (status) lines.push(t("collection.lastGood", language));
+  }
   for (const [limit, raw] of [[primary, status?.primary], [secondary, status?.secondary]]) {
     if (!limit.visible || !raw) continue;
     const displayed = displayPercentFromUsed(raw.used_percent, settings);
@@ -320,12 +325,14 @@ export function barToolViewModel(
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
+  const issue = options.startupLoading ? null : collectionIssue(tool, options.collectionHealth?.[tool], language);
   const [primaryLabel, secondaryLabel] = limitLabelKeys(tool, status);
   const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
   const base = {
     tool,
     label: TOOL_LABELS[tool] ?? tool,
     brandColor: toolBrandColor(tool, settings),
+    collectionIssue: issue?.short ?? "",
   };
 
   if (["login_required", "app_required"].includes(options.collectionHealth?.[tool])) {
@@ -400,8 +407,8 @@ export function barToolViewModel(
       primary,
       secondary,
       worst: "–",
-      tooltip: toolTooltip(base.label, primary, secondary, settings, now, status),
-      ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
+      tooltip: toolTooltip(base.label, primary, secondary, settings, now, status, issue),
+      ariaLabel: [toolAriaLabel(base.label, primary, secondary, state, language), issue?.short].filter(Boolean).join(", "),
     };
   }
 
@@ -415,16 +422,16 @@ export function barToolViewModel(
     primaryUsesSecondaryColor,
   );
   const secondary = limitModel(secondaryLabel, status.secondary, settings, now, language, tool, true);
-  const state = status.session?.active === true ? "live" : "stale";
+  const state = status.session?.active === true && !issue ? "live" : "stale";
   return {
     ...base,
     state,
-    severity: severityForStatus(status, settings),
+    severity: issue ? "stale" : severityForStatus(status, settings),
     primary,
     secondary,
     worst: worstText(status.primary, status.secondary, settings),
-    tooltip: toolTooltip(base.label, primary, secondary, settings, now, status),
-    ariaLabel: toolAriaLabel(base.label, primary, secondary, state, language),
+    tooltip: toolTooltip(base.label, primary, secondary, settings, now, status, issue),
+    ariaLabel: [toolAriaLabel(base.label, primary, secondary, state, language), issue?.short].filter(Boolean).join(", "),
   };
 }
 

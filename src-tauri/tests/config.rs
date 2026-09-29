@@ -267,6 +267,7 @@ fn settings_roundtrip_and_legacy_defaults() {
         language: "en".into(),
         theme: "light".into(),
         font_mode: "pretendard".into(),
+        panel_skin: "paper".into(),
         taskbar_offset_ratio: 0.25,
         claude_taskbar_offset_ratio: 0.15,
         codex_taskbar_offset_ratio: 0.85,
@@ -334,6 +335,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(!loaded.update_check_on);
     assert_eq!(loaded.language, "en");
     assert_eq!(loaded.theme, "light");
+    assert_eq!(loaded.panel_skin, "paper");
     assert_eq!(loaded.font_mode, "pretendard");
     assert_eq!(loaded.taskbar_offset_ratio, 0.5);
     assert_eq!(loaded.claude_taskbar_offset_ratio, 0.15);
@@ -393,6 +395,7 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(legacy.autostart_on);
     assert_eq!(legacy.language, "system");
     assert_eq!(legacy.theme, "system");
+    assert_eq!(legacy.panel_skin, "fluent");
     assert_eq!(legacy.font_mode, "system");
     assert_eq!(legacy.taskbar_offset_ratio, 0.3);
     assert_eq!(legacy.claude_taskbar_offset_ratio, 0.3);
@@ -1191,6 +1194,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         language: "ko".into(),
         theme: "dark".into(),
         font_mode: "pretendard".into(),
+        panel_skin: "paper".into(),
         taskbar_offset_ratio: 1.25,
         claude_taskbar_offset_ratio: -0.25,
         codex_taskbar_offset_ratio: 1.25,
@@ -1317,6 +1321,7 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(!settings.update_check_on);
     assert_eq!(settings.language, "ko");
     assert_eq!(settings.theme, "dark");
+    assert_eq!(settings.panel_skin, "paper");
     assert_eq!(settings.font_mode, "pretendard");
     assert_eq!(settings.taskbar_offset_ratio, 1.0);
     assert_eq!(settings.claude_taskbar_offset_ratio, 0.0);
@@ -1380,6 +1385,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
         display_basis: "unexpected".into(),
         language: "unknown".into(),
         font_mode: "unknown".into(),
+        panel_skin: "unknown".into(),
         indicator_style: "unexpected".into(),
         indicator_effect_style: "unexpected".into(),
         indicator_track_opacity_percent: 999.0,
@@ -1401,6 +1407,7 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     });
 
     assert_eq!(settings.theme, "system");
+    assert_eq!(settings.panel_skin, "fluent");
     assert_eq!(settings.display_basis, "remaining");
     assert_eq!(settings.language, "system");
     assert_eq!(settings.font_mode, "system");

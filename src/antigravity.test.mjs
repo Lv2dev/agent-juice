@@ -90,8 +90,10 @@ test('Antigravity period colors preserve user settings and labels stay synchroni
   assert.notEqual(bar.primary.color, bar.secondary.color);
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const card = html.match(/<section class="tool-card" data-tool="antigravity"[\s\S]*?<\/section>/)?.[0];
-  assert.match(card, /data-i18n="limit.fiveHour"/);
-  assert.match(card, /data-i18n="limit.weekly"/);
+  assert.equal(panel.primary.label, t('limit.fiveHour', config));
+  assert.equal(panel.secondary.label, t('limit.weekly', config));
+  assert.match(card, /class="metric p5h">\s*<div class="metric-row">\s*<span>5h<\/span>/);
+  assert.match(card, /class="metric pweek">\s*<div class="metric-row">\s*<span>주간<\/span>/);
   assert.doesNotMatch(card, /Claude\/GPT|geminiModels|claudeGptModels/);
   for(const language of ['ko','en']) {
     assert.match(t('help.showAntigravity',language), /Gemini/);

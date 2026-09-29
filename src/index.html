@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="panel.css" />
     <title>Juice</title>
     <script type="module" src="/panel.js" defer></script>
     <script type="module" src="/settings.js" defer></script>
@@ -11,42 +12,51 @@
   <body class="panel-window">
     <div class="panel-frame">
       <header class="panel-chrome" data-tauri-drag-region>
-        <div class="chrome-spacer" data-tauri-drag-region></div>
-        <div class="chrome-title" data-tauri-drag-region>Juice</div>
+        <div class="chrome-brand" data-tauri-drag-region>
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Juice</span>
+        </div>
+        <nav class="panel-nav" role="tablist" aria-label="패널 화면" data-i18n-aria-label="aria.panelViews">
+          <button id="panel-tab-overview" type="button" role="tab" aria-selected="true" aria-controls="panel-view-overview" data-panel-tab="overview" data-i18n="nav.overview">개요</button>
+          <button id="panel-tab-activity" type="button" role="tab" aria-selected="false" aria-controls="panel-view-activity" data-panel-tab="activity" tabindex="-1" data-i18n="nav.activity">활동</button>
+          <button id="panel-tab-settings" type="button" role="tab" aria-selected="false" aria-controls="panel-view-settings" data-panel-tab="settings" tabindex="-1" data-i18n="nav.settings">설정</button>
+          <button id="panel-tab-about" type="button" role="tab" aria-selected="false" aria-controls="panel-view-about" data-panel-tab="about" tabindex="-1" data-i18n="nav.about">정보</button>
+        </nav>
+        <div class="chrome-drag" data-tauri-drag-region></div>
         <div class="window-controls" aria-label="창 제어" data-i18n-aria-label="aria.windowControls">
           <button
-            class="chrome-dot chrome-minimize"
+            class="window-button"
             type="button"
             title="최소화"
             aria-label="최소화"
             data-i18n-title="window.minimize"
             data-window-action="minimize"
-          ></button>
+          ><svg viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M0 5.5h10"></path></svg></button>
           <button
-            class="chrome-dot chrome-maximize"
+            class="window-button"
             type="button"
             title="최대화"
             aria-label="최대화"
             data-i18n-title="window.maximize"
             data-window-action="toggle-maximize"
-          ></button>
+          ><svg viewBox="0 0 10 10" aria-hidden="true" focusable="false"><rect x="0.5" y="0.5" width="9" height="9" rx="1"></rect></svg></button>
           <button
-            class="chrome-dot chrome-close"
+            class="window-button window-close"
             type="button"
             title="닫기"
             aria-label="닫기"
             data-i18n-title="window.close"
             data-window-action="close"
-          ></button>
+          ><svg viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9"></path></svg></button>
         </div>
       </header>
 
+      <div class="settings-save-state" data-settings-save-state data-state="ready" hidden>
+        <span class="settings-save-dot" aria-hidden="true"></span>
+        <span id="settings-status" class="settings-status" role="alert"></span>
+        <button type="button" data-dismiss-settings-error data-i18n="action.dismissError">확인</button>
+      </div>
       <main class="panel-shell">
-      <header class="panel-head">
-        <h1>Juice</h1>
-        <span data-i18n="scope.local">로컬</span>
-      </header>
-
       <section id="update-band" class="update-band" hidden aria-live="polite">
         <div class="update-band-copy">
           <strong data-i18n="update.available">새 버전을 사용할 수 있습니다</strong>
@@ -62,6 +72,18 @@
         </div>
       </section>
 
+      <section
+        id="panel-view-overview"
+        class="panel-view overview-view"
+        role="tabpanel"
+        aria-labelledby="panel-tab-overview"
+        data-panel-view="overview"
+      >
+        <header class="view-head">
+          <h1 data-i18n="nav.overview">개요</h1>
+          <span class="view-meta" data-overview-basis></span>
+        </header>
+        <div class="tool-list">
       <section class="tool-card" data-tool="claude" data-state="empty">
         <header class="tool-head">
           <div class="tool-title">
@@ -71,6 +93,12 @@
           <span class="pc"></span>
         </header>
 
+        <div class="tool-hero" aria-hidden="true">
+          <strong class="hero-val"><span class="hero-num">–</span><small class="hero-unit"></small></strong>
+          <span class="hero-label"></span>
+        </div>
+
+        <div class="tool-metrics">
         <div class="metric p5h">
           <div class="metric-row">
             <span>5h</span>
@@ -82,11 +110,12 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span data-i18n="limit.weekly">주간</span>
+            <span>주간</span>
             <strong class="val">–</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
+        </div>
         </div>
 
         <p class="empty-hint"></p>
@@ -102,6 +131,12 @@
           <span class="pc"></span>
         </header>
 
+        <div class="tool-hero" aria-hidden="true">
+          <strong class="hero-val"><span class="hero-num">–</span><small class="hero-unit"></small></strong>
+          <span class="hero-label"></span>
+        </div>
+
+        <div class="tool-metrics">
         <div class="metric p5h">
           <div class="metric-row">
             <span>5h</span>
@@ -113,11 +148,12 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span data-i18n="limit.weekly">주간</span>
+            <span>주간</span>
             <strong class="val">–</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
+        </div>
         </div>
 
         <p class="empty-hint"></p>
@@ -133,9 +169,15 @@
           <span class="pc"></span>
         </header>
 
+        <div class="tool-hero" aria-hidden="true">
+          <strong class="hero-val"><span class="hero-num">–</span><small class="hero-unit"></small></strong>
+          <span class="hero-label"></span>
+        </div>
+
+        <div class="tool-metrics">
         <div class="metric p5h">
           <div class="metric-row">
-            <span data-i18n="limit.usage">사용량</span>
+            <span>사용량</span>
             <strong class="val">-</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
@@ -149,6 +191,7 @@
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
+        </div>
         </div>
 
         <p class="empty-hint"></p>
@@ -164,9 +207,15 @@
           <span class="pc"></span>
         </header>
 
+        <div class="tool-hero" aria-hidden="true">
+          <strong class="hero-val"><span class="hero-num">–</span><small class="hero-unit"></small></strong>
+          <span class="hero-label"></span>
+        </div>
+
+        <div class="tool-metrics">
         <div class="metric p5h">
           <div class="metric-row">
-            <span data-i18n="limit.cursorModels">Cursor 모델</span>
+            <span>Cursor 모델</span>
             <strong class="val">-</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
@@ -175,11 +224,12 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span data-i18n="limit.otherModels">기타 모델</span>
+            <span>기타 모델</span>
             <strong class="val">-</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
+        </div>
         </div>
 
         <p class="empty-hint"></p>
@@ -194,9 +244,15 @@
           <span class="pc"></span>
         </header>
 
+        <div class="tool-hero" aria-hidden="true">
+          <strong class="hero-val"><span class="hero-num">–</span><small class="hero-unit"></small></strong>
+          <span class="hero-label"></span>
+        </div>
+
+        <div class="tool-metrics">
         <div class="metric p5h">
           <div class="metric-row">
-            <span data-i18n="limit.fiveHour">5h</span>
+            <span>5h</span>
             <strong class="val">-</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
@@ -205,22 +261,61 @@
 
         <div class="metric pweek">
           <div class="metric-row">
-            <span data-i18n="limit.weekly">주간</span>
+            <span>주간</span>
             <strong class="val">-</strong>
           </div>
           <div class="track"><span class="fill"></span></div>
           <p class="reset"></p>
         </div>
+        </div>
 
         <p class="empty-hint"></p>
         <p class="meta"></p>
       </section>
+        </div>
 
+        <section class="overview-activity" data-overview-activity>
+          <div class="overview-activity-head">
+            <span class="overview-activity-copy">
+              <span data-i18n="activity.settingsTitle">토큰 활동</span>
+              <strong data-overview-activity-total>–</strong>
+            </span>
+            <span class="overview-activity-days" data-overview-activity-days></span>
+          </div>
+          <div class="overview-spark" data-overview-spark aria-hidden="true"></div>
+          <button type="button" class="link-button" data-panel-goto="activity" data-i18n="overview.moreActivity">활동 자세히 보기</button>
+        </section>
+      </section>
+
+      <section
+        id="panel-view-activity"
+        class="panel-view activity-view"
+        role="tabpanel"
+        aria-labelledby="panel-tab-activity"
+        data-panel-view="activity"
+        hidden
+      >
+        <header class="view-head">
+          <h1 data-i18n="nav.activity">활동</h1>
+          <span class="view-meta" data-activity-period></span>
+        </header>
+        <div class="activity-stats">
+          <div class="activity-stat">
+            <span data-i18n="activity.statTotal">총 토큰</span>
+            <strong data-activity-total>–</strong>
+          </div>
+          <div class="activity-stat">
+            <span data-i18n="activity.statDays">활동한 날</span>
+            <strong data-activity-days>–</strong>
+          </div>
+          <div class="activity-stat">
+            <span data-i18n="activity.statPeak">가장 많은 날</span>
+            <strong data-activity-peak-tokens>–</strong>
+            <small data-activity-peak-date></small>
+          </div>
+        </div>
       <section id="activity-card" class="activity-card" data-state="loading" data-filter="all">
         <header class="activity-head">
-          <div class="activity-title">
-            <h2 data-i18n="activity.title">활동</h2>
-          </div>
           <div class="activity-filter" role="group" aria-label="활동 도구 필터" data-i18n-aria-label="aria.activityFilter">
             <button type="button" data-activity-filter="all" aria-pressed="true" data-i18n="activity.filterAll">전체</button>
             <button type="button" data-activity-filter="claude" aria-pressed="false" data-i18n="activity.filterClaude">Claude</button>
@@ -229,14 +324,6 @@
             <button type="button" data-activity-filter="cursor" aria-pressed="false" data-i18n="activity.filterCursor" hidden>Cursor</button>
           </div>
         </header>
-
-        <div class="activity-summary">
-          <div class="activity-total">
-            <strong data-activity-total>–</strong>
-            <span data-activity-period></span>
-          </div>
-          <span class="activity-days" data-activity-days></span>
-        </div>
 
         <div class="activity-chart" data-activity-chart>
           <div class="activity-months" data-activity-months aria-hidden="true"></div>
@@ -255,6 +342,11 @@
         </div>
 
         <p class="activity-empty" data-activity-empty hidden></p>
+        <div class="activity-share" data-activity-share>
+          <span class="activity-share-label" data-i18n="activity.share">도구별 비율</span>
+          <div class="activity-share-bar" data-activity-share-bar aria-hidden="true"></div>
+          <div class="activity-share-keys" data-activity-share-keys></div>
+        </div>
         <footer class="activity-foot">
           <span data-activity-scope data-i18n="activity.localRecord">이 PC의 로컬 기록</span>
           <span class="activity-legend" aria-hidden="true">
@@ -264,19 +356,36 @@
           </span>
         </footer>
       </section>
+      </section>
 
       <form id="settings-form" class="settings-layout">
-        <details class="settings-card" open>
-          <summary>
-            <span class="settings-title" data-i18n="settings.title">설정</span>
-            <span class="settings-save-state" data-settings-save-state data-state="ready" hidden>
-              <span class="settings-save-dot" aria-hidden="true"></span>
-              <span id="settings-status" class="settings-status" aria-live="polite"></span>
-            </span>
-            <svg class="settings-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="m9 18 6-6-6-6"></path>
-            </svg>
-          </summary>
+        <div
+          id="panel-view-settings"
+          class="panel-view settings-card"
+          role="tabpanel"
+          aria-labelledby="panel-tab-settings"
+          data-panel-view="settings"
+          hidden
+        >
+          <header class="view-head">
+            <h1 class="settings-title" data-i18n="settings.title">설정</h1>
+          </header>
+          <section class="taskbar-preview" aria-labelledby="bar-preview-title">
+            <header class="taskbar-preview-head">
+              <span id="bar-preview-title" data-i18n="preview.title">작업표시줄 미리보기</span>
+              <span data-preview-source></span>
+              <select data-preview-tool data-i18n-aria-label="preview.tool" aria-label="미리보기 도구">
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+                <option value="grok">Grok</option>
+                <option value="cursor">Cursor</option>
+                <option value="antigravity">Antigravity</option>
+              </select>
+            </header>
+            <div class="taskbar-preview-viewport">
+              <iframe data-bar-preview title="작업표시줄 미리보기" data-i18n-title="preview.title" tabindex="-1"></iframe>
+            </div>
+          </section>
           <div class="settings-form">
           <div
             class="settings-tabs"
@@ -318,6 +427,17 @@
                   <option value="system" data-i18n="option.system">시스템</option>
                   <option value="light" data-i18n="option.light">라이트</option>
                   <option value="dark" data-i18n="option.dark">다크</option>
+                </select>
+              </div>
+
+              <div class="field-row">
+                <span class="toggle-copy">
+                  <label class="toggle-title" for="panel-skin" data-i18n="field.panelSkin">라이트 스타일</label>
+                  <small class="field-help" data-i18n="help.panelSkin">밝게 표시될 때의 패널 모습입니다. 어두운 테마에서는 Midnight를 씁니다.</small>
+                </span>
+                <select id="panel-skin" name="panel_skin">
+                  <option value="fluent">Fluent</option>
+                  <option value="paper">Paper</option>
                 </select>
               </div>
 
@@ -1134,12 +1254,21 @@
           <input type="hidden" name="cursor_taskbar_offset_ratio" value="0" />
           <input type="hidden" name="antigravity_taskbar_offset_ratio" value="0" />
           </div>
-        </details>
+        </div>
 
-        <section class="settings-utility-card update-card" data-settings-section="update">
-          <header class="settings-utility-head">
-            <h2 data-i18n="section.update">업데이트</h2>
+        <section
+          id="panel-view-about"
+          class="panel-view settings-utility-card update-card"
+          role="tabpanel"
+          aria-labelledby="panel-tab-about"
+          data-panel-view="about"
+          data-settings-section="update"
+          hidden
+        >
+          <header class="view-head">
+            <h1 data-i18n="nav.about">정보</h1>
           </header>
+          <h2 class="group-title" data-i18n="section.update">업데이트</h2>
           <div class="settings-section-grid update-controls">
               <label class="toggle-row toggle-row-wide">
                 <input type="checkbox" name="update_check_on" checked />
@@ -1162,10 +1291,8 @@
         </section>
       </form>
 
-      <section class="settings-utility-card about-card" data-settings-section="about">
-        <header class="settings-utility-head">
-          <h2 data-i18n="section.about">정보</h2>
-        </header>
+      <section class="panel-view settings-utility-card about-card" data-panel-view="about" data-settings-section="about" hidden>
+        <h2 class="group-title" data-i18n="section.about">정보</h2>
         <div class="about-copy">
           <div class="about-heading">
             <strong>Juice</strong>

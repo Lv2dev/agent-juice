@@ -1,4 +1,5 @@
 import { formatDuration, formatLocalDateTime, resolveLanguage, t } from "./i18n.js";
+import { collectionIssue } from "./collection-state.js";
 
 export const DEFAULT_SETTINGS = {
   warn_threshold: 70,
@@ -26,6 +27,7 @@ export const DEFAULT_SETTINGS = {
   theme: "system",
   language: "system",
   font_mode: "system",
+  panel_skin: "fluent",
   taskbar_offset_ratio: 0,
   claude_taskbar_offset_ratio: 0,
   codex_taskbar_offset_ratio: 0,
@@ -343,6 +345,7 @@ export function viewModelForTool(
 ) {
   const language = resolveLanguage(settings);
   const status = representativeByTool(statuses)[tool];
+  const issue = collectionIssue(tool, collectionHealth?.[tool], language);
   const [primaryLabel, secondaryLabel] = limitLabels(tool, status);
   const primaryUsesSecondaryColor = tool === "grok" && primaryLabel === "limit.monthly";
 
@@ -380,29 +383,29 @@ export function viewModelForTool(
       context: `${t("context.label", language)} –`,
       pcId: "",
       meta: "",
-      emptyHint: emptyHintForTool(tool, settings, language),
+      emptyHint: issue?.detail ?? emptyHintForTool(tool, settings, language),
     };
   }
 
-  const active = status.session?.active === true;
+  const active = status.session?.active === true && !issue;
   const context = percentText(status.session?.context_used_percent);
-  const meta = status.approx === false ? "" : t("meta.approx", language);
+  const meta = issue ? `${issue.detail} ${t("collection.lastGood", language)}`
+    : status.approx === false ? "" : t("meta.approx", language);
 
+  const primary = limitModel(status.primary, settings, now, language, tool, primaryUsesSecondaryColor, primaryLabel);
+  const secondary = limitModel(status.secondary, settings, now, language, tool, true, secondaryLabel);
+  const primaryUsed = finiteNumber(status.primary?.used_percent);
+  const secondaryUsed = finiteNumber(status.secondary?.used_percent);
+  const hero = secondary.visible && secondaryUsed != null && (primaryUsed == null || secondaryUsed > primaryUsed)
+    ? secondary : primary.visible ? primary : secondary;
   return {
     state: active ? "live" : "stale",
     active,
     exists: true,
     brandColor: toolBrandColor(tool, settings),
-    primary: limitModel(
-      status.primary,
-      settings,
-      now,
-      language,
-      tool,
-      primaryUsesSecondaryColor,
-      primaryLabel,
-    ),
-    secondary: limitModel(status.secondary, settings, now, language, tool, true, secondaryLabel),
+    primary,
+    secondary,
+    hero,
     context: `${t("context.label", language)} ${context}${active ? "" : ` · ${t("state.stale", language)}`}`,
     pcId: status.pc_id ?? "",
     meta,

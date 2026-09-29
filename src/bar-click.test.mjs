@@ -623,6 +623,40 @@ test("login-required dual bar expands and returns to its indicator width", async
   delete global.document;
 });
 
+test("Claude error notice retains numbers, resizes the bar and disappears on recovery", async () => {
+  const root = { dataset: {} }, tool = toolStub(), events = {}, calls = [];
+  tool.getBoundingClientRect = () => ({width:tool.querySelector('.bar-issue').hidden ? 37 : 140,height:48});
+  global.window = { location:{search:'?tool=claude'}, __TAURI__:{
+    event:{async listen(name,handler){events[name]=handler;}},core:{async invoke(command,args){
+      if(command==='get_settings')return {bar_mode:'dual',language:'ko'};
+      if(command==='get_collection_health')return {claude:'rate_limited'};
+      if(command==='get_taskbar_orientation')return 'horizontal';
+      if(command==='get_status')return [{tool:'claude',captured_at:new Date().toISOString(),session:{active:true},primary:{used_percent:30},secondary:{used_percent:22}}];
+      if(command==='set_taskbar_content_width')calls.push(args.width);
+      return null;
+    }}
+  }};
+  global.document = {addEventListener(){},querySelector(selector){
+    if(selector==='#bar')return root;
+    if(selector==='[data-tool="claude"]')return tool;
+    return null;
+  }};
+  try {
+    await import(`./bar.js?test=${Date.now()}-claude-error-notice`);
+    await new Promise(r=>setTimeout(r,120));
+    assert.equal(tool.textContentFor('.bar-issue'),'조회 제한');
+    assert.equal(tool.querySelector('.bar-issue').hidden,false);
+    assert.equal(tool.textContentFor('.bar-worst'),'70');
+    assert.equal(calls.at(-1),140);
+    events['collection-health-updated']({payload:{claude:'ready'}});
+    await new Promise(r=>setTimeout(r,120));
+    assert.equal(tool.querySelector('.bar-issue').hidden,true);
+    assert.equal(tool.textContentFor('.bar-issue'),'');
+    assert.equal(tool.textContentFor('.bar-worst'),'70');
+    assert.equal(calls.at(-1),37);
+  } finally { delete global.window; delete global.document; }
+});
+
 test("vertical login-required bar reports its rendered content height", async () => {
   const root = { dataset: {} };
   const tools = {

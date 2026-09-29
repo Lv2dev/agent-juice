@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { applyPanelSkin } from "./theme.js";
 
 import {
   formStateFromSettings,
@@ -50,6 +51,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       language: "en",
       theme: "dark",
       font_mode: "pretendard",
+      panel_skin: "paper",
       taskbar_offset_ratio: 0.25,
       claude_taskbar_offset_ratio: 0.15,
       codex_taskbar_offset_ratio: 0.85,
@@ -131,6 +133,7 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       language: "en",
       theme: "dark",
       fontMode: "pretendard",
+      panelSkin: "paper",
       claudeTaskbarOffsetRatio: 0.15,
       codexTaskbarOffsetRatio: 0.85,
       grokTaskbarOffsetRatio: 0.65,
@@ -234,6 +237,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     language: "en",
     theme: "light",
     font_mode: "pretendard",
+    panel_skin: "paper",
     claude_taskbar_offset_ratio: "0.25",
     codex_taskbar_offset_ratio: "0.75",
     grok_taskbar_offset_ratio: "0.5",
@@ -319,6 +323,7 @@ test("payloadFromEntries creates save_settings input payload", () => {
     language: "en",
     theme: "light",
     font_mode: "pretendard",
+    panel_skin: "paper",
     claude_taskbar_offset_ratio: 0.25,
     codex_taskbar_offset_ratio: 0.75,
     grok_taskbar_offset_ratio: 0.5,
@@ -373,6 +378,8 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ language: "en" }).language, "en");
   assert.equal(formStateFromSettings({ language: "unexpected" }).language, "system");
   assert.equal(formStateFromSettings({}).fontMode, "system");
+  assert.equal(formStateFromSettings({}).panelSkin, "fluent");
+  assert.equal(formStateFromSettings({ panel_skin: "PAPER" }).panelSkin, "paper");
   assert.equal(formStateFromSettings({}).fullscreenHideOn, false);
   assert.equal(formStateFromSettings({}).fullResetTimeOn, true);
   assert.equal(
@@ -480,6 +487,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
     theme: "unexpected",
     language: "unexpected",
     font_mode: "unexpected",
+    panel_skin: "unexpected",
     indicator_style: "unexpected",
     indicator_effect_style: "unexpected",
     indicator_track_opacity_percent: "999",
@@ -507,6 +515,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.danger_threshold, 90);
   assert.equal(payload.language, "system");
   assert.equal(payload.font_mode, "system");
+  assert.equal(payload.panel_skin, "fluent");
   assert.equal(payload.fullscreen_hide_on, false);
   assert.equal(payload.full_reset_time_on, false);
   assert.equal(payload.maximized_hide_on, false);
@@ -562,4 +571,35 @@ test("usage display basis keeps canonical used thresholds without inversion", ()
   assert.equal(payload.display_basis, "used");
   assert.equal(payload.warn_threshold, 72);
   assert.equal(payload.danger_threshold, 91);
+});
+
+test("Paper applies only while the panel is light and never touches the theme attribute", () => {
+  function root() {
+    const attributes = new Map();
+    return {
+      dataset: new Proxy({}, {
+        set(_, key, value) { attributes.set(key, String(value)); return true; },
+        get(_, key) { return attributes.get(key); },
+      }),
+      removeAttribute(name) { attributes.delete(name === "data-panel-look" ? "panelLook" : name); },
+      attributes,
+    };
+  }
+  const cases = [
+    [{ theme: "light", panel_skin: "paper" }, false, "paper"],
+    [{ theme: "light", panel_skin: "paper" }, true, "paper"],
+    [{ theme: "system", panel_skin: "paper" }, false, "paper"],
+    [{ theme: "system", panel_skin: "paper" }, true, "default"],
+    [{ theme: "dark", panel_skin: "paper" }, false, "default"],
+    [{ theme: "light", panel_skin: "fluent" }, false, "default"],
+    [{ theme: "light", panel_skin: "unknown" }, false, "default"],
+    [{ theme: "light" }, false, "default"],
+  ];
+  for (const [settings, prefersDark, expected] of cases) {
+    const element = root();
+    element.attributes.set("panelLook", "paper");
+    assert.equal(applyPanelSkin(settings, element, prefersDark), expected, JSON.stringify([settings, prefersDark]));
+    assert.equal(element.attributes.get("panelLook"), expected === "paper" ? "paper" : undefined);
+    assert.equal(element.attributes.has("theme"), false);
+  }
 });

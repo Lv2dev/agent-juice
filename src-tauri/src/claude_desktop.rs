@@ -15,6 +15,58 @@ const RESPONSE_CAP: usize = 256 * 1024;
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+struct Diagnostic {
+    profile_http_status: Option<u16>,
+    usage_http_status: Option<u16>,
+    content_type: Option<&'static str>,
+    five_hour: Option<(&'static str, &'static str)>,
+    seven_day: Option<(&'static str, &'static str)>,
+}
+#[cfg(test)]
+thread_local! {static DIAGNOSTIC:std::cell::RefCell<Diagnostic>=std::cell::RefCell::new(Diagnostic::default());}
+#[cfg(test)]
+fn observe_http(url: &str, response: &http_transport::HttpResponse) {
+    DIAGNOSTIC.with(|d| {
+        let mut d = d.borrow_mut();
+        if url == PROFILE_URL {
+            d.profile_http_status = Some(response.status);
+            return;
+        }
+        d.usage_http_status = Some(response.status);
+        d.content_type = Some(
+            match response.content_type.split(';').next().map(str::trim) {
+                Some("application/json") => "application/json",
+                Some("text/html") => "text/html",
+                _ => "other",
+            },
+        );
+        fn kind(value: Option<&serde_json::Value>) -> &'static str {
+            match value {
+                None => "missing",
+                Some(serde_json::Value::Null) => "null",
+                Some(serde_json::Value::String(_)) => "string",
+                Some(serde_json::Value::Number(_)) => "number",
+                Some(serde_json::Value::Bool(_)) => "boolean",
+                Some(serde_json::Value::Array(_)) => "array",
+                Some(serde_json::Value::Object(_)) => "object",
+            }
+        }
+        if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&response.body) {
+            let fields = |name: &str| {
+                let w = body.get(name);
+                (
+                    kind(w.and_then(|w| w.get("utilization"))),
+                    kind(w.and_then(|w| w.get("resets_at"))),
+                )
+            };
+            d.five_hour = Some(fields("five_hour"));
+            d.seven_day = Some(fields("seven_day"));
+        }
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     Unavailable,
@@ -23,10 +75,15 @@ pub(crate) enum Error {
     Deadline,
     Parse,
     Changed,
+    RateLimited,
+    Decode,
 }
 
 #[derive(PartialEq, Eq)]
-pub(crate) struct Revision(Vec<(PathBuf, Option<(u64, SystemTime)>)>, bool);
+pub(crate) enum Revision {
+    Files(Vec<(PathBuf, Option<(u64, SystemTime)>)>, bool),
+    Desktop(PathBuf, String, String),
+}
 
 fn code_path() -> Option<PathBuf> {
     dirs::home_dir().map(|p| p.join(".claude/.credentials.json"))
@@ -67,7 +124,7 @@ pub(crate) fn revision(desktop: bool) -> Revision {
             .into_iter()
             .flat_map(|p| [p.join("config.json"), p.join("Local State")]),
     );
-    Revision(
+    Revision::Files(
         paths
             .map(|p| {
                 let stamp = checked_metadata(&p)
@@ -235,7 +292,7 @@ impl Drop for Token {
     }
 }
 
-struct Credentials {
+pub(crate) struct Credentials {
     token: Zeroizing<String>,
     account: String,
     org: String,
@@ -243,6 +300,16 @@ struct Credentials {
     root: PathBuf,
     config: Zeroizing<Vec<u8>>,
     state: Zeroizing<Vec<u8>>,
+}
+
+impl Credentials {
+    pub(crate) fn revision(&self) -> Revision {
+        Revision::Desktop(
+            self.root.clone(),
+            self.account.to_ascii_lowercase(),
+            self.org.to_ascii_lowercase(),
+        )
+    }
 }
 
 fn uuid(value: &str) -> bool {
@@ -332,21 +399,27 @@ fn select_token(
 fn credentials_from(root: &Path) -> Result<Credentials, Error> {
     let config = read_file(&root.join("config.json"))?;
     let state = read_file(&root.join("Local State"))?;
-    let data: Config = serde_json::from_slice(&config).map_err(|_| Error::Parse)?;
-    let local: LocalState = serde_json::from_slice(&state).map_err(|_| Error::Parse)?;
+    let data: Config = serde_json::from_slice(&config).map_err(|_| Error::Decode)?;
+    let local: LocalState = serde_json::from_slice(&state).map_err(|_| Error::Decode)?;
     let account = data.account.filter(|a| uuid(a)).ok_or(Error::Unavailable)?;
     if local.os_crypt.app_bound_encrypted_key.is_some() {
-        return Err(Error::Unavailable);
+        return Err(Error::Decode);
     }
     let protected = STANDARD
         .decode(&local.os_crypt.encrypted_key)
-        .map_err(|_| Error::Unavailable)?;
-    let protected = protected.strip_prefix(b"DPAPI").ok_or(Error::Unavailable)?;
-    let key = unprotect(protected)?;
+        .map_err(|_| Error::Decode)?;
+    let protected = protected.strip_prefix(b"DPAPI").ok_or(Error::Decode)?;
+    let key = unprotect(protected).map_err(|_| Error::Decode)?;
     let encoded = data.scoped.or(data.legacy).ok_or(Error::Unavailable)?;
-    let encrypted = STANDARD.decode(encoded).map_err(|_| Error::Unavailable)?;
-    let decoded = decrypt(&key, &encrypted)?;
-    let (token, org, expires) = select_token(&decoded, &account, now_ms())?;
+    let encrypted = STANDARD.decode(encoded).map_err(|_| Error::Decode)?;
+    let decoded = decrypt(&key, &encrypted).map_err(|_| Error::Decode)?;
+    let (token, org, expires) = select_token(&decoded, &account, now_ms()).map_err(|e| {
+        if e == Error::Parse {
+            Error::Decode
+        } else {
+            e
+        }
+    })?;
     Ok(Credentials {
         token,
         org,
@@ -383,10 +456,15 @@ fn http(url: &str, token: &str, deadline: Instant) -> Result<Vec<u8>, Error> {
         HttpErrorKind::Deadline => Error::Deadline,
         _ => Error::Transport,
     })?;
+    #[cfg(test)]
+    observe_http(url, &response);
     response_body(response)
 }
 
 fn response_body(response: http_transport::HttpResponse) -> Result<Vec<u8>, Error> {
+    if response.status == 429 {
+        return Err(Error::RateLimited);
+    }
     if response.status == 401 {
         return Err(Error::LoginRequired);
     }
@@ -421,7 +499,9 @@ fn matching_profile(body: &[u8], account: &str, org: &str) -> Result<(), Error> 
     Ok(())
 }
 
-pub(crate) fn usage(deadline: Instant) -> Result<String, Error> {
+pub(crate) fn prepare() -> Result<Credentials, Error> {
+    #[cfg(test)]
+    DIAGNOSTIC.with(|d| *d.borrow_mut() = Diagnostic::default());
     let roots: Vec<_> = profile_paths()
         .into_iter()
         .filter(|p| checked_metadata(&p.join("config.json")).is_ok_and(|m| m.is_file()))
@@ -429,34 +509,85 @@ pub(crate) fn usage(deadline: Instant) -> Result<String, Error> {
     if roots.len() != 1 {
         return Err(Error::Unavailable);
     }
-    if Instant::now() >= deadline {
-        return Err(Error::Deadline);
-    }
-    let c = credentials_from(&roots[0])?;
-    query_credentials(c, deadline, http)
+    credentials_from(&roots[0])
 }
 
+#[cfg(test)]
+pub(crate) fn usage(deadline: Instant) -> Result<String, Error> {
+    usage_prepared(prepare()?, deadline)
+}
+
+pub(crate) fn usage_prepared(c: Credentials, deadline: Instant) -> Result<String, Error> {
+    query_credentials_cached(c, deadline, http, &PROFILE_PROOF)
+}
+
+#[cfg(test)]
 fn query_credentials(
     c: Credentials,
     deadline: Instant,
     mut fetch: impl FnMut(&str, &str, Instant) -> Result<Vec<u8>, Error>,
 ) -> Result<String, Error> {
+    query_credentials_cached(c, deadline, &mut fetch, &std::sync::Mutex::new(None))
+}
+
+struct ProfileProof {
+    revision: Revision,
+    token_digest: [u8; 32],
+    valid_until: Instant,
+}
+// Reuse identity verification briefly, but never across tokens, accounts or organizations.
+static PROFILE_PROOF: std::sync::Mutex<Option<ProfileProof>> = std::sync::Mutex::new(None);
+
+fn query_credentials_cached(
+    c: Credentials,
+    deadline: Instant,
+    mut fetch: impl FnMut(&str, &str, Instant) -> Result<Vec<u8>, Error>,
+    proof: &std::sync::Mutex<Option<ProfileProof>>,
+) -> Result<String, Error> {
+    use sha2::{Digest, Sha256};
     if Instant::now() >= deadline {
         return Err(Error::Deadline);
     }
     if c.expires <= now_ms() || !credentials_unchanged(&c) {
         return Err(Error::Changed);
     }
-    let profile = Zeroizing::new(fetch(PROFILE_URL, &c.token, deadline)?);
-    matching_profile(&profile, &c.account, &c.org)?;
-    let body = fetch(USAGE_URL, &c.token, deadline)?;
-    if Instant::now() >= deadline {
-        return Err(Error::Deadline);
-    }
+    let revision = c.revision();
+    let token_digest: [u8; 32] = Sha256::digest(c.token.as_bytes()).into();
+    let verified = proof
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|p| {
+            p.revision == revision
+                && p.token_digest == token_digest
+                && Instant::now() < p.valid_until
+        });
+    let result = (|| {
+        if !verified {
+            *proof.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let profile = Zeroizing::new(fetch(PROFILE_URL, &c.token, deadline)?);
+            matching_profile(&profile, &c.account, &c.org)?;
+            *proof.lock().unwrap_or_else(|e| e.into_inner()) = Some(ProfileProof {
+                revision,
+                token_digest,
+                valid_until: Instant::now() + std::time::Duration::from_secs(300),
+            });
+        }
+        let body = fetch(USAGE_URL, &c.token, deadline).inspect_err(|e| {
+            if matches!(e, Error::LoginRequired | Error::Changed) {
+                *proof.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+        })?;
+        String::from_utf8(body).map_err(|_| Error::Parse)
+    })();
     if !credentials_unchanged(&c) {
+        *proof.lock().unwrap_or_else(|e| e.into_inner()) = None;
         return Err(Error::Changed);
     }
-    String::from_utf8(body).map_err(|_| Error::Parse)
+    if Instant::now() >= deadline && result.is_ok() {
+        return Err(Error::Deadline);
+    }
+    result
 }
 
 #[cfg(windows)]
@@ -479,6 +610,27 @@ mod tests {
     const ACCOUNT: &str = "11111111-1111-4111-8111-111111111111";
     const ORG: &str = "22222222-2222-4222-8222-222222222222";
     const OTHER: &str = "33333333-3333-4333-8333-333333333333";
+    #[test]
+    #[ignore = "one read-only Desktop diagnostic; emits only kinds, statuses, MIME and field types"]
+    fn live_desktop_safe_diagnostic() {
+        let result = usage(Instant::now() + std::time::Duration::from_secs(10));
+        let usage_error = result.as_ref().err().copied();
+        let adapter_error = result.as_ref().ok().and_then(|raw| {
+            crate::adapters::claude::parse_oauth_usage_response(
+                raw,
+                "test",
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .err()
+            .map(|_| "Parse")
+        });
+        DIAGNOSTIC.with(|d| {
+            eprintln!(
+                "usage_error={usage_error:?}; adapter_error={adapter_error:?}; {:?}",
+                d.borrow()
+            )
+        });
+    }
     fn cache_key(account: &str, org: &str, scope: &str) -> String {
         format!("acct:{account}|00000000-0000-4000-8000-000000000000:{org}:https://api.anthropic.com:{scope}")
     }
@@ -548,7 +700,7 @@ mod tests {
         use std::sync::Mutex;
         let previous = Mutex::new(None);
         let cache = Mutex::new(None);
-        let revision = |desktop| Revision(vec![], desktop);
+        let revision = |desktop| Revision::Files(vec![], desktop);
         crate::reconcile_claude_source(&cache, &previous, revision(false));
         crate::cached_status_attempt(&cache, chrono::Utc::now(), 60, true, || {
             Err(crate::CollectionErrorKind::LoginRequired)
@@ -564,7 +716,7 @@ mod tests {
         crate::reconcile_claude_source(
             &cache,
             &previous,
-            Revision(vec![(PathBuf::from("fixture"), None)], true),
+            Revision::Files(vec![(PathBuf::from("fixture"), None)], true),
         );
         assert!(cache.lock().unwrap().is_none());
     }
@@ -683,7 +835,11 @@ mod tests {
             response_body(response(401, "application/json")),
             Err(Error::LoginRequired)
         );
-        for status in [302, 403, 429, 500] {
+        assert_eq!(
+            response_body(response(429, "application/json")),
+            Err(Error::RateLimited)
+        );
+        for status in [302, 403, 500] {
             assert_eq!(
                 response_body(response(status, "application/json")),
                 Err(Error::Transport)
@@ -702,6 +858,101 @@ mod tests {
             query_credentials(c, Instant::now(), |_, _, _| panic!("deadline")),
             Err(Error::Deadline)
         );
+    }
+    #[test]
+    fn profile_proof_is_bounded_to_token_identity_and_lifetime() {
+        let dir = Temp::new();
+        let proof = std::sync::Mutex::new(None);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        let mut profiles = 0;
+        let mut usages = 0;
+        let mut run = |c, error: Option<Error>| {
+            query_credentials_cached(
+                c,
+                deadline,
+                |url, _, _| {
+                    if url == PROFILE_URL {
+                        profiles += 1;
+                        Ok(profile())
+                    } else {
+                        usages += 1;
+                        error.map_or_else(|| Ok(b"{}".to_vec()), Err)
+                    }
+                },
+                &proof,
+            )
+        };
+        assert!(run(fixture_credentials(&dir.0), None).is_ok());
+        assert_eq!(
+            run(fixture_credentials(&dir.0), Some(Error::RateLimited)),
+            Err(Error::RateLimited)
+        );
+        assert!(run(fixture_credentials(&dir.0), None).is_ok());
+        let mut c = fixture_credentials(&dir.0);
+        c.token = Zeroizing::new("rotated-fixture".into());
+        assert!(run(c, None).is_ok());
+        proof.lock().unwrap().as_mut().unwrap().valid_until = Instant::now();
+        assert!(run(fixture_credentials(&dir.0), None).is_ok());
+        assert_eq!(
+            run(fixture_credentials(&dir.0), Some(Error::LoginRequired)),
+            Err(Error::LoginRequired)
+        );
+        assert!(proof.lock().unwrap().is_none());
+        assert!(run(fixture_credentials(&dir.0), None).is_ok());
+        assert_eq!(profiles, 4);
+        assert_eq!(usages, 7);
+        let mut c = fixture_credentials(&dir.0);
+        c.org = OTHER.into();
+        assert_eq!(
+            query_credentials_cached(
+                c,
+                deadline,
+                |url, _, _| {
+                    assert_eq!(url, PROFILE_URL);
+                    Ok(profile())
+                },
+                &proof
+            ),
+            Err(Error::Changed)
+        );
+        assert!(proof.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_request_cannot_keep_values_after_credentials_change() {
+        let dir = Temp::new();
+        for error in [Error::RateLimited, Error::Transport, Error::Parse] {
+            let c = fixture_credentials(&dir.0);
+            let result = query_credentials(
+                c,
+                Instant::now() + std::time::Duration::from_secs(1),
+                |url, _, _| {
+                    if url == PROFILE_URL {
+                        return Ok(profile());
+                    }
+                    std::fs::write(dir.0.join("config.json"), b"changed").unwrap();
+                    Err(error)
+                },
+            );
+            assert_eq!(result, Err(Error::Changed));
+        }
+    }
+
+    #[test]
+    fn desktop_revision_keeps_same_account_preferences_but_separates_identity() {
+        let dir = Temp::new();
+        let c = fixture_credentials(&dir.0);
+        let mut next = fixture_credentials(&dir.0);
+        next.config = Zeroizing::new(b"changed-preferences".to_vec());
+        next.token = Zeroizing::new("rotated-fixture".into());
+        assert!(c.revision() == next.revision());
+        next.account = OTHER.into();
+        assert!(c.revision() != next.revision());
+        next.account = ACCOUNT.into();
+        next.org = OTHER.into();
+        assert!(c.revision() != next.revision());
+        let bad = credentials_from(&dir.0);
+        assert!(matches!(bad, Err(Error::Decode)));
     }
     #[test]
     fn safe_file_read_rejects_large_and_linked_files_and_code_fallback_is_conservative() {

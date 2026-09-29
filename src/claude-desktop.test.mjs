@@ -23,7 +23,7 @@ test('desktop Claude keeps quota periods and identifies its source without a sec
 
 test('desktop collection has no CLI, token refresh, or secret output path',()=>{
   const source=readFileSync(new URL('../src-tauri/src/claude_desktop.rs',import.meta.url),'utf8');
-  const production=source.split('#[cfg(test)]')[0];
+  const production=source.split(/#\[cfg\(test\)\]\s*mod tests/)[0];
   assert.doesNotMatch(production,/Command::|\.spawn\(|println!|eprintln!|refresh_token|\/v1\/oauth\/token/);
   assert.match(production,/PROFILE_URL/);assert.match(production,/credentials_unchanged/);
   const lib=readFileSync(new URL('../src-tauri/src/lib.rs',import.meta.url),'utf8');

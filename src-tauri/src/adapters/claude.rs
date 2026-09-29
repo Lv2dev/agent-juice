@@ -41,7 +41,7 @@ struct UsageResult {
 #[derive(Deserialize)]
 struct OauthUsageWindow {
     utilization: Option<f32>,
-    resets_at: Option<String>,
+    resets_at: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -159,7 +159,11 @@ fn oauth_limit(label: &str, window: Option<OauthUsageWindow>) -> Option<AccountL
     Some(AccountLimit {
         label: label.into(),
         used_percent,
-        resets_at: window.resets_at.as_deref().and_then(normalized_rfc3339),
+        resets_at: window
+            .resets_at
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .and_then(normalized_rfc3339),
     })
 }
 
@@ -203,6 +207,21 @@ pub fn parse_oauth_usage_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_reset_types_do_not_discard_valid_utilization() {
+        for reset in [
+            serde_json::json!({"seconds":1790590000}),
+            serde_json::json!(1790590000),
+            serde_json::json!([]),
+            serde_json::json!(false),
+        ] {
+            let raw=serde_json::json!({"five_hour":{"utilization":30,"resets_at":reset},"seven_day":{"utilization":22,"resets_at":reset}}).to_string();
+            let status = parse_oauth_usage_response(&raw, "test", "2026-09-28T09:00:00Z").unwrap();
+            assert_eq!(status.primary.unwrap().used_percent, Some(30.0));
+            assert_eq!(status.secondary.unwrap().used_percent, Some(22.0));
+        }
+    }
 
     #[test]
     fn oauth_usage_parser_reads_exact_five_hour_and_weekly_limits() {
