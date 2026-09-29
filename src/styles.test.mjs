@@ -1819,6 +1819,20 @@ test("release links use the Windows shell API instead of PATH executable lookup"
   assert.doesNotMatch(rustLib, /Command::new\("explorer\.exe"\)/);
 });
 
+test("update progress stacks its label above an inset full-width track", () => {
+  assert.match(panelBlock(".update-install-progress"), /grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(panelBlock(".update-controls > .update-install-progress"), /padding:\s*12px 16px/);
+  assert.match(panelBlock(".update-band-progress"), /grid-column:\s*1 \/ -1/);
+  assert.doesNotMatch(panelBlock(".update-band-progress"), /vw/);
+  assert.match(panelBlock('html[data-text-scale="enlarged"] .update-band'), /grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(panelCss, /\.update-controls:has\(\.update-install-progress:not\(\[hidden\]\)\) \.update-check-status\s*\{\s*display: none;/);
+  const progress = [...panelMarkup.matchAll(/<div class="update-install-progress[^]*?<\/div>/g)];
+  assert.equal(progress.length, 2);
+  for (const [markup] of progress) {
+    assert.ok(markup.indexOf('data-update-progress-text') < markup.indexOf('class="update-install-track"'));
+  }
+});
+
 test("all application version sources stay synchronized", () => {
   const cargoTomlVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
   const cargoLockVersion = cargoLock.match(
@@ -1832,7 +1846,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.30"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.31"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

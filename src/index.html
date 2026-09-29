@@ -61,14 +61,14 @@
         <div class="update-band-copy">
           <strong data-i18n="update.available">새 버전을 사용할 수 있습니다</strong>
           <span data-update-version></span>
-          <div class="update-install-progress update-band-progress" data-update-install-progress role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-i18n-aria-label="accessibility.updateProgress" hidden>
-            <span class="update-install-track" aria-hidden="true"><i data-update-progress-bar></i></span>
-            <span data-update-progress-text></span>
-          </div>
         </div>
         <div class="update-band-actions">
           <button type="button" data-action="install-update" data-i18n="action.installUpdate">업데이트 및 재시작</button>
           <button type="button" data-update-fallback data-action="open-releases" data-i18n="action.releasePage" hidden>릴리즈 페이지</button>
+        </div>
+        <div class="update-install-progress update-band-progress" data-update-install-progress role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-i18n-aria-label="accessibility.updateProgress" hidden>
+          <span data-update-progress-text></span>
+          <span class="update-install-track" aria-hidden="true"><i data-update-progress-bar></i></span>
         </div>
       </section>
 
@@ -1284,8 +1284,8 @@
                 <p id="update-check-status" class="settings-status update-check-status" aria-live="polite"></p>
               </div>
               <div class="update-install-progress" data-update-install-progress role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-i18n-aria-label="accessibility.updateProgress" hidden>
-                <span class="update-install-track" aria-hidden="true"><i data-update-progress-bar></i></span>
                 <span data-update-progress-text></span>
+                <span class="update-install-track" aria-hidden="true"><i data-update-progress-bar></i></span>
               </div>
           </div>
         </section>

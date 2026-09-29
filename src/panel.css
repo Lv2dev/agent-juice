@@ -558,7 +558,8 @@ html[data-panel-look="paper"] .panel-window {
   padding: 10px 12px 10px 14px;
   border: 1px solid color-mix(in srgb, var(--pn-ok) 40%, var(--pn-line));
   border-radius: var(--pn-radius-card);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -577,22 +578,30 @@ html[data-panel-look="paper"] .panel-window {
   font-weight: 650;
 }
 
-.update-band-copy span {
+.update-band-copy > span {
   color: var(--pn-muted);
   font-size: calc(11.5px * var(--system-text-scale, 1));
 }
 
 .update-band-actions {
-  flex: 0 0 auto;
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
 }
 
 .update-band-progress {
-  width: min(360px, 52vw);
-  padding: 3px 0 0;
+  grid-column: 1 / -1;
+}
+
+html[data-text-scale="enlarged"] .update-band {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-text-scale="enlarged"] .update-band-actions {
+  justify-content: flex-start;
 }
 
 .panel-window .update-install-action,
@@ -612,12 +621,25 @@ html[data-panel-look="paper"] .panel-window {
   grid-column: 1 / -1;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(80px, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   color: var(--pn-muted);
-  font-size: calc(11px * var(--system-text-scale, 1));
-  line-height: 1.2;
+  font-size: calc(11.5px * var(--system-text-scale, 1));
+  line-height: 1.5;
+}
+
+.update-install-progress [data-update-progress-text] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.update-controls > .update-install-progress {
+  padding: 12px 16px;
+}
+
+.update-controls:has(.update-install-progress:not([hidden])) .update-check-status {
+  display: none;
 }
 
 .update-install-progress[hidden] {
@@ -2413,7 +2435,7 @@ html[data-panel-look="paper"] .settings-toast {
 
   .update-band {
     align-items: stretch;
-    flex-direction: column;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .update-band-actions {
