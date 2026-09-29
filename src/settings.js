@@ -1,7 +1,7 @@
 import { formStateFromSettings, payloadFromEntries } from "./settings-state.js";
 import { applyFont } from "./font.js";
 import { applyTranslations, t } from "./i18n.js";
-import { applyTheme } from "./theme.js";
+import { applyPanelSkin, applyTheme } from "./theme.js";
 
 const form = document.querySelector("#settings-form");
 const statusEl = document.querySelector("#settings-status");
@@ -76,7 +76,21 @@ function setStatus(text, state = "ready") {
   if (statusEl) statusEl.textContent = value;
   if (statusHost) {
     statusHost.dataset.state = state;
-    statusHost.hidden = value.length === 0;
+    statusHost.hidden = state !== "error" || value.length === 0;
+  }
+}
+
+document.querySelector("[data-dismiss-settings-error]")?.addEventListener?.("click", () => setStatus(""));
+
+function labelRangeControls() {
+  for (const row of form?.querySelectorAll?.(".range-row") ?? []) {
+    const range = row.querySelector('input[type="range"]');
+    const label = row.querySelector("[data-i18n], [data-display-basis-copy]");
+    if (!range?.name || !label) continue;
+    label.id ||= `range-label-${range.name}`;
+    for (const control of row.querySelectorAll('input[type="range"], input[type="number"]')) {
+      control.setAttribute("aria-labelledby", label.id);
+    }
   }
 }
 
@@ -449,6 +463,7 @@ function fillForm(settings) {
   setField("language", state.language);
   setField("theme", state.theme);
   setField("font_mode", state.fontMode);
+  setField("panel_skin", state.panelSkin);
   setField("claude_taskbar_offset_ratio", state.claudeTaskbarOffsetRatio);
   setField("codex_taskbar_offset_ratio", state.codexTaskbarOffsetRatio);
   setField("grok_taskbar_offset_ratio", state.grokTaskbarOffsetRatio);
@@ -493,6 +508,7 @@ function fillForm(settings) {
   setField("ring_text_color", state.ringTextColor);
   setField("ring_text_color_on", state.ringTextColorOn);
   applyTheme({ theme: state.theme });
+  applyPanelSkin({ theme: state.theme, panel_skin: state.panelSkin });
   applyFont({ font_mode: state.fontMode });
   applyTranslations({ language: state.language });
   updateOutputs();
@@ -506,6 +522,11 @@ function fillForm(settings) {
     },
   };
   isHydrating = false;
+  publishPreview(settings);
+}
+
+function publishPreview(savedSettings = null) {
+  window.dispatchEvent(new CustomEvent("settings-preview", { detail: savedSettings ?? payloadFromEntries(new FormData(form)) }));
 }
 
 function hydrateSettings(settings) {
@@ -788,6 +809,7 @@ function scheduleAutosave() {
   if (isHydrating || !hasLoadedSettings) return;
   localRevision += 1;
   updateOutputs();
+  publishPreview();
   hideSettingsToast();
   setStatus(t("status.saving", currentLanguageSettings()), "saving");
   clearTimeout(autosaveTimer);
@@ -801,8 +823,12 @@ function handleSettingsMutation(event) {
   if (event?.target?.name === "display_basis") {
     transformThresholdInputs(displayBasis(event.target.value));
   }
-  if (["theme", "font_mode", "language"].includes(event?.target?.name)) {
+  if (["theme", "panel_skin", "font_mode", "language"].includes(event?.target?.name)) {
     applyTheme({ theme: form.elements.namedItem("theme")?.value });
+    applyPanelSkin({
+      theme: form.elements.namedItem("theme")?.value,
+      panel_skin: form.elements.namedItem("panel_skin")?.value,
+    });
     applyFont({ font_mode: form.elements.namedItem("font_mode")?.value });
     applyTranslations({ language: form.elements.namedItem("language")?.value });
   }
@@ -963,6 +989,7 @@ window.addEventListener?.("pagehide", cleanupListeners);
 window.addEventListener?.("beforeunload", cleanupListeners);
 
 if (form) {
+  labelRangeControls();
   form.addEventListener("input", handleSettingsMutation);
   form.addEventListener("change", handleSettingsMutation);
   form.addEventListener("submit", (event) => event.preventDefault());

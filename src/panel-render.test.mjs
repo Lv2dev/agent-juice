@@ -140,6 +140,14 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   assert.equal(cards.codex.querySelector(".p5h").hidden, true);
   assert.equal(cards.codex.querySelector(".pweek").hidden, false);
   assert.equal(cards.cursor.style.getPropertyValue("--tool-brand"), "#85847f");
+  // Codex has no 5h pool here, so the hero number falls back to the visible weekly limit.
+  assert.equal(cards.codex.querySelector(".hero-num").textContent, "58");
+  assert.equal(cards.codex.querySelector(".hero-unit").textContent, "%");
+  assert.equal(
+    cards.codex.querySelector(".hero-label").textContent,
+    cards.codex.querySelector(".pweek").querySelector(".metric-row span").textContent,
+  );
+  assert.equal(cards.cursor.querySelector(".hero-num").textContent, "99");
   assert.equal(focusListenerCount, 0);
   let prevented = false;
   listeners.contextmenu?.({ preventDefault() { prevented = true; } });
@@ -181,6 +189,23 @@ test("panel render hides disabled tools and does not auto-hide on focus loss", a
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(dragPrevented, true);
+  assert.equal(dragStartCount, 1);
+  let tabDragPrevented = false;
+  listeners.pointerdown?.({
+    button: 0,
+    target: {
+      closest(selector) {
+        if (selector === "[data-window-action], [data-panel-tab]") return { dataset: { panelTab: "activity" } };
+        if (selector === "[data-tauri-drag-region]") return {};
+        return null;
+      },
+    },
+    preventDefault() {
+      tabDragPrevented = true;
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(tabDragPrevented, false);
   assert.equal(dragStartCount, 1);
   delete global.window;
   delete global.document;

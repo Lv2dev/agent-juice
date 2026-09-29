@@ -100,6 +100,10 @@ function themeOr(value) {
   return theme === "light" || theme === "dark" ? theme : "system";
 }
 
+function panelSkinOr(value) {
+  return String(value || "fluent").toLowerCase() === "paper" ? "paper" : "fluent";
+}
+
 function fontModeOr(value) {
   const mode = String(value || "system").toLowerCase();
   return mode === "pretendard" ? mode : "system";
@@ -295,6 +299,7 @@ export function formStateFromSettings(settings = {}) {
     language: languageOr(settings.language),
     theme: themeOr(settings.theme),
     fontMode: fontModeOr(settings.font_mode),
+    panelSkin: panelSkinOr(settings.panel_skin),
     claudeTaskbarOffsetRatio: ratioOr(
       settings.claude_taskbar_offset_ratio,
       legacyOffset,
@@ -419,6 +424,7 @@ export function payloadFromEntries(entries) {
     language: languageOr(source.get("language")),
     theme: themeOr(source.get("theme")),
     font_mode: fontModeOr(source.get("font_mode")),
+    panel_skin: panelSkinOr(source.get("panel_skin")),
     claude_taskbar_offset_ratio: ratioOr(
       source.get("claude_taskbar_offset_ratio"),
       0,

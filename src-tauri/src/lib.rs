@@ -264,16 +264,24 @@ enum CollectionErrorKind {
     Parse,
     LoginRequired,
     Unavailable,
+    RateLimited,
+    CredentialsDecode,
+    SourceChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CollectionHealth {
+    Idle,
     Ready,
     AppRequired,
     LoginRequired,
     Unavailable,
     TransientError,
+    RateLimited,
+    ParseError,
+    CredentialsError,
+    SourceChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1508,12 +1516,16 @@ fn cached_status_attempt(
     force: bool,
     collect: impl FnOnce() -> Result<AgentStatus, CollectionErrorKind>,
 ) -> Option<AgentStatus> {
-    if !force {
+    {
         let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
         if let Some(cached) = cache.as_ref() {
             let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
             let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
-            if now >= cached.attempted_at && (retry_backoff_active || success_cache_fresh) {
+            let honor_cooldown = !force || cached.error == Some(CollectionErrorKind::RateLimited);
+            if honor_cooldown
+                && now >= cached.attempted_at
+                && (retry_backoff_active || success_cache_fresh)
+            {
                 return cached.last_good.clone();
             }
         }
@@ -1579,6 +1591,9 @@ fn collection_retry_delay_secs(
         CollectionErrorKind::Parse
             | CollectionErrorKind::LoginRequired
             | CollectionErrorKind::Unavailable
+            | CollectionErrorKind::RateLimited
+            | CollectionErrorKind::CredentialsDecode
+            | CollectionErrorKind::SourceChanged
     ) {
         minimum.max(COLLECTION_STICKY_ERROR_MIN_BACKOFF_SECS)
     } else {
@@ -1617,6 +1632,9 @@ fn cached_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> Colle
     match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
         Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
         Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
+        Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
+        Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
         Some(
             CollectionErrorKind::Deadline
             | CollectionErrorKind::Transport
@@ -1640,6 +1658,9 @@ fn cursor_collection_health() -> CollectionHealth {
     match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
         Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
         Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
+        Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
+        Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
         Some(
             CollectionErrorKind::Deadline
             | CollectionErrorKind::Transport
@@ -1658,7 +1679,7 @@ fn cursor_collection_health() -> CollectionHealth {
 
 fn collection_health_snapshot() -> CollectionHealthSnapshot {
     CollectionHealthSnapshot {
-        claude: cached_collection_health(&CLAUDE_USAGE_CACHE),
+        claude: claude_collection_health(&CLAUDE_USAGE_CACHE),
         codex: cached_collection_health(&CODEX_ACCOUNT_CACHE),
         grok: cached_collection_health(&GROK_BILLING_CACHE),
         cursor: cursor_collection_health(),
@@ -1669,6 +1690,22 @@ fn collection_health_snapshot() -> CollectionHealthSnapshot {
             None if antigravity::cached().is_some() => CollectionHealth::Ready,
             None => CollectionHealth::Unavailable,
         },
+    }
+}
+
+fn claude_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> CollectionHealth {
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        return CollectionHealth::Idle;
+    }
+    let parse_failed = guard
+        .as_ref()
+        .is_some_and(|c| c.error == Some(CollectionErrorKind::Parse));
+    drop(guard);
+    if parse_failed {
+        CollectionHealth::ParseError
+    } else {
+        cached_collection_health(cache)
     }
 }
 
@@ -1748,7 +1785,11 @@ fn collect_claude_usage_status(
     deadline: std::time::Instant,
     desktop_source: bool,
 ) -> Option<AgentStatus> {
-    let revision = claude_desktop::revision(desktop_source);
+    let prepared = desktop_source.then(claude_desktop::prepare);
+    let revision = prepared.as_ref().and_then(|r| r.as_ref().ok()).map_or_else(
+        || claude_desktop::revision(desktop_source),
+        |c| c.revision(),
+    );
     reconcile_claude_source(&CLAUDE_USAGE_CACHE, &CLAUDE_SOURCE_REVISION, revision);
     let status = cached_status_attempt(
         &CLAUDE_USAGE_CACHE,
@@ -1762,15 +1803,21 @@ fn collect_claude_usage_status(
                     deadline,
                     std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
                 )?;
-                let raw = claude_desktop::usage(std::time::Instant::now() + timeout).map_err(
-                    |e| match e {
+                let raw = prepared
+                    .expect("desktop credentials prepared")
+                    .and_then(|c| {
+                        claude_desktop::usage_prepared(c, std::time::Instant::now() + timeout)
+                    })
+                    .map_err(|e| match e {
                         claude_desktop::Error::LoginRequired => CollectionErrorKind::LoginRequired,
                         claude_desktop::Error::Deadline => CollectionErrorKind::Deadline,
                         claude_desktop::Error::Transport => CollectionErrorKind::Transport,
                         claude_desktop::Error::Parse => CollectionErrorKind::Parse,
-                        _ => CollectionErrorKind::Unavailable,
-                    },
-                )?;
+                        claude_desktop::Error::RateLimited => CollectionErrorKind::RateLimited,
+                        claude_desktop::Error::Decode => CollectionErrorKind::CredentialsDecode,
+                        claude_desktop::Error::Changed => CollectionErrorKind::SourceChanged,
+                        claude_desktop::Error::Unavailable => CollectionErrorKind::Unavailable,
+                    })?;
                 let mut status =
                     adapters::claude::parse_oauth_usage_response(&raw, pc_id, &captured_at)
                         .map_err(|_| CollectionErrorKind::Parse)?;
@@ -1850,7 +1897,17 @@ fn discard_failed_desktop_status(
     status: Option<AgentStatus>,
 ) -> Option<AgentStatus> {
     let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(attempt) = cache.as_mut().filter(|attempt| attempt.error.is_some()) {
+    if let Some(attempt) = cache.as_mut().filter(|attempt| {
+        matches!(
+            attempt.error,
+            Some(
+                CollectionErrorKind::LoginRequired
+                    | CollectionErrorKind::Unavailable
+                    | CollectionErrorKind::CredentialsDecode
+                    | CollectionErrorKind::SourceChanged
+            )
+        )
+    }) {
         attempt.last_good = None;
         return None;
     }
@@ -9179,6 +9236,86 @@ mod tests {
         });
         assert!(super::discard_failed_desktop_status(&cache, result).is_none());
         assert!(cache.lock().unwrap().as_ref().unwrap().last_good.is_none());
+    }
+
+    #[test]
+    fn desktop_transient_failure_keeps_verified_last_good() {
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let good = status_for_signature("claude-desktop-usage");
+        super::cached_status_attempt(&cache, now, 60, true, || Ok(good));
+        let status = super::cached_status_attempt(&cache, now, 60, true, || {
+            Err(super::CollectionErrorKind::Transport)
+        });
+        assert!(super::discard_failed_desktop_status(&cache, status).is_some());
+    }
+
+    #[test]
+    fn claude_rate_limit_preserves_values_and_manual_refresh_honors_cooldown() {
+        use super::CollectionErrorKind as E;
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let good = status_for_signature("claude-desktop-usage");
+        let captured = good.captured_at.clone();
+        super::cached_status_attempt(&cache, now, 60, true, || Ok(good));
+        let status = super::cached_status_attempt(&cache, now, 60, true, || Err(E::RateLimited));
+        let kept = super::discard_failed_desktop_status(&cache, status).unwrap();
+        assert_eq!(kept.captured_at, captured);
+        assert_eq!(
+            super::claude_collection_health(&cache),
+            super::CollectionHealth::RateLimited
+        );
+        assert!(super::cached_status_attempt(
+            &cache,
+            now + chrono::Duration::seconds(1),
+            60,
+            true,
+            || panic!("cooldown bypassed")
+        )
+        .is_some());
+        let retry_at = cache.lock().unwrap().as_ref().unwrap().retry_at;
+        assert!(retry_at >= now + chrono::Duration::seconds(120));
+        assert!(
+            super::cached_status_attempt(&cache, retry_at, 60, true, || Ok(status_for_signature(
+                "claude-desktop-usage"
+            )))
+            .is_some()
+        );
+        assert_eq!(
+            super::claude_collection_health(&cache),
+            super::CollectionHealth::Ready
+        );
+    }
+
+    #[test]
+    fn claude_error_health_and_retention_are_distinct() {
+        use super::{CollectionErrorKind as E, CollectionHealth as H};
+        assert_eq!(
+            super::claude_collection_health(&std::sync::Mutex::new(None)),
+            H::Idle
+        );
+        for (error, health, retain) in [
+            (E::RateLimited, H::RateLimited, true),
+            (E::Transport, H::TransientError, true),
+            (E::Deadline, H::TransientError, true),
+            (E::Parse, H::ParseError, true),
+            (E::LoginRequired, H::LoginRequired, false),
+            (E::CredentialsDecode, H::CredentialsError, false),
+            (E::Unavailable, H::Unavailable, false),
+            (E::SourceChanged, H::SourceChanged, false),
+        ] {
+            let cache = std::sync::Mutex::new(None);
+            let now = chrono::Utc::now();
+            super::cached_status_attempt(&cache, now, 60, true, || {
+                Ok(status_for_signature("claude-desktop-usage"))
+            });
+            let status = super::cached_status_attempt(&cache, now, 60, true, || Err(error));
+            assert_eq!(
+                super::discard_failed_desktop_status(&cache, status).is_some(),
+                retain
+            );
+            assert_eq!(super::claude_collection_health(&cache), health);
+        }
     }
 
     #[test]

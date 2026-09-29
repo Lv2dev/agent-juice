@@ -109,6 +109,44 @@ test("activity totals and filters include Grok only when it is enabled", () => {
   assert.equal(disabled.totalTokens, 400);
 });
 
+test("activity summary exposes weekly totals, the busiest day, and enabled tool totals", () => {
+  const snapshot = {
+    days: [
+      { date: "2026-06-28", claude_tokens: 50, codex_tokens: 0 },
+      { date: "2026-07-13", claude_tokens: 100, codex_tokens: 300, grok_tokens: 900 },
+      { date: "2026-07-18", claude_tokens: 400, codex_tokens: 0, cursor_tokens: 25 },
+      { date: "2026-07-19", claude_tokens: 0, codex_tokens: 400 },
+      { date: "2026-07-25", claude_tokens: 999, codex_tokens: 999 },
+    ],
+  };
+  const view = buildActivityView(snapshot, { activity_weeks: 4, show_cursor: true }, "all", NOW);
+
+  assert.equal(view.weeklyTotals.length, 4);
+  assert.deepEqual(view.weeklyTotals, [50, 0, 400 + 425, 400]);
+  assert.equal(view.weeklyTotals.reduce((sum, value) => sum + value, 0), view.totalTokens);
+  assert.equal(view.peak.tokens, 425);
+  assert.equal(view.peak.date.getDate(), 18);
+  assert.deepEqual(view.toolTotals, { claude: 550, codex: 700, grok: 0, cursor: 25 });
+
+  const codexOnly = buildActivityView(snapshot, { activity_weeks: 4 }, "codex", NOW);
+  assert.deepEqual(codexOnly.weeklyTotals, [0, 0, 300, 400]);
+  assert.equal(codexOnly.peak.tokens, 400);
+  assert.equal(codexOnly.peak.date.getDate(), 19);
+  assert.deepEqual(codexOnly.toolTotals, { claude: 550, codex: 700, grok: 0, cursor: 0 });
+
+  const tie = buildActivityView(
+    { days: [{ date: "2026-07-13", claude_tokens: 10 }, { date: "2026-07-15", claude_tokens: 10 }] },
+    { activity_weeks: 4 },
+    "all",
+    NOW,
+  );
+  assert.equal(tie.peak.date.getDate(), 15);
+
+  const empty = buildActivityView({ days: [] }, { activity_weeks: 4 }, "all", NOW);
+  assert.equal(empty.peak, null);
+  assert.deepEqual(empty.weeklyTotals, [0, 0, 0, 0]);
+});
+
 test("Cursor activity is account-scoped and does not change local filter state", () => {
   const snapshot = {
     local_partial: false,

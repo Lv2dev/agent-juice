@@ -88,10 +88,17 @@ const signedReleaseWorkflow = readOptional(
 const nsisHooks = readOptional(resolve(here, "../src-tauri/windows/hooks.nsh"));
 const runtimeSmoke = readOptional(resolve(here, "../.github/scripts/runtime-smoke.ps1"));
 const barMarkup = readFileSync(resolve(here, "bar.html"), "utf8").replace(/\r\n?/g, "\n");
+const panelCss = readFileSync(resolve(here, "panel.css"), "utf8").replace(/\r\n?/g, "\n");
 
 function cssBlock(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{(?<body>[^}]+)\\}`));
+  return match?.groups?.body ?? "";
+}
+
+function panelBlock(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = panelCss.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{(?<body>[^}]+)\\}`));
   return match?.groups?.body ?? "";
 }
 
@@ -141,58 +148,63 @@ test("README product images exist and match each section language", () => {
 });
 
 test("usage cards reserve rows only for visible content", () => {
-  const card = cssBlock(".tool-card");
+  const card = panelBlock(".tool-card");
   assert.match(card, /grid-auto-rows:\s*max-content/);
   assert.doesNotMatch(card, /grid-template-rows:/);
-  assert.match(cssBlock(".tool-card > .meta:empty"), /display:\s*none/);
-  assert.match(card, /padding:\s*12px/);
-  assert.match(card, /gap:\s*10px/);
+  assert.match(card, /grid-template-areas:\s*"head hero metrics"\s*"meta hero metrics"/);
+  assert.match(panelBlock(".tool-card > .meta:empty"), /display:\s*none/);
+  assert.match(panelBlock(".tool-head"), /grid-area: head/);
+  assert.match(panelBlock(".tool-hero"), /grid-area: hero/);
+  assert.match(panelBlock(".tool-metrics"), /grid-area: metrics/);
+  assert.match(panelBlock(".meta"), /grid-area: meta/);
+  assert.match(panelCss, /\.tool-card\[data-state="empty"\] :is\(\.tool-hero, \.tool-metrics\),\n\.tool-card\[data-state="login_required"\] :is\(\.tool-hero, \.tool-metrics\) \{\n  display: none;/);
 });
 
-test("styles define the restrained Quiet Glass surface tokens used by Juice", () => {
-  for (const token of [
-    "--glass",
-    "--surface",
-    "--surface-2",
-    "--field",
-    "--line",
-    "--hi",
-    "--accent-warm",
-  ]) {
+test("panel tokens are scoped to the panel window and separate from taskbar root tokens", () => {
+  for (const token of ["--glass", "--surface", "--surface-2", "--field", "--line", "--hi", "--accent-warm"]) {
     assert.match(css, new RegExp(`${token}:`));
   }
+  const light = panelBlock(".panel-window");
+  const systemDark = panelCss.match(/@media \(prefers-color-scheme: dark\) \{\n  html:not\(\[data-theme="light"\]\) \.panel-window \{(?<body>[^}]+)\}/)?.groups?.body ?? "";
+  const dark = panelBlock('html[data-theme="dark"] .panel-window');
+  for (const block of [light, systemDark, dark]) {
+    for (const token of ["--pn-bg", "--pn-surface", "--pn-text", "--pn-muted", "--pn-accent", "--pn-focus", "--pn-line"]) {
+      assert.match(block, new RegExp(`${token}:`));
+    }
+  }
+  assert.match(light, /color-scheme: light/);
+  assert.match(systemDark, /color-scheme: dark/);
+  assert.match(dark, /color-scheme: dark/);
+  assert.equal(systemDark.replace(/\s+/g, " ").trim(), dark.replace(/\s+/g, " ").trim());
+  assert.doesNotMatch(panelCss, /(?:^|\n):root\b/);
+  assert.doesNotMatch(panelCss, /(?:^|\n)html\[data-theme="(?:light|dark)"\] \{/);
+  assert.doesNotMatch(panelCss, /\n\s+--(?:bg|surface|text|accent|line|field):/);
+  assert.doesNotMatch(panelCss, /backdrop-filter/);
 
-  const card = cssBlock(".tool-card");
-  assert.match(card, /backdrop-filter: blur\(12px\)/);
-  assert.doesNotMatch(card, /inset 0 1px 0 var\(--hi\)/);
-  assert.match(card, /border-radius: var\(--radius\)/);
+  const card = panelBlock(".tool-card");
+  assert.match(card, /background: var\(--pn-surface\)/);
+  assert.match(card, /border-radius: var\(--pn-radius-card\)/);
 });
 
-test("usage cards share the same surface tint regardless of tool", () => {
-  const cardTint = cssBlock(".tool-card::before");
-  const hover = cssBlock(".tool-card:hover");
-  const dot = cssBlock(".tool-dot");
-  const dotFill = cssBlock(".claude-dot,\n.codex-dot,\n.grok-dot,\n.cursor-dot");
-  const claudeCard = cssBlock('.tool-card[data-tool="claude"]');
-  const codexCard = cssBlock('.tool-card[data-tool="codex"]');
-  const grokCard = cssBlock('.tool-card[data-tool="grok"]');
-  const cursorCard = cssBlock('.tool-card[data-tool="cursor"]');
+test("usage cards share the same surface regardless of tool and only tint through the brand token", () => {
+  const glow = panelBlock(".tool-card::before");
+  const dot = panelBlock(".tool-dot");
+  const lightRowGlow = panelBlock(".panel-window").match(/--pn-row-glow:\s*([^;]+);/)?.[1];
+  const darkRowGlow = panelBlock('html[data-theme="dark"] .panel-window').match(/--pn-row-glow:\s*([^;]+);/)?.[1];
 
-  assert.match(cardTint, /display: none/);
-  assert.doesNotMatch(cardTint, /var\(--tool-glow\)/);
-  assert.match(hover, /var\(--accent\)/);
-  assert.doesNotMatch(hover, /var\(--tool-color\)/);
-  assert.doesNotMatch(hover, /var\(--tool-glow\)/);
-  assert.match(dot, /var\(--accent\)/);
-  assert.match(dotFill, /background: var\(--tool-brand\)/);
-  assert.match(claudeCard, /--tool-brand: #d79a32/);
-  assert.match(codexCard, /--tool-brand: #2fac7d/);
-  assert.match(grokCard, /--tool-brand: #d9578b/);
-  assert.match(cursorCard, /--tool-brand: #85847f/);
-  assert.doesNotMatch(claudeCard, /--tool-glow/);
-  assert.doesNotMatch(codexCard, /--tool-glow/);
-  assert.doesNotMatch(grokCard, /--tool-glow/);
-  assert.doesNotMatch(cursorCard, /--tool-glow/);
+  assert.match(glow, /var\(--tool-brand\)/);
+  assert.match(glow, /opacity: var\(--pn-row-glow\)/);
+  assert.equal(lightRowGlow, "0");
+  assert.ok(Number(darkRowGlow) > 0 && Number(darkRowGlow) <= 0.2);
+  assert.match(dot, /background: var\(--tool-brand\)/);
+  assert.match(panelBlock('.tool-card[data-tool="claude"]'), /--tool-brand: #d79a32/);
+  assert.match(panelBlock('.tool-card[data-tool="codex"]'), /--tool-brand: #2fac7d/);
+  assert.match(panelBlock('.tool-card[data-tool="grok"]'), /--tool-brand: #d9578b/);
+  assert.match(panelBlock('.tool-card[data-tool="cursor"]'), /--tool-brand: #85847f/);
+  assert.match(panelBlock('.tool-card[data-tool="antigravity"]'), /--tool-brand: #4285f4/);
+  for (const tool of ["claude", "codex", "grok", "cursor", "antigravity"]) {
+    assert.doesNotMatch(panelBlock(`.tool-card[data-tool="${tool}"]`), /background/);
+  }
 });
 
 test("styles default to system theme and allow explicit light or dark overrides", () => {
@@ -289,15 +301,16 @@ test("styles keep the AppBar contract stable", () => {
 });
 
 test("panel window uses integrated custom chrome and balanced scrolling", () => {
-  const windowBlock = cssBlock(".panel-window");
-  const frame = cssBlock(".panel-frame");
-  const chrome = cssBlock(".panel-chrome");
-  const controls = cssBlock(".window-controls");
-  const dot = cssBlock(".chrome-dot");
-  const shell = cssBlock(".panel-shell");
-  const scrollbar = cssBlock(".panel-shell::-webkit-scrollbar");
-  const track = cssBlock(".panel-shell::-webkit-scrollbar-track");
-  const thumb = cssBlock(".panel-shell::-webkit-scrollbar-thumb");
+  const windowBlock = panelBlock(".panel-window");
+  const frame = panelBlock(".panel-frame");
+  const chrome = panelBlock(".panel-chrome");
+  const controls = panelBlock(".window-controls");
+  const windowButton = panelBlock(".panel-window .window-button");
+  const closeHover = panelBlock(".panel-window .window-close:hover:not(:disabled)");
+  const shell = panelBlock(".panel-shell");
+  const scrollbar = panelBlock(".panel-shell::-webkit-scrollbar");
+  const track = panelBlock(".panel-shell::-webkit-scrollbar-track");
+  const thumb = panelBlock(".panel-shell::-webkit-scrollbar-thumb");
   const panelWindowConfig = tauriConfig.app.windows.find((item) => item.label === "panel");
   const createPanelWindow = rustLib.match(/fn create_panel_window[\s\S]*?\n}/)?.[0] ?? "";
 
@@ -331,8 +344,10 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.match(panelMarkup, /class="panel-chrome"[^>]*data-tauri-drag-region/);
   assert.match(
     panelMarkup,
-    /class="chrome-spacer"[\s\S]*class="chrome-title"[\s\S]*class="window-controls"/,
+    /class="chrome-brand" data-tauri-drag-region>[\s\S]*class="brand-mark"[\s\S]*class="panel-nav" role="tablist"[\s\S]*class="chrome-drag" data-tauri-drag-region[\s\S]*class="window-controls"/,
   );
+  assert.doesNotMatch(panelMarkup, /chrome-dot|chrome-spacer|chrome-title/);
+  assert.equal((panelMarkup.match(/class="window-button[^"]*"/g) ?? []).length, 3);
   assert.match(panelMarkup, /data-window-action="close"/);
   assert.match(panelMarkup, /data-window-action="minimize"/);
   assert.match(panelMarkup, /data-window-action="toggle-maximize"/);
@@ -356,12 +371,17 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.match(frame, /display: flex/);
   assert.match(frame, /flex-direction: column/);
   assert.match(frame, /overflow: hidden/);
-  assert.match(chrome, /height: 36px/);
-  assert.match(chrome, /display: grid/);
-  assert.match(chrome, /grid-template-columns: 96px minmax\(0,\s*1fr\) 96px/);
+  assert.match(chrome, /min-height: 46px/);
+  assert.match(chrome, /display: flex/);
   assert.match(controls, /display: flex/);
-  assert.match(controls, /justify-self: end/);
-  assert.match(dot, /border-radius: 999px/);
+  assert.match(controls, /align-self: stretch/);
+  assert.match(windowButton, /width: 46px/);
+  assert.match(windowButton, /border-radius: 0/);
+  assert.match(closeHover, /background: #c42b1c/);
+  assert.match(panelBlock(".brand-mark"), /background: var\(--pn-logo\)/);
+  assert.match(panelBlock(".brand-mark"), /box-shadow: var\(--pn-logo-glow\)/);
+  assert.match(panelBlock(".panel-window"), /--pn-logo-glow: none/);
+  assert.match(panelBlock('html[data-theme="dark"] .panel-window'), /--pn-logo-glow: 0 0 12px/);
   assert.doesNotMatch(windowBlock, /width: 360px/);
   assert.doesNotMatch(windowBlock, /height: 480px/);
   assert.match(shell, /flex: 1 1 auto/);
@@ -372,7 +392,7 @@ test("panel window uses integrated custom chrome and balanced scrolling", () => 
   assert.match(track, /background: transparent/);
   assert.match(thumb, /background:/);
   assert.match(thumb, /background-clip: padding-box/);
-  assert.match(css, /@media \(min-width: 640px\)/);
+  assert.match(panelJs, /closest\?\.\("\[data-window-action\], \[data-panel-tab\]"\)/);
 });
 
 test("panel removes session-specific context from the settings window", () => {
@@ -403,9 +423,9 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   const cardMarkup = panelMarkup.match(
     /<section id="activity-card"[\s\S]*?<\/section>/,
   )?.[0] ?? "";
-  const card = cssBlock(".activity-card");
-  const grid = cssBlock(".activity-grid");
-  const cell = cssBlock(".activity-cell");
+  const card = panelBlock(".activity-card");
+  const grid = panelBlock(".activity-grid");
+  const cell = panelBlock(".panel-window .activity-cell");
 
   assert.match(cardMarkup, /data-activity-filter="all"/);
   assert.match(cardMarkup, /data-activity-filter="claude"/);
@@ -414,9 +434,13 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.match(cardMarkup, /data-activity-tooltip-detail/);
   assert.equal((cardMarkup.match(/role="tooltip"/g) ?? []).length, 1);
   assert.doesNotMatch(cardMarkup, /\stitle=/);
-  assert.match(card, /background: var\(--surface\)/);
-  assert.match(grid, /repeat\(var\(--activity-weeks\), minmax\(0, 1fr\)\)/);
-  assert.match(grid, /max-width: var\(--activity-chart-width\)/);
+  assert.match(card, /background: var\(--pn-surface\)/);
+  assert.match(grid, /grid-template-columns: repeat\(var\(--activity-weeks\), var\(--activity-cell-size\)\)/);
+  assert.match(grid, /grid-template-rows: repeat\(7, var\(--activity-cell-size\)\)/);
+  assert.match(panelBlock(".activity-chart"), /container-type: inline-size/);
+  assert.match(panelCss, /--activity-cell-size: clamp\(\n    var\(--activity-cell-min\)/);
+  assert.match(grid, /width: max-content/);
+  assert.match(panelBlock(".activity-chart"), /overflow-x: auto/);
   assert.match(cell, /aspect-ratio: 1/);
   assert.match(panelJs, /invoke\("get_activity"\)/);
   assert.match(panelJs, /"activity-updated"/);
@@ -426,9 +450,9 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.match(panelJs, /cell\.cursorTokens/);
   assert.match(rustLib, /baseline\.activity_weeks != requested\.activity_weeks/);
   assert.match(rustLib, /spawn_cursor_activity_refresh\(app\.clone\(\), settings\.clone\(\), false\)/);
-  assert.match(css, /\.activity-card\[data-filter="cursor"\]/);
-  assert.match(cssBlock(".activity-filter"), /display: inline-flex/);
-  assert.match(css, /\.activity-card,\s*\n\s*\.settings-layout/);
+  assert.match(panelCss, /\.activity-card\[data-filter="cursor"\]/);
+  assert.match(panelBlock(".activity-filter"), /display: inline-flex/);
+  assert.match(panelJs, /labels\[index \+ 1\]\.column - label\.column >= 3/);
   assert.match(settingsJs, /tokenField\.readOnly = !editable/);
   assert.doesNotMatch(settingsJs, /tokenField\.disabled = !editable/);
 });
@@ -783,10 +807,10 @@ test("taskbar ring number visibility and outline are configurable", () => {
   assert.match(panelMarkup, /name="taskbar_profile_presentation_on"[^>]*checked/);
   assert.match(panelMarkup, /name="taskbar_profile_colors_on"/);
   assert.doesNotMatch(panelMarkup, /name="taskbar_profile_colors_on"[^>]*checked/);
-  assert.match(cssBlock(".taskbar-profile-option"), /margin-inline-start: 12px/);
+  assert.match(panelBlock(".taskbar-profile-option"), /padding-left: 32px/);
   assert.match(
-    cssBlock('.taskbar-profile-option[data-disabled="true"]'),
-    /opacity: 0\.56/,
+    panelBlock('.taskbar-profile-option[data-disabled="true"] > *'),
+    /opacity: 0\.5/,
   );
   assert.match(
     settingsJs,
@@ -956,138 +980,77 @@ test("taskbar overlay base has no blur, filter, text shadow, transition, or anim
 });
 
 test("styles include restrained panel motion with a reduced-motion escape hatch", () => {
-  const settingsCardOpen = cssBlock(".settings-card[open] .settings-form");
-  const settingsTabOpen = cssBlock(".settings-tab-panel:not([hidden])");
+  const viewIn = panelCss.match(/@keyframes panel-view-in \{[\s\S]*?\n\}/)?.[0] ?? "";
+  const tabIn = panelCss.match(/@keyframes settings-tab-in \{[\s\S]*?\n\}/)?.[0] ?? "";
 
-  assert.match(css, /@keyframes panel-in/);
-  assert.match(css, /@keyframes live-breathe/);
-  assert.match(css, /@keyframes settings-expand/);
-  assert.match(css, /@keyframes settings-tab-in/);
-  assert.match(settingsCardOpen, /animation:\s*settings-expand/);
-  assert.match(settingsTabOpen, /animation:\s*settings-tab-in/);
+  assert.match(panelBlock(".panel-view"), /animation: panel-view-in 160ms/);
+  assert.match(panelBlock(".settings-tab-panel:not([hidden])"), /animation: settings-tab-in/);
+  assert.match(viewIn, /transform: translateY\(4px\)/);
+  assert.match(tabIn, /transform: translateY\(3px\)/);
+  // Hidden panels pause animations; a paused frame must never leave content transparent.
+  assert.doesNotMatch(viewIn, /opacity/);
+  assert.doesNotMatch(tabIn, /opacity/);
+  assert.match(panelCss, /html\[data-panel-visible="false"\] \* \{\n  animation-play-state: paused !important;/);
+  assert.match(panelCss, /@keyframes live-breathe/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("settings disclosure uses a familiar right-to-down Lucide chevron", () => {
-  const icon = cssBlock(".settings-disclosure-icon");
-  const openIcon = cssBlock(".settings-card[open] .settings-disclosure-icon");
-
-  assert.match(panelMarkup, /<summary>[\s\S]*<svg class="settings-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">[\s\S]*<path d="m9 18 6-6-6-6"><\/path>[\s\S]*<\/svg>[\s\S]*<\/summary>/);
-  assert.match(icon, /width:\s*16px/);
-  assert.match(icon, /height:\s*16px/);
-  assert.match(icon, /stroke-width:\s*1\.75/);
-  assert.match(icon, /stroke-linecap:\s*round/);
-  assert.match(icon, /stroke-linejoin:\s*round/);
-  assert.match(icon, /transform:\s*rotate\(0deg\)/);
-  assert.match(openIcon, /transform:\s*rotate\(90deg\)/);
-  assert.doesNotMatch(css, /\.settings-card summary::after/);
+test("settings is a full view with a heading instead of a collapsible disclosure", () => {
+  assert.doesNotMatch(panelMarkup, /<details|<summary|settings-disclosure-icon/);
+  assert.match(
+    panelMarkup,
+    /id="panel-view-settings"\s+class="panel-view settings-card"[\s\S]*?<header class="view-head">\s*<h1 class="settings-title" data-i18n="settings\.title">[\s\S]*?<\/header>/,
+  );
+  assert.doesNotMatch(panelCss, /summary/);
 });
 
-test("settings controls keep glass at the card level and use quiet flat rows", () => {
-  const card = cssBlock(".settings-card,\n.settings-utility-card");
-  const cardTint = cssBlock(".settings-card::before");
-  const toolTint = cssBlock(".tool-card::before");
-  const form = cssBlock(".settings-form");
-  const section = cssBlock(".settings-section");
-  const panelLegend = cssBlock(".settings-tab-panel > legend");
-  const summaryAccent = cssBlock(".settings-card summary .settings-title::before");
-  const rowSurface = cssBlock(".field-row,\n.range-row,\n.toggle-row,\n.swatch-row,\n.field-grid label");
-  const select =
-    [...css.matchAll(/(?:^|\n)select\s*\{(?<body>[^}]+)\}/g)].map((match) => match.groups.body)
-      .at(-1) ?? "";
-  const range = cssBlock('input[type="range"]');
-  const checkbox = cssBlock('input[type="checkbox"]');
-  const checkboxKnob = cssBlock('input[type="checkbox"]::before');
-  const checkedToggle = cssBlock('input[type="checkbox"]:checked');
-  const checkedToggleKnob = cssBlock('input[type="checkbox"]:checked::before');
-  const toggleInput = cssBlock('.toggle-row input[type="checkbox"]');
-  const toggleSpan = cssBlock(".toggle-row > span:not(.toggle-copy)");
-  const toggleCopy = cssBlock(".toggle-copy");
-  const toggleTitle = cssBlock(".toggle-title");
-  const subgroup = cssBlock(".settings-subgroup");
-  const subgroupHeading = cssBlock(".settings-subgroup h3");
-  const subgroupGrid = cssBlock(".settings-subgroup-grid");
-  const rangeTrack = css.match(
-    /input\[type="range"\]::-webkit-slider-runnable-track\s*\{(?<body>[^}]+)\}/,
-  )?.groups?.body ?? "";
-  const thumb = css.match(/input\[type="range"\]::-webkit-slider-thumb\s*\{(?<body>[^}]+)\}/)
-    ?.groups?.body ?? "";
-  const focusThumb = css.match(
-    /input\[type="range"\]:focus-visible::-webkit-slider-thumb\s*\{(?<body>[^}]+)\}/,
-  )?.groups?.body ?? "";
-  const rangeFocus = cssBlock('input[type="range"]:focus-visible');
-  const button = cssBlock("button");
-  const buttonHover = cssBlock("button:hover:not(:disabled)");
+test("settings controls use Windows-style cards with hairline rows", () => {
+  const grid = panelBlock(".settings-section-grid,\n.settings-subgroup-grid");
+  const card = panelBlock(".settings-section-grid");
+  const cells = panelBlock(".settings-section-grid > *,\n.settings-subgroup-grid > *");
+  const rows = panelBlock(".field-row,\n.range-row,\n.toggle-row,\n.swatch-row,\n.settings-action-row,\n.activity-scale-preview");
+  const select = panelBlock(".panel-window select");
+  const range = panelBlock('.panel-window input[type="range"]');
+  const rangeTrack = panelBlock('.panel-window input[type="range"]::-webkit-slider-runnable-track');
+  const thumb = panelBlock('.panel-window input[type="range"]::-webkit-slider-thumb');
+  const checkbox = panelBlock('.panel-window input[type="checkbox"]');
+  const knob = panelBlock('.panel-window input[type="checkbox"]::before');
+  const checked = panelBlock('.panel-window input[type="checkbox"]:checked');
+  const checkedKnob = panelBlock('.panel-window input[type="checkbox"]:checked::before');
+  const button = panelBlock(".panel-window button");
 
-  assert.match(card, /backdrop-filter: blur\(12px\) saturate\(1\.04\)/);
-  assert.match(card, /var\(--surface\)/);
-  assert.match(card, /var\(--shadow-soft\)/);
-  assert.doesNotMatch(card, /inset 0 1px 0 var\(--hi\)/);
-  assert.doesNotMatch(card, /var\(--glass\) 88%/);
-  assert.doesNotMatch(card, /blur\(32px\)/);
-  assert.match(toolTint, /display: none/);
-  assert.match(cardTint, /display: none/);
-  assert.match(summaryAccent, /background: var\(--accent\)/);
-  assert.doesNotMatch(summaryAccent, /var\(--accent-warm\)/);
-  assert.match(form, /grid-template-columns: minmax\(0,\s*1fr\)/);
-  assert.match(section, /border-top: 1px solid/);
-  assert.doesNotMatch(section, /box-shadow:/);
-  assert.match(panelLegend, /position: absolute/);
-  assert.match(panelLegend, /clip: rect\(0 0 0 0\)/);
-  assert.match(panelLegend, /white-space: nowrap/);
-  assert.match(rowSurface, /background: transparent/);
-  assert.match(rowSurface, /border-bottom: 1px solid/);
-  assert.match(rowSurface, /box-shadow: none/);
-  assert.doesNotMatch(rowSurface, /backdrop-filter/);
-  assert.doesNotMatch(rowSurface, /inset 0 1px/);
+  assert.match(grid, /gap: 1px/);
+  assert.match(grid, /background: var\(--pn-line-soft\)/);
+  assert.match(card, /border: 1px solid var\(--pn-line\)/);
+  assert.match(card, /border-radius: var\(--pn-radius-card\)/);
+  assert.match(card, /overflow: hidden/);
+  assert.match(cells, /background: var\(--pn-surface\)/);
+  assert.match(rows, /min-height: 52px/);
+  assert.match(rows, /padding: 10px 16px/);
   assert.match(select, /appearance: none/);
-  assert.doesNotMatch(select, /backdrop-filter/);
-  assert.match(select, /box-shadow: none/);
-  assert.doesNotMatch(select, /inset 0/);
-  assert.match(range, /appearance: none/);
   assert.match(range, /--range-progress:/);
-  assert.match(range, /background:\s*transparent/);
-  assert.match(range, /height: 24px/);
+  assert.match(range, /--range-fill: var\(--pn-accent\)/);
   assert.match(rangeTrack, /linear-gradient\(90deg/);
   assert.match(rangeTrack, /var\(--range-progress\)/);
-  assert.doesNotMatch(rangeTrack, /backdrop-filter/);
-  assert.match(rangeTrack, /box-shadow: none/);
-  assert.doesNotMatch(rangeTrack, /inset 0/);
-  assert.doesNotMatch(thumb, /backdrop-filter/);
-  assert.match(thumb, /box-shadow: none/);
-  assert.doesNotMatch(thumb, /radial-gradient/);
-  assert.doesNotMatch(thumb, /linear-gradient/);
-  assert.match(rangeFocus, /outline: 2px solid var\(--focus-ring\)/);
-  assert.match(rangeFocus, /outline-offset: 2px/);
-  assert.match(focusThumb, /box-shadow: 0 0 0 3px/);
+  assert.doesNotMatch(thumb, /gradient/);
+  assert.match(panelBlock('.panel-window input[type="range"]:focus-visible::-webkit-slider-thumb'), /var\(--pn-focus\)/);
   assert.match(checkbox, /border-radius: 999px/);
   assert.match(checkbox, /--toggle-track-off:/);
   assert.match(checkbox, /--toggle-knob-off:/);
-  assert.doesNotMatch(checkbox, /backdrop-filter/);
-  assert.match(checkbox, /box-shadow: none/);
   assert.match(checkbox, /background: var\(--toggle-track-off\)/);
-  assert.doesNotMatch(checkbox, /var\(--ok\)/);
-  assert.match(checkboxKnob, /background: var\(--toggle-knob-off\)/);
-  assert.match(checkedToggle, /--toggle-knob-on:/);
-  assert.match(checkedToggle, /var\(--ok\)/);
-  assert.doesNotMatch(checkedToggle, /var\(--accent\)/);
-  assert.doesNotMatch(checkedToggle, /linear-gradient/);
-  assert.match(checkedToggleKnob, /background: var\(--toggle-knob-on\)/);
-  assert.match(toggleInput, /order: 2/);
-  assert.match(toggleSpan, /order: 1/);
-  assert.match(toggleCopy, /order: 1/);
-  assert.match(toggleCopy, /flex-direction: column/);
-  assert.match(toggleCopy, /align-items: flex-start/);
-  assert.match(toggleTitle, /font-weight: 740/);
-  assert.match(subgroup, /grid-column:\s*1 \/ -1/);
-  assert.doesNotMatch(subgroup, /background:/);
-  assert.doesNotMatch(subgroup, /box-shadow:/);
-  assert.doesNotMatch(subgroupHeading, /cursor:\s*pointer/);
-  assert.match(subgroupGrid, /display:\s*grid/);
-  assert.doesNotMatch(button, /backdrop-filter/);
+  assert.match(knob, /background: var\(--toggle-knob-off\)/);
+  assert.match(checked, /--toggle-knob-on:/);
+  assert.match(checked, /background: var\(--pn-accent\)/);
+  assert.match(checkedKnob, /background: var\(--toggle-knob-on\)/);
+  assert.match(checkedKnob, /transform: translateX\(20px\)/);
+  assert.match(panelBlock('.toggle-row input[type="checkbox"]'), /order: 2/);
+  assert.match(panelBlock(".toggle-row > span:not(.toggle-copy),\n.toggle-copy"), /order: 1/);
+  assert.match(panelCss, /\n\.toggle-copy \{\n  min-width: 0;\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-start;/);
+  assert.doesNotMatch(button, /gradient/);
   assert.match(button, /box-shadow: none/);
-  assert.doesNotMatch(button, /linear-gradient/);
-  assert.doesNotMatch(buttonHover, /transform:/);
+  assert.match(panelBlock(".settings-subgroup"), /display: grid/);
+  assert.doesNotMatch(panelBlock(".settings-subgroup h3"), /cursor:\s*pointer/);
+  assert.match(panelBlock(".panel-window :focus-visible"), /outline: 2px solid var\(--pn-focus\)/);
   assert.doesNotMatch(panelMarkup, /type="submit"/);
   assert.doesNotMatch(panelMarkup, />저장</);
 });
@@ -1108,11 +1071,11 @@ test("ring and horizontal bar tracks share one configurable neutral background",
   assert.match(panelMarkup, /data-range-number-for="indicator_track_opacity_percent"/);
   assert.match(settingsJs, /updateIndicatorTrackColorAvailability/);
   assert.doesNotMatch(settingsJs, /customColor\.disabled\s*=/);
-  assert.match(cssBlock('.indicator-track-color-row[data-disabled="true"] input'), /pointer-events: none/);
+  assert.match(panelBlock('.taskbar-text-color-item[data-disabled="true"] input[type="color"],\n.indicator-track-color-row[data-disabled="true"] input'), /pointer-events: none/);
   assert.match(readme, /기본은 기존 가로 바와 같은 테마 적응색·농도 11%/);
   assert.match(readme, /theme-adaptive color at 11% opacity/);
-  assert.match(cssBlock(".indicator-track-field"), /grid-column:\s*1 \/ -1/);
-  assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.indicator-track-grid\s*\{[\s\S]*grid-template-columns: 1fr/);
+  assert.match(panelBlock(".indicator-track-opacity-row"), /grid-column:\s*1 \/ -1/);
+  assert.match(panelCss, /@media \(max-width: 560px\)[\s\S]*\.indicator-track-grid\s*\{[\s\S]*?grid-template-columns: 1fr/);
 });
 
 test("taskbar text colors are independently configurable without changing automatic defaults", () => {
@@ -1138,14 +1101,14 @@ test("taskbar text colors are independently configurable without changing automa
   assert.match(settingsJs, /updateTaskbarTextColorAvailability/);
   assert.match(settingsJs, /color\.inert = !enabled/);
   assert.doesNotMatch(settingsJs, /(?:claude|codex|info|ring)_text_color[^\n]*\.disabled\s*=/);
-  assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.taskbar-text-color-grid\s*\{[\s\S]*grid-template-columns: 1fr/);
+  assert.match(panelCss, /@media \(max-width: 560px\)[\s\S]*\.taskbar-text-color-grid,\n  \.indicator-track-grid \{\n    grid-template-columns: 1fr;/);
   assert.equal(/color-mix\(in srgb, var\(--(?:claude|codex|grok|cursor|antigravity|info|ring)-text-color\) 62%/.test(css), false);
 });
 
 test("autosave completion uses a centered transient toast outside the scrolling shell", () => {
-  const layer = cssBlock(".settings-toast-layer");
-  const toast = cssBlock(".settings-toast");
-  const previewBars = cssBlock(".effect-preview-bars");
+  const layer = panelBlock(".settings-toast-layer");
+  const toast = panelBlock(".settings-toast");
+  const previewBars = panelBlock(".effect-preview-bars");
   const depthBar = cssBlock('.bar-shell[data-effect="depth"] .limit-bar::before');
 
   assert.match(panelMarkup, /<\/main>\s*<div class="settings-toast-layer" data-settings-toast hidden>/);
@@ -1168,22 +1131,21 @@ test("autosave completion uses a centered transient toast outside the scrolling 
 });
 
 test("palette picker exposes stable swatches and a clear selected state", () => {
-  const field = cssBlock(".palette-field");
-  const picker = cssBlock(".palette-picker");
-  const option = cssBlock(".palette-option");
-  const selected = cssBlock('.palette-option[aria-checked="true"]');
-  const sample = cssBlock(".palette-sample");
+  const picker = panelBlock(".palette-picker");
+  const option = panelBlock(".panel-window .palette-option");
+  const selected = panelBlock('.panel-window .palette-option[aria-checked="true"],\n.panel-window .effect-option[aria-checked="true"]');
+  const sample = panelBlock(".palette-sample");
 
-  assert.match(field, /grid-column:\s*1 \/ -1/);
   assert.match(picker, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(option, /min-height: 42px/);
-  assert.match(option, /background: transparent/);
-  assert.match(selected, /var\(--accent\)/);
+  assert.match(option, /min-height: 44px/);
+  assert.match(selected, /border-color: var\(--pn-accent\)/);
+  assert.match(selected, /box-shadow: inset 0 0 0 1px var\(--pn-accent\)/);
   assert.match(sample, /grid-template-columns: repeat\(3, 1fr\)/);
-  assert.match(css, /data-palette-value="mono"/);
-  assert.match(css, /--mono-swatch/);
-  assert.match(css, /data-palette-value="traffic"[\s\S]*--tool-claude-primary-swatch/);
-  assert.match(cssBlock('.palette-option[data-palette-value="traffic"] .palette-sample'), /repeat\(4, 1fr\)/);
+  assert.match(panelCss, /data-palette-value="mono"/);
+  assert.match(panelCss, /--mono-swatch/);
+  assert.match(panelCss, /data-palette-value="traffic"[\s\S]*--tool-claude-primary-swatch/);
+  assert.match(panelBlock('.palette-option[data-palette-value="traffic"] .palette-sample'), /repeat\(4, 1fr\)/);
+  assert.match(settingsJs, /"--mono-swatch"/);
 });
 
 test("settings form groups controls into logical sections without changing field names", () => {
@@ -1193,7 +1155,7 @@ test("settings form groups controls into logical sections without changing field
   const detailsSection = markupSection("details");
 
   assert.deepEqual(sections, ["general", "colors", "collection", "taskbar", "details", "update", "about"]);
-  assert.match(panelMarkup, /<details class="settings-card" open>/);
+  assert.match(panelMarkup, /id="panel-view-settings"\s+class="panel-view settings-card"/);
   const tabs = [...panelMarkup.matchAll(/data-settings-tab="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(tabs, ["general", "collection", "taskbar", "colors", "details"]);
   assert.match(panelMarkup, /class="settings-tabs"[\s\S]*role="tablist"[\s\S]*data-i18n-aria-label="aria\.settingsTabs"/);
@@ -1201,13 +1163,11 @@ test("settings form groups controls into logical sections without changing field
     assert.match(panelMarkup, new RegExp(`id="settings-tab-${name}"[\\s\\S]*aria-controls="settings-panel-${name}"`));
     assert.match(panelMarkup, new RegExp(`id="settings-panel-${name}"[\\s\\S]*role="tabpanel"[\\s\\S]*aria-labelledby="settings-tab-${name}"`));
   }
-  assert.match(cssBlock(".settings-tabs"), /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
-  assert.match(cssBlock('.settings-tabs button[aria-selected="true"]'), /var\(--accent\)/);
-  assert.match(cssBlock(".settings-tabs button:focus-visible"), /outline: 2px solid var\(--focus-ring\)/);
-  assert.match(cssBlock(".settings-tab-panel[hidden]"), /display: none/);
-  assert.match(css, /@media \(max-width: 380px\)[\s\S]*\.settings-tabs\s*\{[\s\S]*repeat\(6, minmax\(0, 1fr\)\)/);
-  assert.match(css, /\.settings-tabs button:nth-child\(4\)\s*\{[\s\S]*grid-column: 2 \/ span 2/);
-  assert.match(css, /\.settings-tabs button:nth-child\(5\)\s*\{[\s\S]*grid-column: 4 \/ span 2/);
+  assert.match(panelBlock(".settings-tabs"), /display: flex/);
+  assert.match(panelBlock(".settings-tabs"), /flex-wrap: wrap/);
+  assert.match(panelBlock('.panel-window .settings-tabs button[aria-selected="true"],\n.panel-window .settings-tabs button[aria-selected="true"]:hover:not(:disabled)'), /background: var\(--pn-text\)/);
+  assert.match(panelBlock(".settings-tabs button:focus-visible"), /outline: 2px solid var\(--pn-focus\)/);
+  assert.match(panelBlock(".settings-tab-panel[hidden]"), /display: none/);
   assert.match(settingsJs, /function selectSettingsTab\(value, focus = false\)/);
   assert.match(settingsJs, /event\.key === "ArrowRight"[\s\S]*event\.key === "ArrowLeft"[\s\S]*event\.key === "Home"[\s\S]*event\.key === "End"/);
 
@@ -1223,12 +1183,12 @@ test("settings form groups controls into logical sections without changing field
   assert.doesNotMatch(detailsSection, /<details|settings-advanced/);
   assert.match(markupSection("update"), /name="update_check_on"[\s\S]*data-action="check-updates"[\s\S]*data-action="open-releases"[\s\S]*id="update-check-status"/);
   assert.doesNotMatch(markupSection("about"), /name="update_check_on"|data-action="check-updates"/);
-  assert.match(panelMarkup, /<form id="settings-form" class="settings-layout">[\s\S]*<section class="settings-utility-card update-card" data-settings-section="update">[\s\S]*<\/section>\s*<\/form>/);
-  assert.match(panelMarkup, /<summary>[\s\S]*data-settings-save-state[\s\S]*id="settings-status"[\s\S]*<\/summary>/);
-  assert.match(panelMarkup, /<\/form>\s*<section class="settings-utility-card about-card" data-settings-section="about">[\s\S]*<\/section>\s*<\/main>/);
+  assert.match(panelMarkup, /<form id="settings-form" class="settings-layout">[\s\S]*<section\s+id="panel-view-about"\s+class="panel-view settings-utility-card update-card"[^>]*data-settings-section="update"[\s\S]*<\/section>\s*<\/form>/);
+  assert.ok(panelMarkup.indexOf('id="settings-status"') < panelMarkup.indexOf('<main class="panel-shell">'));
+  assert.match(panelMarkup, /<\/form>\s*<section class="panel-view settings-utility-card about-card" data-panel-view="about" data-settings-section="about" hidden>[\s\S]*<\/section>\s*<\/main>/);
   assert.doesNotMatch(panelMarkup, /settings-footer/);
-  assert.doesNotMatch(cssBlock(".settings-save-state"), /position:\s*fixed/);
-  assert.doesNotMatch(cssBlock(".settings-save-state"), /background:|border:/);
+  assert.doesNotMatch(panelBlock(".settings-save-state"), /position:\s*fixed/);
+  assert.match(panelBlock(".settings-save-state"), /background: var\(--pn-surface\)/);
   assert.equal(sections.at(-1), "about");
   assert.match(markupSection("collection"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
@@ -1241,7 +1201,7 @@ test("settings form groups controls into logical sections without changing field
   ]);
   assert.match(markupSection("colors"), /role="radiogroup"[\s\S]*name="mono_color"[\s\S]*name="custom_safe"/);
   assert.match(markupSection("colors"), /data-tool-palette[\s\S]*name="claude_primary_color"[\s\S]*name="claude_secondary_color"[\s\S]*name="codex_primary_color"[\s\S]*name="codex_secondary_color"[\s\S]*name="tool_warning_color"[\s\S]*name="tool_warning_color_on"[\s\S]*name="tool_danger_color"[\s\S]*name="tool_danger_color_on"/);
-  assert.match(css, /\.tool-threshold-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(panelCss, /\.tool-threshold-grid,[\s\S]*?\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
@@ -1488,13 +1448,11 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.equal(timingFields.length, 2);
   assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.pollInterval"[\s\S]*data-i18n="help\.pollInterval"/);
   assert.match(limitsSection, /<label class="field-with-help">[\s\S]*data-i18n="field\.staleAfter"[\s\S]*data-i18n="help\.staleAfter"/);
-  assert.match(cssBlock(".field-grid label.field-with-help"), /grid-template-columns: minmax\(72px, 1fr\) 58px auto/);
-  assert.match(cssBlock(".field-grid label.field-with-help > span:first-child"), /white-space: nowrap/);
-  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-size: calc\(10\.5px \* var\(--system-text-scale, 1\)\)/);
-  assert.match(cssBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-weight: 560/);
-  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-size: calc\(12px \* var\(--system-text-scale, 1\)\)/);
-  assert.match(cssBlock(".activity-settings .field-row > span:first-child"), /font-weight: 740/);
-  assert.doesNotMatch(css, /\.field-grid span,/);
+  assert.match(panelBlock(".field-grid label.field-with-help"), /grid-template-columns: minmax\(0, 1fr\) auto auto/);
+  assert.match(panelBlock(".field-grid label.field-with-help .field-help"), /grid-column: 1 \/ -1/);
+  assert.match(panelBlock(".field-grid label.field-with-help > span:not(:first-child)"), /font-size: calc\(11\.5px \* var\(--system-text-scale, 1\)\)/);
+  assert.match(panelCss, /\.activity-settings \.field-row > span:first-child,[\s\S]*?font-size: calc\(13px \* var\(--system-text-scale, 1\)\);[\s\S]*?font-weight: 400;/);
+  assert.doesNotMatch(panelCss, /\.field-grid span,/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
   assert.match(i18nJs, /마지막 기록 후 오래됨 표시까지/);
   assert.match(i18nJs, /로컬 상태를 다시 읽는 간격/);
@@ -1534,14 +1492,13 @@ test("taskbar bar right click exposes a visible refresh action", () => {
   assert.match(rustLib, /taskbar_physical_length_for_window\(width, taskbar\.hwnd\)/);
 });
 
-test("panel meta removes estimated cost copy and stays as a full-width card footer", () => {
-  const meta = cssBlock(".meta");
+test("panel meta removes estimated cost copy and sits under the PC name", () => {
+  const meta = panelBlock(".meta");
 
   assert.doesNotMatch(panelMarkup, /추정 비용/);
   assert.doesNotMatch(i18nJs, /meta\.cost/);
-  assert.match(meta, /width:\s*100%/);
-  assert.match(meta, /justify-self:\s*stretch/);
-  assert.match(meta, /text-align:\s*right/);
+  assert.match(meta, /grid-area: meta/);
+  assert.match(meta, /align-self: start/);
   assert.doesNotMatch(meta, /max-width:/);
 });
 
@@ -1556,9 +1513,76 @@ test("release startup reconciles Claude statusline with the enabled tool state",
 });
 
 test("styles avoid decorative one-off effects and viewport font scaling", () => {
+  // Taskbar text stays at normal tracking; the panel tightens only large display numerals and view titles.
   assert.doesNotMatch(css, /letter-spacing:\s*-/);
-  assert.doesNotMatch(css, /font-size:\s*[^;]*vw/);
-  assert.doesNotMatch(css, /\b(orb|blob|bokeh)\b/i);
+  for (const sheet of [css, panelCss]) {
+    assert.doesNotMatch(sheet, /font-size:\s*[^;]*vw/);
+    assert.doesNotMatch(sheet, /\b(orb|blob|bokeh)\b/i);
+  }
+  const tightened = [...panelCss.matchAll(/\n([^\n{}]+)\{[^}]*letter-spacing:\s*-/g)].map((match) => match[1].trim());
+  assert.deepEqual(tightened, [
+    ".chrome-brand", ".view-head h1", ".hero-val", ".overview-activity-copy strong", ".activity-stat strong",
+    'html[data-panel-look="paper"] .view-head h1',
+  ]);
+});
+
+test("panel views are tabs over one scroll shell and never hide the document root", () => {
+  const views = [...panelMarkup.matchAll(/data-panel-view="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(views, ["overview", "activity", "settings", "about", "about"]);
+  const tabs = [...panelMarkup.matchAll(/data-panel-tab="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(tabs, ["overview", "activity", "settings", "about"]);
+  for (const name of tabs) {
+    assert.match(panelMarkup, new RegExp(`id="panel-tab-${name}"[^>]*role="tab"[^>]*aria-controls="panel-view-${name}"`));
+    assert.match(panelMarkup, new RegExp(`id="panel-view-${name}"[\\s\\S]*?role="tabpanel"[\\s\\S]*?aria-labelledby="panel-tab-${name}"`));
+  }
+  assert.match(panelMarkup, /class="panel-nav" role="tablist"[^>]*data-i18n-aria-label="aria\.panelViews"/);
+  assert.match(panelMarkup, /data-panel-goto="activity"/);
+  assert.match(panelJs, /function selectPanelView\(value, focus = false\)/);
+  assert.match(panelJs, /event\.key === "ArrowRight"[\s\S]*event\.key === "ArrowLeft"[\s\S]*event\.key === "Home"[\s\S]*event\.key === "End"/);
+  // The root carries the active view under a different name so view toggling cannot hide <html>.
+  assert.match(panelJs, /dataset\.activePanelView = view/);
+  assert.doesNotMatch(panelJs, /documentElement\.dataset\.panelView/);
+  assert.match(panelJs, /selectPanelView\("overview"\)/);
+  for (const key of ["nav.overview", "nav.activity", "nav.settings", "nav.about", "aria.panelViews", "overview.basisRemaining", "overview.basisUsed", "overview.moreActivity", "activity.statTotal", "activity.statDays", "activity.statPeak", "activity.share", "activity.dayCount"]) {
+    assert.equal((i18nJs.match(new RegExp(`"${key.replace(".", "\\.")}":`, "g")) ?? []).length, 2, key);
+  }
+});
+
+test("tool card limit labels are owned by the renderer, not static translations", () => {
+  const cards = [...panelMarkup.matchAll(/<section class="tool-card"[\s\S]*?<\/section>/g)].map((match) => match[0]);
+  assert.equal(cards.length, 5);
+  for (const card of cards) {
+    assert.match(card, /<div class="tool-hero" aria-hidden="true">[\s\S]*class="hero-num"[\s\S]*class="hero-unit"[\s\S]*class="hero-label"/);
+    assert.match(card, /<div class="tool-metrics">[\s\S]*class="metric p5h"[\s\S]*class="metric pweek"/);
+    assert.doesNotMatch(card, /<div class="metric-row">\s*<span data-i18n=/);
+  }
+  assert.match(panelJs, /setText\(root, "\.metric-row span", model\.label\)/);
+  assert.match(panelJs, /function setHero\(card, vm\)/);
+});
+
+test("taskbar bars never load panel styles and styles.css keeps no panel-only rules", () => {
+  assert.doesNotMatch(barMarkup, /panel\.css/);
+  assert.match(panelMarkup, /href="styles\.css" \/>\s*<link rel="stylesheet" href="panel\.css" \/>/);
+  assert.doesNotMatch(panelCss, /\.bar-|\.ring-|\.quad-|\.limit-bar/);
+  for (const selector of [".tool-card", ".settings-", ".activity-", ".panel-", ".palette-", ".effect-", "input[type=\"checkbox\"]", "input[type=\"range\"]"]) {
+    assert.equal(css.includes(selector), false, selector);
+  }
+  assert.doesNotMatch(css, /appearance:/);
+});
+
+test("panel text and focus colors meet contrast thresholds in both themes", () => {
+  const light = panelBlock(".panel-window");
+  const dark = panelBlock('html[data-theme="dark"] .panel-window');
+  const paper = panelBlock('html[data-panel-look="paper"] .panel-window');
+  for (const block of [light, dark, paper]) {
+    const surface = hexToken(block, "--pn-surface");
+    const bg = hexToken(block, "--pn-bg");
+    assert.ok(contrastRatio(hexToken(block, "--pn-text"), surface) >= 7);
+    assert.ok(contrastRatio(hexToken(block, "--pn-muted"), surface) >= 4.5);
+    assert.ok(contrastRatio(hexToken(block, "--pn-muted"), bg) >= 4.5);
+    assert.ok(contrastRatio(hexToken(block, "--pn-accent-text"), surface) >= 4.5);
+    assert.ok(contrastRatio(hexToken(block, "--pn-focus"), bg) >= 3);
+  }
 });
 
 test("release installer verifier stops temporary app processes before cleanup", (t) => {
@@ -1808,7 +1832,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.27"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.28"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1843,4 +1867,34 @@ test("runtime verifier restores the installed app with a normal startup state", 
   if (!runtimeRestoreVerifier) return t.skip("private .ai runtime wrapper is unavailable");
   assert.match(runtimeRestoreVerifier, /Start-Process -FilePath \$InstalledExe/);
   assert.doesNotMatch(runtimeRestoreVerifier, /Start-Process -FilePath \$InstalledExe[^\r\n]*-WindowStyle Hidden/);
+});
+
+test("Paper is a light-only panel skin stored separately from the theme", () => {
+  const paper = panelBlock('html[data-panel-look="paper"] .panel-window');
+  for (const token of ["--pn-bg", "--pn-surface", "--pn-text", "--pn-muted", "--pn-accent", "--pn-focus", "--pn-line", "--pn-heat-0"]) {
+    assert.match(paper, new RegExp(`${token}:`));
+  }
+  assert.match(paper, /color-scheme: light/);
+  assert.match(paper, /--pn-radius-card: 0/);
+  assert.match(paper, /--pn-shadow: none/);
+  // Only the panel reacts to the skin; taskbar bars and the theme attribute stay untouched.
+  assert.doesNotMatch(css, /panel-look|panel_skin|paper/i);
+  assert.doesNotMatch(barJs, /applyPanelSkin|panel_skin/);
+  assert.doesNotMatch(panelCss, /data-theme="paper"/);
+  assert.match(panelMarkup, /<select id="panel-skin" name="panel_skin">\s*<option value="fluent">Fluent<\/option>\s*<option value="paper">Paper<\/option>/);
+  assert.match(markupSection("general"), /name="theme"[\s\S]*name="panel_skin"[\s\S]*name="language"/);
+  assert.match(settingsJs, /\["theme", "panel_skin", "font_mode", "language"\]/);
+  assert.match(panelJs, /matchMedia\?\.\("\(prefers-color-scheme: dark\)"\)\?\.addEventListener\?\.\("change"/);
+  assert.match(rustConfig, /fn normalize_panel_skin\(value: &str\) -> &'static str \{\n    match value \{\n        "paper" => "paper",\n        _ => "fluent",/);
+  assert.doesNotMatch(rustConfig.match(/pub struct TaskbarPresentationProfile \{[\s\S]*?\n\}/)?.[0] ?? "", /panel_skin/);
+  for (const key of ["field.panelSkin", "help.panelSkin"]) {
+    assert.equal((i18nJs.match(new RegExp(`"${key.replace(".", "\\.")}":`, "g")) ?? []).length, 2, key);
+  }
+});
+
+test("collection issue messages get a full-width row instead of the narrow meta column", () => {
+  assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /grid-column: 1 \/ -1/);
+  assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /white-space: normal/);
+  assert.match(panelJs, /card\.dataset\.collectionIssue = String\(/);
+  assert.match(panelJs, /import \{ collectionIssue \} from "\.\/collection-state\.js";/);
 });

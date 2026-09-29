@@ -208,23 +208,30 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
 
 test("README uses localized current UI assets with bounded motion", () => {
   const readme = readFileSync(resolve(projectRoot, "README.md"), "utf8").replace(/\r\n?/g, "\n");
+  // Panel shots are 2x renders of the 620px panel; composites are 1280px pages at 2x.
+  // Heights follow the localized content, so they are bounded rather than exact.
   const dimensions = {
-    "hero.png": [2560, 2200],
-    "panel-activity.png": [1136, 458],
-    "panel-appearance.png": [1136, 1454],
-    "panel-taskbar.png": [1136, 1416],
-    "panel-collection.png": [1136, 1200],
-    "panel-effects.png": [1136, 2212],
-    "panel-update.png": [1136, 372],
+    "hero.png": [2560, 1900, 2400],
+    "panel-skins.png": [2560, 1100, 1400],
+    "panel-overview.png": [1240, 1400, 1700],
+    "panel-activity.png": [1240, 950, 1250],
+    "panel-appearance.png": [1240, 1750, 2150],
+    "panel-taskbar.png": [1240, 1950, 2450],
+    "panel-collection.png": [1240, 1600, 2000],
+    "panel-effects.png": [1240, 2900, 3400],
+    "panel-update.png": [1240, 850, 1100],
   };
   for (const language of ["ko", "en"]) {
-    for (const [suffix, expected] of Object.entries(dimensions)) {
-      const name = `juice-v021-${language}-${suffix}`;
+    for (const [suffix, [width, minHeight, maxHeight]] of Object.entries(dimensions)) {
+      const name = `juice-v028-${language}-${suffix}`;
       const file = resolve(projectRoot, "docs/assets", name);
-      assert.ok(readme.includes(`docs/assets/${name}`));
-      assert.deepEqual(pngDimensions(file), expected);
+      assert.ok(readme.includes(`docs/assets/${name}`), name);
+      const [actualWidth, actualHeight] = pngDimensions(file);
+      assert.equal(actualWidth, width, name);
+      assert.ok(actualHeight >= minHeight && actualHeight <= maxHeight, `${name} height ${actualHeight}`);
       assert.ok(readFileSync(file).length > 10000);
     }
+    assert.doesNotMatch(readme, new RegExp(`docs/assets/juice-v021-${language}-(?:hero|panel-)`));
     for (const style of ["modes", "bars"]) {
       const file = resolve(projectRoot, `docs/assets/juice-v021-${language}-taskbar-${style}.png`);
       const [width, height] = pngDimensions(file);
@@ -282,8 +289,8 @@ print(json.dumps({"frames": im.n_frames, "duration": sum(durations), "boards": b
   assert.doesNotMatch(readme, /docs\/assets\/juice-taskbar-modes\.png/);
   assert.doesNotMatch(readme, /docs\/assets\/juice-v014-panel-about\.png/);
   assert.doesNotMatch(readme, /docs\/assets\/juice-v014-panel-settings-full\.png/);
-  assert.match(readme, /\| 기본 \|[\s\S]*\| 수집 \|[\s\S]*\| 표시줄 \|[\s\S]*\| 색상 \|[\s\S]*\| 세부 \|/);
-  assert.match(readme, /\| General \|[\s\S]*\| Collection \|[\s\S]*\| Taskbar \|[\s\S]*\| Colors \|[\s\S]*\| Details \|/);
+  assert.match(readme, /\| 기본 \|[\s\S]*\| 수집 \|[\s\S]*\| 표시줄 \|[\s\S]*\| 색상 \|[\s\S]*\| 표시기·글자 \|/);
+  assert.match(readme, /\| General \|[\s\S]*\| Collection \|[\s\S]*\| Taskbar \|[\s\S]*\| Colors \|[\s\S]*\| Indicators & text \|/);
   assert.doesNotMatch(readme, /\| 외형 \||\| 표시·수집 \||\| 원·바 세부 \|/);
   assert.match(readme, /최초 실행에서는 표시 중인 바를 작업표시줄 왼쪽부터 서로 겹치지 않게 배치합니다/);
   assert.match(readme, /숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다/);

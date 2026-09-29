@@ -30,6 +30,7 @@ let lastRequestedContentWidth = "";
 let contentWidthRetryKey = "";
 let contentWidthRetryCount = 0;
 const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
+const PREVIEW = new URLSearchParams(window.location?.search ?? "").get("preview") === "1";
 
 function currentWindowTool() {
   const search = window.location?.search ?? globalThis.location?.search ?? "";
@@ -37,7 +38,7 @@ function currentWindowTool() {
   return TOOLS.includes(tool) ? tool : null;
 }
 
-const CURRENT_TOOL = currentWindowTool();
+let CURRENT_TOOL = currentWindowTool();
 const MENU_WIDTH = 88;
 const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
@@ -58,6 +59,7 @@ let taskbarOrientationRequest = 0;
 
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
+  if (PREVIEW) return;
   void showRefreshMenu(event);
 });
 
@@ -90,6 +92,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 function tauriApi() {
+  if (PREVIEW) return {};
   return window.__TAURI__ ?? {};
 }
 
@@ -313,6 +316,7 @@ function renderTool(vm, limitOrder) {
   item.hidden = false;
   item.dataset.state = vm.state;
   item.dataset.severity = vm.severity;
+  item.dataset.collectionIssue = vm.collectionIssue ? "true" : "false";
   const visibleLimitCount = [vm.primary, vm.secondary]
     .filter((limit) => limit.visible)
     .length;
@@ -340,6 +344,11 @@ function renderTool(vm, limitOrder) {
   setRing(item, vm, limitOrder);
   setText(item, ".bar-tool-name", vm.label);
   setText(item, ".bar-worst", vm.worst);
+  const issue = item.querySelector(".bar-issue");
+  if (issue) {
+    issue.hidden = !vm.collectionIssue;
+    setText(item, ".bar-issue", vm.collectionIssue ?? "");
+  }
   if (vm.state === "login_required") {
     setText(item, ".quad-primary-number", "-");
     setText(item, ".quad-secondary-number", "-");
@@ -493,7 +502,7 @@ function refreshTooltipSnapshot() {
 }
 
 function startTooltipClock() {
-  if (!CURRENT_TOOL || listenersDisposed || tooltipClockTimer) return;
+  if (PREVIEW || !CURRENT_TOOL || listenersDisposed || tooltipClockTimer) return;
   refreshTooltipSnapshot();
   tooltipClockTimer = setInterval(refreshTooltipSnapshot, 30_000);
   tooltipClockTimer?.unref?.();
@@ -586,6 +595,15 @@ function renderBar() {
     renderTool(tool, vm.limitOrder);
   }
   scheduleTaskbarContentWidthSync();
+  if (PREVIEW) {
+    clearTimeout(contentWidthSyncTimer);
+    contentWidthSyncTimer = setTimeout(() => {
+      fitRingNumbers();
+      const item = toolElement(CURRENT_TOOL);
+      const width = Math.ceil(Math.max(item?.scrollWidth ?? 0, item?.getBoundingClientRect?.().width ?? 0));
+      window.parent.postMessage({ type: "juice-bar-preview-size", width }, window.location.origin === "null" ? "*" : window.location.origin);
+    }, CONTENT_WIDTH_SYNC_DELAY_MS);
+  }
 }
 
 function setDragging(payload) {
@@ -826,4 +844,26 @@ async function bootstrap() {
   renderBar();
 }
 
-bootstrap();
+if (PREVIEW) {
+  let revision = 0;
+  window.addEventListener("message", event => {
+    if (event.source !== window.parent || event.origin !== window.location.origin) return;
+    const value = event.data;
+    if (value?.type !== "juice-bar-preview" || !TOOLS.includes(value.tool)
+      || !value.settings || typeof value.settings !== "object" || !Array.isArray(value.statuses)) return;
+    CURRENT_TOOL = value.tool;
+    settings = { ...DEFAULT_SETTINGS, ...value.settings };
+    statuses = value.statuses;
+    startupStatusLoading = false;
+    document.documentElement.dataset.previewActive = String(value.active === true);
+    applyTheme(settings);
+    applyFont(settings);
+    applyTranslations(settings);
+    systemTextScale.accept({ factor: value.textScale, revision: ++revision });
+    renderBar();
+  });
+  window.addEventListener("pagehide", () => clearTimeout(contentWidthSyncTimer), { once: true });
+  document.fonts?.ready?.then(() => { if (CURRENT_TOOL) renderBar(); });
+} else {
+  bootstrap();
+}

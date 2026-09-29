@@ -9,15 +9,21 @@ import { DEFAULT_SETTINGS, toolBrandColor, viewModelForTool } from "./panel-stat
 import { applyFont } from "./font.js";
 import { createTextScaleState, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
-import { applyTheme } from "./theme.js";
+import { collectionIssue } from "./collection-state.js";
+import { applyPanelSkin, applyTheme } from "./theme.js";
+import { createBarPreview } from "./bar-preview.js";
 
 const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
+const PANEL_VIEWS = ["overview", "activity", "settings", "about"];
+const ACTIVITY_TOOLS = ["claude", "codex", "grok", "cursor"];
 const WINDOW_ACTION_COMMANDS = {
   close: "hide_panel_window",
   minimize: "minimize_panel",
   "toggle-maximize": "toggle_panel_maximized",
 };
 let settings = { ...DEFAULT_SETTINGS };
+let previewSettings = null;
+const barPreview = createBarPreview();
 let lastStatuses = [];
 let collectionHealth = {};
 let activitySnapshot = { days: [], partial: false };
@@ -39,6 +45,7 @@ const systemTextScale = createTextScaleState(() => {
   hideActivityTooltip();
   lastActivityRenderSignature = "";
   renderActivity();
+  barPreview.update({ textScale: systemTextScale.factor });
 });
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
@@ -47,6 +54,7 @@ function setPanelVisible(visible) {
   const becameVisible = visible && !panelVisible;
   panelVisible = visible;
   document.documentElement.dataset.panelVisible = visible ? "true" : "false";
+  barPreview.setActive(visible && document.documentElement.dataset.activePanelView === "settings");
   if (becameVisible) void loadActivity();
 }
 
@@ -62,8 +70,53 @@ async function invoke(command) {
   return fn(command);
 }
 
+function selectPanelView(value, focus = false) {
+  const view = PANEL_VIEWS.includes(value) ? value : "overview";
+  const tabs = [...(document.querySelectorAll?.("[data-panel-tab]") ?? [])];
+  for (const tab of tabs) {
+    const active = tab.dataset?.panelTab === view;
+    tab.setAttribute?.("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus?.();
+  }
+  for (const panel of document.querySelectorAll?.("[data-panel-view]") ?? []) {
+    panel.hidden = panel.dataset?.panelView !== view;
+  }
+  if (document.documentElement?.dataset) document.documentElement.dataset.activePanelView = view;
+  barPreview.setActive(view === "settings");
+  hideActivityTooltip();
+  const shell = document.querySelector?.(".panel-shell");
+  if (shell) shell.scrollTop = 0;
+  if (view === "activity") window.requestAnimationFrame?.(() => {
+    const chart = document.querySelector("[data-activity-chart]");
+    if (chart) chart.scrollLeft = chart.scrollWidth;
+  });
+}
+
+function bindPanelNavigation() {
+  document.addEventListener("keydown", (event) => {
+    const tab = event.target?.closest?.("[data-panel-tab]");
+    if (!tab) return;
+    const current = PANEL_VIEWS.indexOf(tab.dataset.panelTab);
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % PANEL_VIEWS.length;
+    else if (event.key === "ArrowLeft") next = (current - 1 + PANEL_VIEWS.length) % PANEL_VIEWS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = PANEL_VIEWS.length - 1;
+    else return;
+    event.preventDefault();
+    selectPanelView(PANEL_VIEWS[next], true);
+  });
+}
+
 function bindWindowControls() {
   document.addEventListener("click", (event) => {
+    const view = event.target?.closest?.("[data-panel-tab], [data-panel-goto]");
+    if (view) {
+      selectPanelView(view.dataset.panelTab ?? view.dataset.panelGoto);
+      return;
+    }
+
     const filter = event.target?.closest?.("[data-activity-filter]")?.dataset?.activityFilter;
     if (filter) {
       activityFilter = filter;
@@ -116,7 +169,7 @@ async function startPanelDrag() {
 function bindPanelDragFallback() {
   document.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
-    if (event.target?.closest?.("[data-window-action]")) return;
+    if (event.target?.closest?.("[data-window-action], [data-panel-tab]")) return;
     if (!event.target?.closest?.("[data-tauri-drag-region]")) return;
 
     event.preventDefault();
@@ -147,11 +200,21 @@ function setBar(scope, selector, model) {
   if (fill) {
     fill.style.width = model.width;
     fill.style.background = model.color;
+    fill.style.color = model.color;
   }
 
   setText(root, ".val", model.value);
   setText(root, ".reset", model.reset);
   setText(root, ".metric-row span", model.label);
+}
+
+function setHero(card, vm) {
+  const model = vm.hero ?? (vm.primary?.visible !== false ? vm.primary : vm.secondary);
+  const text = String(model?.value ?? "–");
+  const percent = /^(-?\d+(?:\.\d+)?)%$/.exec(text);
+  setText(card, ".hero-num", percent ? percent[1] : text);
+  setText(card, ".hero-unit", percent ? "%" : "");
+  setText(card, ".hero-label", model?.label ?? "");
 }
 
 function renderTool(tool, now) {
@@ -167,9 +230,15 @@ function renderTool(tool, now) {
   const vm = viewModelForTool(lastStatuses, tool, settings, now, collectionHealth);
 
   card.dataset.state = vm.state;
+  // Collection issues replace the short meta with a sentence; give it its own full-width row.
+  card.dataset.collectionIssue = String(
+    ["live", "stale"].includes(vm.state)
+      && Boolean(collectionIssue(tool, collectionHealth?.[tool], resolveLanguage(settings))),
+  );
   card.style?.setProperty("--tool-brand", vm.brandColor);
   setBar(card, ".p5h", vm.primary);
   setBar(card, ".pweek", vm.secondary);
+  setHero(card, vm);
   setText(card, ".pc", vm.pcId);
   setText(card, ".meta", vm.meta);
   setText(card, ".empty-hint", vm.emptyHint);
@@ -178,6 +247,14 @@ function renderTool(tool, now) {
 export function renderStatuses(statuses, now = new Date()) {
   lastStatuses = Array.isArray(statuses) ? statuses : [];
   for (const tool of TOOLS) renderTool(tool, now);
+  barPreview.update({ settings: previewSettings ?? settings, statuses: lastStatuses, textScale: systemTextScale.factor });
+  const basis = document.querySelector?.("[data-overview-basis]");
+  if (basis) {
+    basis.textContent = t(
+      settings.display_basis === "used" ? "overview.basisUsed" : "overview.basisRemaining",
+      settings,
+    );
+  }
 }
 
 function activityLanguage() {
@@ -240,6 +317,62 @@ function activityCellLabel(cell) {
   return copy.details.length ? `${copy.title}. ${copy.details.join(". ")}` : copy.title;
 }
 
+function setActivityRegionsHidden(card, hidden) {
+  card.hidden = hidden;
+  for (const selector of [".activity-stats", "[data-overview-activity]"]) {
+    const region = document.querySelector(selector);
+    if (region) region.hidden = hidden;
+  }
+}
+
+function renderActivityShare(card, view, language) {
+  const share = card.querySelector("[data-activity-share]");
+  if (!share) return;
+  const total = ACTIVITY_TOOLS.reduce((sum, tool) => sum + view.toolTotals[tool], 0);
+  share.hidden = total <= 0;
+  const bar = share.querySelector("[data-activity-share-bar]");
+  const keys = share.querySelector("[data-activity-share-keys]");
+  bar?.replaceChildren?.();
+  keys?.replaceChildren?.();
+  if (total <= 0) return;
+  for (const tool of ACTIVITY_TOOLS) {
+    const tokens = view.toolTotals[tool];
+    if (tokens <= 0) continue;
+    const color = toolBrandColor(tool, settings);
+    const segment = document.createElement("i");
+    segment.style.flexGrow = String(tokens);
+    segment.style.background = color;
+    bar?.append(segment);
+    const key = document.createElement("span");
+    key.style.setProperty("--share-color", color);
+    const name = t(`activity.filter${tool[0].toUpperCase()}${tool.slice(1)}`, settings);
+    const percent = new Intl.NumberFormat(language === "en" ? "en-US" : "ko-KR", {
+      style: "percent",
+      maximumFractionDigits: 0,
+    }).format(tokens / total);
+    key.textContent = `${name} ${percent}`;
+    keys?.append(key);
+  }
+}
+
+function renderOverviewActivity(view, language, period) {
+  const overview = document.querySelector("[data-overview-activity]");
+  if (!overview) return;
+  setText(overview, "[data-overview-activity-total]", formatActivityTokens(view.totalTokens, language, true));
+  setText(overview, "[data-overview-activity-days]", period);
+  const spark = overview.querySelector("[data-overview-spark]");
+  if (!spark) return;
+  const maximum = Math.max(0, ...view.weeklyTotals);
+  const fragment = document.createDocumentFragment();
+  view.weeklyTotals.forEach((tokens, index) => {
+    const bar = document.createElement("i");
+    bar.style.height = maximum > 0 ? `${Math.max(4, Math.round((tokens / maximum) * 100))}%` : "4%";
+    if (index === view.weeklyTotals.length - 1) bar.dataset.current = "true";
+    fragment.append(bar);
+  });
+  spark.replaceChildren?.(fragment);
+}
+
 function renderActivity(now = new Date()) {
   const card = document.querySelector("#activity-card");
   if (!card) return;
@@ -249,10 +382,10 @@ function renderActivity(now = new Date()) {
       && settings.show_grok !== true
       && settings.show_cursor !== true
   ) {
-    card.hidden = true;
+    setActivityRegionsHidden(card, true);
     return;
   }
-  card.hidden = false;
+  setActivityRegionsHidden(card, false);
   const renderSignature = JSON.stringify([
     activityDataRevision,
     activityFilter,
@@ -285,7 +418,6 @@ function renderActivity(now = new Date()) {
         ? "partial"
         : "ready";
   card.style.setProperty("--activity-weeks", String(view.weeks));
-  card.style.setProperty("--activity-chart-width", `${view.weeks * 11 - 2}px`);
   card.style.setProperty("--activity-color-claude", toolBrandColor("claude", settings));
   card.style.setProperty("--activity-color-codex", toolBrandColor("codex", settings));
   card.style.setProperty("--activity-color-grok", toolBrandColor("grok", settings));
@@ -300,17 +432,35 @@ function renderActivity(now = new Date()) {
     button.setAttribute("aria-pressed", String(filter === view.filter));
   }
 
-  setText(card, "[data-activity-total]", formatActivityTokens(view.totalTokens, language, true));
+  const activityView = document.querySelector("[data-panel-view=\"activity\"]") ?? card;
+  setText(activityView, "[data-activity-total]", formatActivityTokens(view.totalTokens, language, true));
   const tokenLabel = t("activity.tokens", settings);
   const period = language === "en" ? `last ${view.weeks} weeks` : `최근 ${view.weeks}주`;
-  setText(card, "[data-activity-period]", `${tokenLabel} · ${period}`);
-  setText(card, "[data-activity-days]", `${view.activeDays}${t("activity.activeDays", settings)}`);
+  setText(activityView, "[data-activity-period]", `${tokenLabel} · ${period}`);
+  setText(activityView, "[data-activity-days]", `${view.activeDays}${t("activity.dayCount", settings)}`);
+  setText(
+    activityView,
+    "[data-activity-peak-tokens]",
+    view.peak ? formatActivityTokens(view.peak.tokens, language, true) : "–",
+  );
+  setText(
+    activityView,
+    "[data-activity-peak-date]",
+    view.peak ? formatActivityDate(view.peak.date, language) : "",
+  );
+  renderActivityShare(card, view, language);
+  renderOverviewActivity(
+    view.filter === "all" ? view : buildActivityView(activitySnapshot, settings, "all", now),
+    language,
+    period,
+  );
 
   const monthHost = card.querySelector("[data-activity-months]");
   monthHost?.replaceChildren?.();
-  for (const label of view.monthLabels) {
+  for (const label of view.monthLabels.filter((label, index, labels) =>
+    !labels[index + 1] || labels[index + 1].column - label.column >= 3)) {
     const element = document.createElement("span");
-    element.style.gridColumn = `${label.column + 1}`;
+    element.style.gridColumn = `${label.column + 1} / span 3`;
     element.textContent = formatActivityMonth(label.date, language);
     monthHost?.append(element);
   }
@@ -377,11 +527,18 @@ function renderActivity(now = new Date()) {
   }
 }
 
+window.addEventListener("settings-preview", (event) => {
+  if (!event.detail || typeof event.detail !== "object") return;
+  previewSettings = { ...DEFAULT_SETTINGS, ...event.detail };
+  barPreview.update({ settings: previewSettings });
+});
+
 window.addEventListener("settings-updated", (event) => {
   if (event.detail && typeof event.detail === "object") {
     settingsEventGeneration += 1;
     settings = { ...DEFAULT_SETTINGS, ...event.detail };
     applyTheme(settings);
+    applyPanelSkin(settings);
     applyFont(settings);
     applyTranslations(settings);
     renderStatuses(lastStatuses);
@@ -397,6 +554,7 @@ async function loadSettings() {
     if (loaded && typeof loaded === "object") {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
+      applyPanelSkin(settings);
       applyFont(settings);
       applyTranslations(settings);
       renderStatuses(lastStatuses);
@@ -406,6 +564,7 @@ async function loadSettings() {
     if (settingsEventGeneration !== requestGeneration) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
+    applyPanelSkin(settings);
     applyFont(settings);
     applyTranslations(settings);
     renderStatuses(lastStatuses);
@@ -579,6 +738,7 @@ function bindStatusUpdates() {
           settingsEventGeneration += 1;
           settings = { ...DEFAULT_SETTINGS, ...event.payload };
           applyTheme(settings);
+          applyPanelSkin(settings);
           applyFont(settings);
           applyTranslations(settings);
           renderStatuses(lastStatuses);
@@ -608,7 +768,12 @@ async function bootstrap() {
     if (document.hidden) setPanelVisible(false);
   });
   applyTranslations(settings);
+  globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
+    applyPanelSkin(settings);
+  });
   bindWindowControls();
+  bindPanelNavigation();
+  selectPanelView("overview");
   bindPanelDragFallback();
   bindStatusUpdates();
   void systemTextScale.load(invoke);

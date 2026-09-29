@@ -1,6 +1,6 @@
 [package]
 name = "agent-juice"
-version = "0.1.27"
+version = "0.1.28"
 description = "Juice local usage monitor"
 authors = ["pointi"]
 edition = "2021"
@@ -30,6 +30,7 @@ dirs = "5"
 anyhow = "1"
 base64 = "0.22"
 zeroize = "1.9"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "sync", "time"] }
 rusqlite = { version = "0.40.0", default-features = false, features = ["bundled"] }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "win-system-proxy"] }

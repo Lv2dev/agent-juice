@@ -389,6 +389,8 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "default_font_mode")]
     pub font_mode: String,
+    #[serde(default = "default_panel_skin")]
+    pub panel_skin: String,
     #[serde(default = "default_taskbar_offset_ratio", skip_serializing)]
     pub taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
@@ -594,6 +596,8 @@ pub struct SettingsInput {
     pub theme: String,
     #[serde(default = "default_font_mode")]
     pub font_mode: String,
+    #[serde(default = "default_panel_skin")]
+    pub panel_skin: String,
     #[serde(default = "default_taskbar_offset_ratio")]
     pub taskbar_offset_ratio: f32,
     #[serde(default = "default_taskbar_offset_ratio")]
@@ -921,6 +925,10 @@ fn default_font_mode() -> String {
     "system".into()
 }
 
+fn default_panel_skin() -> String {
+    "fluent".into()
+}
+
 fn default_taskbar_offset_ratio() -> f32 {
     0.5
 }
@@ -1084,6 +1092,7 @@ impl Default for Settings {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
+            panel_skin: default_panel_skin(),
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
@@ -1154,6 +1163,7 @@ impl Default for SettingsInput {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
+            panel_skin: default_panel_skin(),
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
@@ -1344,6 +1354,7 @@ impl Settings {
         settings.language = normalize_language(&settings.language).into();
         settings.theme = normalize_theme(&settings.theme).into();
         settings.font_mode = normalize_font_mode(&settings.font_mode).into();
+        settings.panel_skin = normalize_panel_skin(&settings.panel_skin).into();
         settings
     }
 
@@ -1430,6 +1441,7 @@ impl Settings {
             language: default_language(),
             theme: default_theme(),
             font_mode: default_font_mode(),
+            panel_skin: default_panel_skin(),
             taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             claude_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
             codex_taskbar_offset_ratio: initial_taskbar_offset_ratio(),
@@ -1557,6 +1569,7 @@ impl Settings {
             language: normalize_language(&input.language).into(),
             theme: normalize_theme(&input.theme).into(),
             font_mode: normalize_font_mode(&input.font_mode).into(),
+            panel_skin: normalize_panel_skin(&input.panel_skin).into(),
             taskbar_offset_ratio: clamp_ratio(input.taskbar_offset_ratio),
             claude_taskbar_offset_ratio: clamp_ratio(input.claude_taskbar_offset_ratio),
             codex_taskbar_offset_ratio: clamp_ratio(input.codex_taskbar_offset_ratio),
@@ -2402,6 +2415,13 @@ fn normalize_language(value: &str) -> &'static str {
         "ko" => "ko",
         "en" => "en",
         _ => "system",
+    }
+}
+
+fn normalize_panel_skin(value: &str) -> &'static str {
+    match value {
+        "paper" => "paper",
+        _ => "fluent",
     }
 }
 

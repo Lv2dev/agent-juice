@@ -187,6 +187,24 @@ export function buildActivityView(
     cell.level = fixed ? fixedLevel(cell.tokens, unit) : autoLevel(cell.tokens, maximum);
   }
   const source = sourceState(snapshot, filter, settings);
+  const weeklyTotals = Array.from({ length: weeks }, (_, column) =>
+    cells
+      .slice(column * 7, column * 7 + 7)
+      .filter((cell) => !cell.future)
+      .reduce((total, cell) => Math.min(Number.MAX_SAFE_INTEGER, total + cell.tokens), 0));
+  const peakCell = visibleCells.reduce(
+    (best, cell) => (cell.tokens > 0 && cell.tokens >= (best?.tokens ?? 0) ? cell : best),
+    null,
+  );
+  const toolTotals = { claude: 0, codex: 0, grok: 0, cursor: 0 };
+  for (const cell of visibleCells) {
+    for (const tool of Object.keys(toolTotals)) {
+      toolTotals[tool] = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        toolTotals[tool] + tokensForFilter(byDate.get(cell.key), tool, settings),
+      );
+    }
+  }
 
   return {
     weeks,
@@ -198,6 +216,9 @@ export function buildActivityView(
       0,
     ),
     activeDays: visibleCells.filter((cell) => cell.tokens > 0).length,
+    weeklyTotals,
+    peak: peakCell ? { date: peakCell.date, tokens: peakCell.tokens } : null,
+    toolTotals,
     partial: source.partial,
     backfillPending: source.backfillPending,
     scope: source.scope,
