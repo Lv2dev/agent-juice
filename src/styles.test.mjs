@@ -151,12 +151,12 @@ test("usage cards reserve rows only for visible content", () => {
   const card = panelBlock(".tool-card");
   assert.match(card, /grid-auto-rows:\s*max-content/);
   assert.doesNotMatch(card, /grid-template-rows:/);
-  assert.match(card, /grid-template-areas:\s*"head hero metrics"\s*"meta hero metrics"/);
+  assert.match(card, /grid-template-areas:\s*"head hero metrics";/);
   assert.match(panelBlock(".tool-card > .meta:empty"), /display:\s*none/);
   assert.match(panelBlock(".tool-head"), /grid-area: head/);
   assert.match(panelBlock(".tool-hero"), /grid-area: hero/);
   assert.match(panelBlock(".tool-metrics"), /grid-area: metrics/);
-  assert.match(panelBlock(".meta"), /grid-area: meta/);
+  assert.match(panelBlock(".meta"), /grid-column: 1 \/ -1/);
   assert.match(panelCss, /\.tool-card\[data-state="empty"\] :is\(\.tool-hero, \.tool-metrics\),\n\.tool-card\[data-state="login_required"\] :is\(\.tool-hero, \.tool-metrics\) \{\n  display: none;/);
 });
 
@@ -1492,12 +1492,12 @@ test("taskbar bar right click exposes a visible refresh action", () => {
   assert.match(rustLib, /taskbar_physical_length_for_window\(width, taskbar\.hwnd\)/);
 });
 
-test("panel meta removes estimated cost copy and sits under the PC name", () => {
+test("panel meta removes estimated cost copy and occupies its own full-width row", () => {
   const meta = panelBlock(".meta");
 
   assert.doesNotMatch(panelMarkup, /추정 비용/);
   assert.doesNotMatch(i18nJs, /meta\.cost/);
-  assert.match(meta, /grid-area: meta/);
+  assert.match(meta, /grid-column: 1 \/ -1/);
   assert.match(meta, /align-self: start/);
   assert.doesNotMatch(meta, /max-width:/);
 });
@@ -1832,7 +1832,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.28"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.29"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1896,5 +1896,5 @@ test("collection issue messages get a full-width row instead of the narrow meta 
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /grid-column: 1 \/ -1/);
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /white-space: normal/);
   assert.match(panelJs, /card\.dataset\.collectionIssue = String\(/);
-  assert.match(panelJs, /import \{ collectionIssue \} from "\.\/collection-state\.js";/);
+  assert.match(panelJs, /import \{ panelCollectionIssue \} from "\.\/collection-state\.js";/);
 });

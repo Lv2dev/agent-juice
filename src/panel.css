@@ -670,8 +670,7 @@ html[data-panel-look="paper"] .panel-window {
   display: grid;
   grid-template-columns: minmax(96px, 124px) minmax(80px, 96px) minmax(0, 1fr);
   grid-template-areas:
-    "head hero metrics"
-    "meta hero metrics";
+    "head hero metrics";
   grid-auto-rows: max-content;
   align-items: center;
   column-gap: 14px;
@@ -716,7 +715,7 @@ html[data-panel-look="paper"] .panel-window {
 
 .tool-head {
   grid-area: head;
-  align-self: end;
+  align-self: center;
   min-width: 0;
   display: grid;
   gap: 3px;
@@ -880,9 +879,10 @@ html[data-panel-look="paper"] .panel-window {
 }
 
 .meta {
-  grid-area: meta;
+  grid-column: 1 / -1;
   align-self: start;
   padding-left: 16px;
+  white-space: normal;
 }
 
 .tool-card > .meta:empty {
@@ -894,10 +894,6 @@ html[data-panel-look="paper"] .panel-window {
   grid-column: 2 / -1;
   grid-row: 1 / span 2;
   text-align: left;
-}
-
-.tool-card:is([data-state="stale"], [data-state="empty"]) :is(.tool-hero, .tool-metrics) {
-  opacity: 0.62;
 }
 
 .tool-card[data-state="empty"] .empty-hint {
@@ -2081,11 +2077,18 @@ html[data-panel-look="paper"] .panel-window {
 
 .update-actions {
   justify-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }
 
 .update-check-status {
   min-height: 0;
-  padding: 0 16px 12px;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 160px;
+  line-height: 1.5;
+  white-space: normal;
 }
 
 .update-check-status:empty {
@@ -2394,7 +2397,6 @@ html[data-panel-look="paper"] .settings-toast {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       "head hero"
-      "meta hero"
       "metrics metrics";
     row-gap: 6px;
   }
@@ -2483,7 +2485,6 @@ html[data-text-scale="enlarged"] .tool-card {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "head hero"
-    "meta hero"
     "metrics metrics";
   row-gap: 6px;
 }

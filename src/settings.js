@@ -817,6 +817,7 @@ function scheduleAutosave() {
 }
 
 function handleSettingsMutation(event) {
+  if (event?.target?.dataset?.previewTool !== undefined) return;
   if (event?.target?.dataset?.rangeNumberFor) {
     if (!syncRangeFromNumberEditor(event.target, event.type === "change")) return;
   }

@@ -395,6 +395,12 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(listenerOrder[0], "app-quit-requested");
 
+  const previewTool = { dataset: { previewTool: "" } };
+  listeners.input?.({ type: "input", target: previewTool });
+  listeners.change?.({ type: "change", target: previewTool });
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  assert.equal(savedInputs.length, 0, "preview tool selection must not save settings");
+
   assert.equal(statusHost.hidden, true, "initial hydration must not show a completion state");
   assert.equal(toastLayer.hidden, true, "initial hydration must not show a completion toast");
   assert.equal(fields.warn_threshold.style.getPropertyValue("--range-progress"), "30%");

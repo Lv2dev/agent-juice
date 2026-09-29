@@ -618,7 +618,7 @@ struct ConnectErrorBody {
 
 fn dashboard_url(method: &'static str) -> Result<String, DashboardError> {
     match method {
-        "GetCurrentPeriodUsage" | "GetFilteredUsageEvents" | "GetAggregatedUsageEvents" => {
+        "GetCurrentPeriodUsage" | "GetFilteredUsageEvents" => {
             Ok(format!("{DASHBOARD_BASE_URL}/{method}"))
         }
         _ => Err(DashboardError::parse(
@@ -856,76 +856,6 @@ pub fn filtered_usage_events(
     })
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AggregatedUsageRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    team_id: Option<u64>,
-    start_date: String,
-    end_date: String,
-    user_id: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AggregatedUsageResponse {
-    #[serde(default)]
-    total_input_tokens: Int64JsonDefault,
-    #[serde(default)]
-    total_output_tokens: Int64JsonDefault,
-    #[serde(default)]
-    total_cache_write_tokens: Int64JsonDefault,
-    #[serde(default)]
-    total_cache_read_tokens: Int64JsonDefault,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(transparent)]
-struct Int64JsonDefault(Option<Int64Json>);
-
-impl Int64JsonDefault {
-    fn unsigned(&self) -> Result<u64, DashboardError> {
-        let Some(value) = self.0.as_ref() else {
-            return Ok(0);
-        };
-        value
-            .value()
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| DashboardError::parse("Cursor aggregate token count was not recognized"))
-    }
-}
-
-pub fn aggregated_usage(
-    credentials: &DashboardCredentials,
-    start_ms: i64,
-    end_ms: i64,
-    deadline: Instant,
-) -> Result<TokenUsage, DashboardError> {
-    if start_ms < 0 || end_ms <= start_ms {
-        return Err(DashboardError::parse(
-            "Cursor aggregate request bounds rejected",
-        ));
-    }
-    let response: AggregatedUsageResponse = post_json(
-        credentials,
-        "GetAggregatedUsageEvents",
-        &AggregatedUsageRequest {
-            team_id: credentials.scope.team_id,
-            start_date: start_ms.to_string(),
-            end_date: end_ms.to_string(),
-            user_id: credentials.scope.user_id,
-        },
-        deadline,
-        STATUS_RESPONSE_CAP,
-    )?;
-    Ok(TokenUsage {
-        input_tokens: response.total_input_tokens.unsigned()?,
-        output_tokens: response.total_output_tokens.unsigned()?,
-        cache_write_tokens: response.total_cache_write_tokens.unsigned()?,
-        cache_read_tokens: response.total_cache_read_tokens.unsigned()?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,11 +997,8 @@ mod tests {
 
     #[test]
     fn dashboard_transport_accepts_only_known_constant_methods() {
-        for method in [
-            "GetCurrentPeriodUsage",
-            "GetFilteredUsageEvents",
-            "GetAggregatedUsageEvents",
-        ] {
+        assert!(dashboard_url("GetAggregatedUsageEvents").is_err());
+        for method in ["GetCurrentPeriodUsage", "GetFilteredUsageEvents"] {
             assert_eq!(
                 dashboard_url(method).unwrap(),
                 format!("{DASHBOARD_BASE_URL}/{method}")
@@ -1263,32 +1190,5 @@ mod tests {
         assert!((0.0..=100.0).contains(&usage.cursor_models_used_percent));
         assert!((0.0..=100.0).contains(&usage.other_models_used_percent));
         assert!(usage.billing_cycle_end_ms > 0);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "uses the locally logged-in Cursor GUI account"]
-    fn live_filtered_events_match_the_account_aggregate() {
-        use chrono::{Datelike, TimeZone, Utc};
-
-        let deadline = Instant::now() + Duration::from_secs(8);
-        let credentials = read_credentials(deadline).unwrap();
-        let now = Utc::now();
-        let start = Utc
-            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-            .unwrap()
-            .timestamp_millis();
-        let end = (now - chrono::Duration::minutes(5)).timestamp_millis();
-        let page = filtered_usage_events(&credentials, start, end, 1, 500, deadline).unwrap();
-        assert_eq!(page.events.len(), page.total_count);
-        let event_total = page
-            .events
-            .iter()
-            .filter_map(|event| event.token_usage)
-            .fold(TokenUsage::default(), TokenUsage::saturating_add);
-        assert_eq!(
-            aggregated_usage(&credentials, start, end, deadline).unwrap(),
-            event_total
-        );
     }
 }

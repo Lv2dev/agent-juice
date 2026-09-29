@@ -9,7 +9,7 @@ import { DEFAULT_SETTINGS, toolBrandColor, viewModelForTool } from "./panel-stat
 import { applyFont } from "./font.js";
 import { createTextScaleState, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
-import { collectionIssue } from "./collection-state.js";
+import { panelCollectionIssue } from "./collection-state.js";
 import { applyPanelSkin, applyTheme } from "./theme.js";
 import { createBarPreview } from "./bar-preview.js";
 
@@ -233,7 +233,7 @@ function renderTool(tool, now) {
   // Collection issues replace the short meta with a sentence; give it its own full-width row.
   card.dataset.collectionIssue = String(
     ["live", "stale"].includes(vm.state)
-      && Boolean(collectionIssue(tool, collectionHealth?.[tool], resolveLanguage(settings))),
+      && Boolean(panelCollectionIssue(tool, collectionHealth?.[tool], resolveLanguage(settings))),
   );
   card.style?.setProperty("--tool-brand", vm.brandColor);
   setBar(card, ".p5h", vm.primary);
@@ -497,6 +497,8 @@ function renderActivity(now = new Date()) {
     empty.textContent = t(
       view.backfillPending
         ? "activity.emptyCollecting"
+        : view.partial
+          ? "activity.emptyUnavailable"
         : view.scope === "codex_account"
           ? "activity.emptyCodex"
           : view.scope === "cursor_account"

@@ -105,10 +105,10 @@ function sourceState(snapshot, filter, settings) {
   return {
     partial: (localEnabled && localPartial)
       || (codexAccountEnabled && codexPartial)
-      || (cursorAccountEnabled && cursorPartial),
+      || (cursorEnabled && cursorPartial),
     backfillPending: (localEnabled && localBackfill)
       || (codexAccountEnabled && codexBackfill)
-      || (cursorAccountEnabled && cursorBackfill),
+      || (cursorEnabled && cursorBackfill),
     scope,
   };
 }
