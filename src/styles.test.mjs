@@ -1832,7 +1832,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.29"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.30"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

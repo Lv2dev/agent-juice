@@ -209,8 +209,8 @@ Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
 - GUI 경로는 서버의 계정·조직이 인증 캐시와 일치하는지 확인합니다. 복수 프로필·조직이 모호하거나 조회 중 인증 파일이 바뀌면 값을 표시하지 않습니다. Code와 GUI의 한도를 합산하지 않고, GUI 조회 실패 시 오래된 Code statusline 값으로 대체하지 않습니다.
 - 명시적인 인증 실패는 legacy CLI를 자동 실행하지 않고 `로그인 필요`로 표시합니다. endpoint 형식이 호환되지 않거나 사용자가 강제 새로고침한 경우에만 bounded `/usage` fallback을 사용할 수 있습니다.
 - 정확 OAuth 계정 한도는 statusline의 오래된 계정 값보다 우선합니다. 구버전 `/usage` fallback은 비어 있는 값만 보충하며, endpoint 또는 CLI 형식이 바뀌면 기존 statusline 결과를 유지합니다.
-- 기본 수집주기와 Claude 계정 조회 캐시는 모두 60초입니다. GUI 계정·조직 또는 수집 소스가 바뀌면 이전 값을 지웁니다. 같은 계정의 설정 변경이나 토큰 갱신만으로 성공 값을 지우지는 않습니다.
-- GUI 조회가 일시 실패하면 마지막 성공 값을 유지하고 원인을 바와 패널에 표시합니다. `조회 제한`(429)은 로그인 실패가 아니며, 최소 5분 대기 후 자동 재시도합니다. 대기 중 수동 새로고침도 추가 요청을 보내지 않습니다. 응답 해석 오류·인증 캐시 오류·인증 정보 확인 불가는 별도로 표시합니다.
+- 기본 수집주기는 60초이며, Claude 계정 자동 조회는 요청을 줄이기 위해 최소 5분 간격으로 실행합니다. GUI 계정·조직 또는 수집 소스가 바뀌면 이전 값을 지웁니다. 같은 계정의 설정 변경이나 토큰 갱신만으로 성공 값을 지우지는 않습니다.
+- 일시적인 조회 실패 시 마지막 성공 값을 유지합니다. `조회 제한`(429)은 바에 문구를 추가하지 않고 hover와 패널에서만 안내합니다. hover에서 마지막 수집 시각도 확인할 수 있습니다. 값이 한 번도 없으면 `–`로 표시합니다. GUI·Code 모두 429 이후 최소 5분부터 점차 대기 시간을 늘리며, 수동 새로고침이나 CLI 폴백으로 대기를 우회하지 않습니다. 로그인 필요·응답 해석 오류·인증 캐시 오류는 계속 구분해 표시합니다.
 - 응답의 리셋 시각 형식을 읽지 못해도 유효한 한도 퍼센트는 표시합니다. 알 수 없는 리셋 시각을 추정하지 않습니다.
 - GUI 일반 채팅의 토큰 활동 잔디는 포함하지 않습니다. Claude 활동 집계는 기존 Code 로컬 기록 범위입니다. GUI 인증 저장 형식은 내부 구현이므로 앱 업데이트에 따라 지원이 달라질 수 있습니다.
 - 표시줄 탭에서 Claude를 끄면 계정 조회와 statusline 수집이 모두 중단되고 기존 Claude statusline 설정이 복원됩니다. 다시 켜면 수집 연결을 자동 복구하고 즉시 새 값을 조회합니다.
@@ -546,8 +546,8 @@ Juice reuses each tool's existing local login and never asks you to enter accoun
 - Desktop reads validate the server account and organization against the cache. Ambiguous profiles/organizations or credentials changing during a request suppress the result. Desktop limits are neither summed with Code limits nor replaced by old Code statusline data after a failure.
 - Explicit authentication failures show `Sign in required` without automatically starting the legacy CLI. A bounded `/usage` fallback remains only for incompatible endpoint formats or a user-forced refresh.
 - Exact OAuth account limits take priority over stale statusline account values. Legacy `/usage` only fills missing values; if the endpoint or CLI format changes, Juice keeps the statusline result.
-- The default collection interval and Claude account cache are both 60 seconds. Switching the desktop account, organization or collection source clears previous values. Preference changes or token rotation within the same account do not discard successful values.
-- Temporary desktop request failures retain the last successful values and show the cause in the bar and panel. `Rate limited` (429) is not a sign-out: automatic retry waits at least five minutes, and manual refresh respects that cooldown. Response errors, credential cache errors and unavailable credentials have separate messages.
+- The default collection interval is 60 seconds; automatic Claude account queries run no more often than every five minutes to reduce requests. Switching the desktop account, organization or collection source clears previous values. Preference changes or token rotation within the same account do not discard successful values.
+- Temporary request failures retain the last successful values. `Rate limited` (429) appears only in the hover details and panel, without adding text to the bar. Hover also shows the last collection time. With no prior values, the bar displays `–`. Both GUI and Code queries back off progressively from at least five minutes after a 429; manual refresh and CLI fallback do not bypass that cooldown. Sign-in requirements, response errors and credential cache errors remain distinct.
 - Valid quota percentages remain visible even when the reset timestamp format is unsupported. Unknown reset times are not inferred.
 - General GUI chat token activity is not included in the heatmap; Claude activity still comes from local Code records. Desktop credential storage is an internal interface and may change with app updates.
 - Disabling Claude in the Taskbar tab stops account and statusline collection and restores the previous Claude statusline configuration. Enabling it reconnects collection and requests fresh data immediately.

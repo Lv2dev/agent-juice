@@ -77,6 +77,17 @@ pub fn error_requires_login(error: &anyhow::Error) -> bool {
     text_requires_login(&format!("{error:#}"))
 }
 
+#[derive(Debug)]
+pub(crate) struct ClaudeUsageRateLimited;
+
+impl std::fmt::Display for ClaudeUsageRateLimited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Claude usage request rate limited (429)")
+    }
+}
+
+impl std::error::Error for ClaudeUsageRateLimited {}
+
 #[cfg(windows)]
 struct ProcessTree {
     job: windows::Win32::Foundation::HANDLE,
@@ -1781,6 +1792,9 @@ fn claude_oauth_usage_response_from(
         }
         HttpErrorKind::Transport => anyhow::anyhow!("Claude OAuth usage request failed"),
     })?;
+    if response.status == 429 {
+        return Err(ClaudeUsageRateLimited.into());
+    }
     if matches!(response.status, 401 | 403)
         || text_requires_login(&String::from_utf8_lossy(&response.body))
     {
@@ -2429,6 +2443,43 @@ mod tests {
             &mut helper,
             Instant::now() + Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn claude_oauth_429_is_rate_limited_without_retry_or_auth_misclassification() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            assert!(read > 0);
+            let body = b"login required fixture-private-response";
+            write!(stream, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let error = claude_oauth_usage_response_from(
+            &url,
+            "fixture-secret",
+            "fixture-client",
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap_err();
+        worker.join().unwrap();
+        assert_eq!(
+            crate::classify_collection_error(&error),
+            crate::CollectionErrorKind::RateLimited
+        );
+        assert!(!error_requires_login(&error));
+        let message = format!("{error:#}");
+        assert!(!message.contains("fixture-secret"));
+        assert!(!message.contains("fixture-private-response"));
+        for force in [false, true] {
+            assert!(!crate::claude_legacy_fallback_allowed(
+                &crate::classify_collection_error(&error),
+                force
+            ));
+        }
     }
 
     #[test]

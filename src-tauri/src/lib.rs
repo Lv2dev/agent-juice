@@ -62,7 +62,7 @@ const CODEX_REPRESENTATIVE_CANDIDATES: usize = 32;
 const CODEX_ACCOUNT_CACHE_MIN_SECS: i64 = 30;
 const CODEX_ACCOUNT_API_TIMEOUT_SECS: u64 = 5;
 const CODEX_ROLLOUT_CACHE_MAX_AGE_SECS: u64 = 60;
-const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 60;
+const CLAUDE_USAGE_CACHE_MIN_SECS: i64 = 5 * 60;
 const CLAUDE_USAGE_TIMEOUT_SECS: u64 = 10;
 const GROK_BILLING_CACHE_MIN_SECS: i64 = 60;
 const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
@@ -1605,6 +1605,9 @@ fn collection_retry_delay_secs(
 }
 
 fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
+    if error.is::<collector::ClaudeUsageRateLimited>() {
+        return CollectionErrorKind::RateLimited;
+    }
     if collector::error_requires_login(error) {
         return CollectionErrorKind::LoginRequired;
     }
@@ -1915,8 +1918,10 @@ fn discard_failed_desktop_status(
 }
 
 fn claude_legacy_fallback_allowed(error: &CollectionErrorKind, force: bool) -> bool {
-    !matches!(error, CollectionErrorKind::LoginRequired)
-        && (force || matches!(error, CollectionErrorKind::Parse))
+    !matches!(
+        error,
+        CollectionErrorKind::LoginRequired | CollectionErrorKind::RateLimited
+    ) && (force || matches!(error, CollectionErrorKind::Parse))
 }
 
 fn parse_claude_fallback_usage(
@@ -9248,6 +9253,45 @@ mod tests {
             Err(super::CollectionErrorKind::Transport)
         });
         assert!(super::discard_failed_desktop_status(&cache, status).is_some());
+    }
+
+    #[test]
+    fn claude_automatic_account_queries_wait_five_minutes() {
+        assert_eq!(super::CLAUDE_USAGE_CACHE_MIN_SECS, 300);
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let interval = super::CLAUDE_USAGE_CACHE_MIN_SECS;
+        super::cached_status_attempt(&cache, now, interval, false, || {
+            Ok(status_for_signature("claude-desktop-usage"))
+        });
+        for seconds in [60, 120, 299] {
+            assert!(super::cached_status_attempt(
+                &cache,
+                now + chrono::Duration::seconds(seconds),
+                interval,
+                false,
+                || panic!("automatic query ran too soon")
+            )
+            .is_some());
+        }
+        let mut called = false;
+        super::cached_status_attempt(
+            &cache,
+            now + chrono::Duration::seconds(300),
+            interval,
+            false,
+            || {
+                called = true;
+                Ok(status_for_signature("claude-desktop-usage"))
+            },
+        );
+        assert!(called);
+        for force in [false, true] {
+            assert!(!super::claude_legacy_fallback_allowed(
+                &super::CollectionErrorKind::RateLimited,
+                force
+            ));
+        }
     }
 
     #[test]

@@ -623,7 +623,7 @@ test("login-required dual bar expands and returns to its indicator width", async
   delete global.document;
 });
 
-test("Claude error notice retains numbers, resizes the bar and disappears on recovery", async () => {
+test("Claude rate limit keeps numbers and bar width stable while other errors remain visible", async () => {
   const root = { dataset: {} }, tool = toolStub(), events = {}, calls = [];
   tool.getBoundingClientRect = () => ({width:tool.querySelector('.bar-issue').hidden ? 37 : 140,height:48});
   global.window = { location:{search:'?tool=claude'}, __TAURI__:{
@@ -644,9 +644,13 @@ test("Claude error notice retains numbers, resizes the bar and disappears on rec
   try {
     await import(`./bar.js?test=${Date.now()}-claude-error-notice`);
     await new Promise(r=>setTimeout(r,120));
-    assert.equal(tool.textContentFor('.bar-issue'),'조회 제한');
-    assert.equal(tool.querySelector('.bar-issue').hidden,false);
+    assert.equal(tool.textContentFor('.bar-issue'),'');
+    assert.equal(tool.querySelector('.bar-issue').hidden,true);
     assert.equal(tool.textContentFor('.bar-worst'),'70');
+    assert.equal(calls.at(-1),37);
+    events['collection-health-updated']({payload:{claude:'parse_error'}});
+    await new Promise(r=>setTimeout(r,120));
+    assert.equal(tool.querySelector('.bar-issue').hidden,false);
     assert.equal(calls.at(-1),140);
     events['collection-health-updated']({payload:{claude:'ready'}});
     await new Promise(r=>setTimeout(r,120));
