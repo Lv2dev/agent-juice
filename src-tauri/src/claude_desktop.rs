@@ -119,9 +119,14 @@ fn selected_from(code: &Path, roots: &[PathBuf]) -> bool {
 }
 
 pub(crate) fn revision(desktop: bool) -> Revision {
-    let paths = code_path().into_iter().chain(
-        profile_paths()
-            .into_iter()
+    revision_from(code_path(), &profile_paths(), desktop)
+}
+
+fn revision_from(code: Option<PathBuf>, roots: &[PathBuf], desktop: bool) -> Revision {
+    let paths = code.into_iter().chain(
+        roots
+            .iter()
+            .filter(|_| desktop)
             .flat_map(|p| [p.join("config.json"), p.join("Local State")]),
     );
     Revision::Files(
@@ -718,6 +723,56 @@ mod tests {
             &previous,
             Revision::Files(vec![(PathBuf::from("fixture"), None)], true),
         );
+        assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn code_revision_ignores_gui_changes_and_preserves_rate_limit_cooldown() {
+        let dir = Temp::new();
+        let code = dir.0.join("credentials.json");
+        std::fs::write(&code, b"code-fixture").unwrap();
+        std::fs::write(dir.0.join("config.json"), b"gui-fixture").unwrap();
+        std::fs::write(dir.0.join("Local State"), b"state-fixture").unwrap();
+        let roots = std::slice::from_ref(&dir.0);
+        let previous = std::sync::Mutex::new(None);
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let desktop_before = revision_from(Some(code.clone()), roots, true);
+        crate::reconcile_claude_source(
+            &cache,
+            &previous,
+            revision_from(Some(code.clone()), roots, false),
+        );
+        crate::cached_status_attempt(&cache, now, 300, false, || {
+            Err(crate::CollectionErrorKind::RateLimited)
+        });
+        let retry_at = cache.lock().unwrap().as_ref().unwrap().retry_at;
+        for name in ["config.json", "Local State"] {
+            std::fs::write(dir.0.join(name), b"changed-unrelated-gui-preferences").unwrap();
+            crate::reconcile_claude_source(
+                &cache,
+                &previous,
+                revision_from(Some(code.clone()), roots, false),
+            );
+            for force in [false, true] {
+                assert!(crate::cached_status_attempt(
+                    &cache,
+                    now + chrono::Duration::seconds(1),
+                    300,
+                    force,
+                    || panic!("GUI changes must not bypass Code rate-limit cooldown")
+                )
+                .is_none());
+            }
+            let guard = cache.lock().unwrap();
+            let attempt = guard.as_ref().unwrap();
+            assert_eq!(attempt.retry_at, retry_at);
+            assert_eq!(attempt.consecutive_failures, 1);
+            assert_eq!(attempt.error, Some(crate::CollectionErrorKind::RateLimited));
+        }
+        assert!(desktop_before != revision_from(Some(code.clone()), roots, true));
+        std::fs::write(&code, b"changed-code-auth-fixture").unwrap();
+        crate::reconcile_claude_source(&cache, &previous, revision_from(Some(code), roots, false));
         assert!(cache.lock().unwrap().is_none());
     }
     struct Temp(PathBuf);

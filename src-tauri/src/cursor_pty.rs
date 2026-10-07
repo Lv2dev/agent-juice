@@ -17,6 +17,8 @@ const MAX_VERSION_CANDIDATES: usize = 16;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const TERMINATION_GRACE: Duration = Duration::from_millis(750);
 const CLEANUP_RESERVE: Duration = Duration::from_millis(1_500);
+#[cfg(any(windows, test))]
+const IDENTITY_REVALIDATION_RESERVE: Duration = Duration::from_secs(1);
 static ISOLATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,6 +437,14 @@ fn cursor_environment_variables(
     home: &Path,
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(OsString, OsString)> {
+    cursor_environment_variables_with_auth_root(home, None, inherited)
+}
+
+fn cursor_environment_variables_with_auth_root(
+    home: &Path,
+    auth_root: Option<&Path>,
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
     const ALLOWED: [&str; 25] = [
         "ALL_PROXY",
         "APPDATA",
@@ -470,6 +480,12 @@ fn cursor_environment_variables(
         }
     }
     variables.insert("HOME".into(), ("HOME".into(), home.as_os_str().to_owned()));
+    if let Some(auth_root) = auth_root {
+        variables.insert(
+            "APPDATA".into(),
+            ("APPDATA".into(), auth_root.as_os_str().to_owned()),
+        );
+    }
     variables.insert(
         "USERPROFILE".into(),
         ("USERPROFILE".into(), home.as_os_str().to_owned()),
@@ -482,11 +498,22 @@ fn cursor_environment_variables(
 }
 
 #[cfg(windows)]
-fn cursor_environment_block(home: &Path) -> anyhow::Result<Vec<u16>> {
+fn cursor_environment_block(
+    home: &Path,
+    proof: Option<&crate::cursor_dashboard::CliIdentityProof>,
+) -> anyhow::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
 
     let mut block = Vec::new();
-    for (key, value) in cursor_environment_variables(home, std::env::vars_os()) {
+    let variables = match proof {
+        Some(proof) => cursor_environment_variables_with_auth_root(
+            home,
+            Some(proof.auth_root()),
+            std::env::vars_os(),
+        ),
+        None => cursor_environment_variables(home, std::env::vars_os()),
+    };
+    for (key, value) in variables {
         let mut entry = key;
         entry.push("=");
         entry.push(value);
@@ -584,11 +611,62 @@ pub fn capture_cursor_usage_until(_workspace: &Path, _deadline: Instant) -> anyh
     anyhow::bail!("Cursor Agent usage collection is only available on Windows")
 }
 
+pub fn capture_cursor_usage_with_identity_until(
+    workspace: &Path,
+    deadline: Instant,
+    proof: &crate::cursor_dashboard::CliIdentityProof,
+) -> anyhow::Result<String> {
+    #[cfg(windows)]
+    {
+        capture_with_cli_identity(proof, deadline, |capture_deadline| {
+            let command = resolve_cursor_agent_until(capture_deadline)?;
+            revalidate_cursor_agent(&command)?;
+            capture_cursor_usage_with_command_and_identity(
+                &command,
+                workspace,
+                capture_deadline,
+                Some(proof),
+            )
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (workspace, deadline, proof);
+        anyhow::bail!("Cursor Agent usage collection is only available on Windows")
+    }
+}
+
+#[cfg(any(windows, test))]
+fn capture_with_cli_identity(
+    proof: &crate::cursor_dashboard::CliIdentityProof,
+    deadline: Instant,
+    capture: impl FnOnce(Instant) -> anyhow::Result<String>,
+) -> anyhow::Result<String> {
+    crate::cursor_dashboard::verify_cli_identity(proof, deadline)?;
+    let capture_deadline = deadline
+        .checked_sub(IDENTITY_REVALIDATION_RESERVE)
+        .filter(|capture_deadline| *capture_deadline > Instant::now())
+        .ok_or_else(|| anyhow::anyhow!("Cursor CLI identity verification deadline exceeded"))?;
+    let result = capture(capture_deadline);
+    crate::cursor_dashboard::verify_cli_identity(proof, deadline)?;
+    result
+}
+
 #[cfg(windows)]
 fn capture_cursor_usage_with_command(
     command: &CursorAgentCommand,
     isolation_base: &Path,
     deadline: Instant,
+) -> anyhow::Result<String> {
+    capture_cursor_usage_with_command_and_identity(command, isolation_base, deadline, None)
+}
+
+#[cfg(windows)]
+fn capture_cursor_usage_with_command_and_identity(
+    command: &CursorAgentCommand,
+    isolation_base: &Path,
+    deadline: Instant,
+    proof: Option<&crate::cursor_dashboard::CliIdentityProof>,
 ) -> anyhow::Result<String> {
     use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
     use windows::{
@@ -714,6 +792,14 @@ fn capture_cursor_usage_with_command(
 
     ensure_before_deadline(deadline)?;
     let mut isolation = CursorIsolation::create(isolation_base)?;
+    if let Some(proof) = proof {
+        let config_dir = isolation.home.join(".cursor");
+        fs::create_dir(&config_dir)?;
+        fs::write(
+            config_dir.join("cli-config.json"),
+            serde_json::to_vec(&proof.isolated_config())?,
+        )?;
+    }
 
     let mut input_read = OwnedHandle(HANDLE::default());
     let mut input_write = OwnedHandle(HANDLE::default());
@@ -782,7 +868,7 @@ fn capture_cursor_usage_with_command(
     let mut process_info = PROCESS_INFORMATION::default();
     let application_name = wide(command.node.as_os_str());
     let current_directory = wide(isolation.workspace.as_os_str());
-    let environment = cursor_environment_block(&isolation.home)?;
+    let environment = cursor_environment_block(&isolation.home, proof)?;
     let mut command_line = wide(
         format!(
             "{} {} --disable-auto-update --disable-project-configs --disable-indexing --disable-codebase-ref --exclude-workspace-context --data-dir {} --trust --workspace {}",
@@ -799,6 +885,9 @@ fn capture_cursor_usage_with_command(
         lock_runtime_file(&command.index, command.index_identity)?,
     ];
     ensure_before_deadline(deadline)?;
+    if let Some(proof) = proof {
+        crate::cursor_dashboard::verify_cli_identity(proof, deadline)?;
+    }
     unsafe {
         CreateProcessW(
             PCWSTR(application_name.as_ptr()),
@@ -1123,6 +1212,99 @@ mod tests {
         assert_eq!(values.get("USERPROFILE").unwrap(), home.as_os_str());
         assert!(!values.contains_key("OPENAI_API_KEY"));
         assert!(!values.contains_key("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn known_cli_environment_pins_proven_auth_root_without_replacing_isolated_home() {
+        let home = PathBuf::from(r"C:\isolated-home");
+        let app_data = PathBuf::from(r"C:\proven-roaming");
+        let variables = cursor_environment_variables_with_auth_root(
+            &home,
+            Some(&app_data),
+            [
+                (
+                    OsString::from("APPDATA"),
+                    OsString::from(r"C:\different-roaming"),
+                ),
+                (OsString::from("HOME"), OsString::from(r"C:\real-home")),
+                (
+                    OsString::from("CURSOR_API_KEY"),
+                    OsString::from("fixture-secret"),
+                ),
+            ],
+        );
+        let values = variables
+            .into_iter()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(values.get("APPDATA").unwrap(), app_data.as_os_str());
+        assert_eq!(values.get("HOME").unwrap(), home.as_os_str());
+        assert_eq!(values.get("USERPROFILE").unwrap(), home.as_os_str());
+        assert!(!values.contains_key("CURSOR_API_KEY"));
+    }
+
+    #[test]
+    fn checked_cli_capture_rejects_auth_changes_before_and_after_success_or_failure() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let root = std::env::temp_dir().join(format!(
+            "agent-juice-cli-proof-{}-{}",
+            std::process::id(),
+            ISOLATION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let auth = root.join("Cursor").join("auth.json");
+        let config = root.join("cli-config.json");
+        fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        let token = format!(
+            "e30.{}.fixture-signature",
+            URL_SAFE_NO_PAD.encode(br#"{"sub":"fixture-account","exp":18446744073709551615}"#)
+        );
+        let auth_bytes = serde_json::json!({"accessToken":token}).to_string();
+        let config_bytes = r#"{"authInfo":{"authId":"fixture-account","userId":77}}"#;
+        let reset = || {
+            fs::write(&auth, &auth_bytes).unwrap();
+            fs::write(&config, config_bytes).unwrap();
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        reset();
+        let proof =
+            crate::cursor_dashboard::read_cli_identity_from(&root, &config, deadline).unwrap();
+        fs::write(&auth, b"changed-before-capture").unwrap();
+        assert!(capture_with_cli_identity(&proof, deadline, |_| panic!(
+            "changed proof must not start CLI"
+        ))
+        .is_err());
+        for succeed in [false, true] {
+            reset();
+            let proof =
+                crate::cursor_dashboard::read_cli_identity_from(&root, &config, deadline).unwrap();
+            let error = capture_with_cli_identity(&proof, deadline, |capture_deadline| {
+                assert!(capture_deadline < deadline);
+                fs::write(&config, b"changed-during-capture").unwrap();
+                if succeed {
+                    Ok("fixture-private-output".into())
+                } else {
+                    anyhow::bail!("fixture transport failed")
+                }
+            })
+            .unwrap_err();
+            assert!(error.is::<crate::cursor_dashboard::DashboardError>());
+            assert!(!error.to_string().contains("fixture-private-output"));
+            assert!(!error.to_string().contains("fixture-signature"));
+        }
+        reset();
+        let proof =
+            crate::cursor_dashboard::read_cli_identity_from(&root, &config, deadline).unwrap();
+        assert_eq!(
+            capture_with_cli_identity(&proof, deadline, |_| Ok("same-account".into())).unwrap(),
+            "same-account"
+        );
+        assert!(
+            capture_with_cli_identity(&proof, Instant::now(), |_| panic!(
+                "deadline must not start CLI"
+            ))
+            .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

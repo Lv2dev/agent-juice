@@ -5,13 +5,30 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     if let Some(arg) = args.next() {
         if arg == "--restore-owned-statusline" && args.next().is_none() {
-            return match agent_juice::config::Settings::restore_statusline_if_installed() {
+            let restore = agent_juice::config::Settings::restore_statusline_if_installed()
+                .and_then(|_| {
+                    if let (Some(home), Some(data)) =
+                        (dirs::home_dir(), agent_juice::paths::data_dir())
+                    {
+                        agent_juice::antigravity_cli::binding::restore_at(&home, &data)?;
+                    }
+                    Ok(())
+                });
+            return match restore {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
-                    eprintln!("failed to restore owned Claude statusLine: {err}");
+                    let _ = err;
+                    eprintln!("failed to restore owned statusLine configuration");
                     ExitCode::FAILURE
                 }
             };
+        }
+        if arg == "--antigravity-cli" && args.next().is_none() {
+            if let Ok(input) = agent_juice::antigravity_cli::read_input(std::io::stdin()) {
+                let output = agent_juice::antigravity_cli::run_statusline(&input);
+                let _ = std::io::stdout().write_all(&output);
+            }
+            return ExitCode::SUCCESS;
         }
         eprintln!("unsupported agentjuice-statusline argument");
         return ExitCode::from(2);

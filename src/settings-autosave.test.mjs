@@ -128,6 +128,14 @@ test("settings form auto-saves changed values without a submit button", async ()
       return effectOptions;
     },
   };
+  let focusedActivityOption = null;
+  const activityOptions = ["auto", "fixed"].map((value) => ({
+    dataset: { activityScaleValue: value },
+    setAttribute(name, next) { this[name] = next; },
+    closest(selector) { return selector.includes("[data-activity-scale-value]") ? this : null; },
+    focus() { focusedActivityOption = this; },
+  }));
+  const activityPicker = { querySelectorAll() { return activityOptions; } };
   let focusedSettingsTab = null;
   const settingsTabs = ["general", "collection", "taskbar", "colors", "details"].map((value) => ({
     dataset: { settingsTab: value },
@@ -223,6 +231,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   const trackOpacityEditor = makeField("11", "number", {
     dataset: { rangeNumberFor: "indicator_track_opacity_percent" },
   });
+  fields.activity_scale_mode = makeField("auto");
   const profileRows = {
     taskbar_profile_presentation_on: { dataset: {}, inert: false },
     taskbar_profile_colors_on: { dataset: {}, inert: false },
@@ -245,6 +254,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       listeners[name] = handler;
     },
     querySelectorAll(selector) {
+      if (selector === "input, select, button") return Object.values(fields);
       return selector === "[data-range-number-for]" ? [ringSizeEditor, trackOpacityEditor] : [];
     },
   };
@@ -252,7 +262,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   global.FormData = class {
     get(name) {
       const field = fields[name];
-      if (!field) return null;
+      if (!field || field.disabled) return null;
       if (field.type === "checkbox") return field.checked ? "on" : null;
       return field.value;
     }
@@ -365,6 +375,7 @@ test("settings form auto-saves changed values without a submit button", async ()
       if (selector === "[data-indicator-track-custom-color]") return indicatorTrackColorRow;
       if (selector === "[data-full-reset-toggle]") return fullResetRow;
       if (selector === "[data-effect-picker]") return effectPicker;
+      if (selector === "[data-activity-scale-picker]") return activityPicker;
       if (selector === "#update-check-status") return updateStatusEl;
       if (selector === "#update-band") return updateBand;
       if (selector === "[data-update-version]") return updateVersionEl;
@@ -419,6 +430,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(updateBand.hidden, false);
   assert.ok(updateInstallButtons.every((button) => button.hidden === false));
 
+
   listeners.click?.({ target: actionTarget("install-update", form) });
   updateBandListeners.click?.({ target: actionTarget("install-update") });
   await new Promise((resolve) => setImmediate(resolve));
@@ -468,6 +480,18 @@ test("settings form auto-saves changed values without a submit button", async ()
   assert.equal(focusedSettingsTab, settingsTabs[4]);
   assert.equal(savedInputs.length, 0, "keyboard tab navigation must not save settings");
 
+  let preventedActivityKey = false;
+  listeners.keydown?.({ target: activityOptions[0], key: "ArrowRight", preventDefault() { preventedActivityKey = true; } });
+  assert.equal(preventedActivityKey, true);
+  assert.equal(focusedActivityOption, activityOptions[1]);
+  assert.equal(activityOptions[1]["aria-checked"], "true");
+  listeners.keydown?.({ target: activityOptions[1], key: "Home", preventDefault() {} });
+  assert.equal(focusedActivityOption, activityOptions[0]);
+  assert.equal(activityOptions[0]["aria-checked"], "true");
+  const activityRevision = dispatched.filter((event) => event.type === "settings-preview").length;
+  listeners.keydown?.({ target: activityOptions[0], key: "Tab", preventDefault() { assert.fail("Tab must remain native"); } });
+  assert.equal(dispatched.filter((event) => event.type === "settings-preview").length, activityRevision);
+
   fields.bar_mode.value = "dual";
   fields.claude_primary_color.value = "#123456";
   fields.tool_warning_color.value = "#654321";
@@ -501,6 +525,8 @@ test("settings form auto-saves changed values without a submit button", async ()
   await new Promise((resolve) => setTimeout(resolve, 180));
 
   assert.equal(savedInputs.length, 1);
+  assert.equal(saveRequests[0].editBaseline.ring_on, true, "initial baseline must retain enabled checkboxes");
+  assert.equal(saveRequests[0].editBaseline.poll_interval_secs, 60, "initial baseline must retain the stored interval");
   assert.equal(savedInputs[0].bar_mode, "dual");
   assert.equal(savedInputs[0].full_reset_time_on, true);
   assert.equal(savedInputs[0].display_basis, "used");

@@ -293,7 +293,7 @@ pub struct TaskbarLayoutProfile {
     pub appearance: Option<TaskbarAppearanceProfile>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub tool_colors_version: u8,

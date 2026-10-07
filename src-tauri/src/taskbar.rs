@@ -1627,26 +1627,40 @@ unsafe extern "system" fn collect_shell_taskbar_window(hwnd: HWND, lparam: LPARA
         return BOOL(1);
     }
 
-    let taskbars = &mut *(lparam.0 as *mut Vec<ShellTaskbarWindow>);
-    if taskbars.iter().any(|taskbar| taskbar.hwnd == hwnd) {
+    let taskbars = &mut *(lparam.0 as *mut Vec<anyhow::Result<ShellTaskbarWindow>>);
+    if taskbars
+        .iter()
+        .any(|taskbar| taskbar.as_ref().is_ok_and(|taskbar| taskbar.hwnd == hwnd))
+    {
         return BOOL(1);
     }
 
-    if let Ok(taskbar) = shell_taskbar_window_from_hwnd(hwnd, class_name == "Shell_TrayWnd") {
-        taskbars.push(taskbar);
-    }
+    taskbars.push(shell_taskbar_window_from_hwnd(
+        hwnd,
+        class_name == "Shell_TrayWnd",
+    ));
     BOOL(1)
 }
 
 #[cfg(windows)]
+fn finish_shell_taskbar_enumeration(
+    taskbars: Vec<anyhow::Result<ShellTaskbarWindow>>,
+    enumeration_result: windows::core::Result<()>,
+) -> anyhow::Result<Vec<ShellTaskbarWindow>> {
+    enumeration_result?;
+    taskbars.into_iter().collect()
+}
+
+#[cfg(windows)]
 pub fn shell_taskbar_windows() -> anyhow::Result<Vec<ShellTaskbarWindow>> {
-    let mut taskbars = Vec::new();
-    unsafe {
-        let _ = EnumWindows(
+    let mut taskbars: Vec<anyhow::Result<ShellTaskbarWindow>> = Vec::new();
+    let enumeration_result = unsafe {
+        EnumWindows(
             Some(collect_shell_taskbar_window),
             LPARAM(&mut taskbars as *mut _ as isize),
-        );
-    }
+        )
+    };
+    let mut taskbars = finish_shell_taskbar_enumeration(taskbars, enumeration_result)?;
 
     if taskbars.is_empty() {
         taskbars.push(shell_taskbar_window()?);
@@ -1796,6 +1810,73 @@ pub fn shell_taskbar_drag_rect_at_point_for_key(
     )
     .ok_or_else(|| anyhow::anyhow!("invalid Shell taskbar rectangle"))?;
     Ok((taskbar, dock, ratio))
+}
+
+#[cfg(all(test, windows))]
+mod shell_enumeration_tests {
+    use super::*;
+
+    fn sample() -> ShellTaskbarWindow {
+        ShellTaskbarWindow {
+            hwnd: HWND(std::ptr::dangling_mut::<core::ffi::c_void>()),
+            dpi: 96,
+            left: 0,
+            top: 1032,
+            right: 1920,
+            bottom: 1080,
+            monitor: DockRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            key: "monitor-path:primary".into(),
+            device_key: "device:primary".into(),
+            legacy_key: "monitor:0,0,1920,1080".into(),
+            primary: true,
+        }
+    }
+
+    #[test]
+    fn g3207_failed_secondary_read_rejects_partial_enumeration() {
+        for failure in [
+            "GetWindowRect failed",
+            "monitor info failed",
+            "taskbar DPI unavailable",
+        ] {
+            let result = finish_shell_taskbar_enumeration(
+                vec![Ok(sample()), Err(anyhow::anyhow!(failure))],
+                Ok(()),
+            );
+            assert!(
+                result.is_err(),
+                "partial enumeration silently discarded {failure}"
+            );
+            assert_eq!(result.err().unwrap().to_string(), failure);
+        }
+    }
+
+    #[test]
+    fn g3207_native_enumeration_failure_rejects_already_collected_windows() {
+        let error =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32));
+        assert!(finish_shell_taskbar_enumeration(vec![Ok(sample())], Err(error)).is_err());
+    }
+
+    #[test]
+    fn g3207_complete_enumeration_preserves_all_windows() {
+        let mut secondary = sample();
+        secondary.hwnd = HWND(2usize as *mut core::ffi::c_void);
+        secondary.primary = false;
+        secondary.key = "monitor-path:secondary".into();
+        let result =
+            finish_shell_taskbar_enumeration(vec![Ok(sample()), Ok(secondary)], Ok(())).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].key, "monitor-path:secondary");
+        assert!(finish_shell_taskbar_enumeration(Vec::new(), Ok(()))
+            .unwrap()
+            .is_empty());
+    }
 }
 
 pub fn drag_rect_for_logical_length_at_dpi(

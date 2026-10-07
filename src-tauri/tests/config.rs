@@ -1009,6 +1009,16 @@ fn restore_statusline_rejects_incomplete_v2_metadata_without_mutation() {
     }
 }
 
+fn nsis_hook_body<'a>(hooks: &'a str, name: &str) -> &'a str {
+    hooks
+        .split_once(&format!("!macro {name}\n"))
+        .unwrap()
+        .1
+        .split_once("!macroend")
+        .unwrap()
+        .0
+}
+
 #[test]
 fn nsis_uninstall_hooks_restore_before_removal_and_delete_canonical_data_dir() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1018,30 +1028,32 @@ fn nsis_uninstall_hooks_restore_before_removal_and_delete_canonical_data_dir() {
         "./windows/hooks.nsh"
     );
 
-    let hooks = fs::read_to_string(manifest_dir.join("windows/hooks.nsh")).unwrap();
-    assert!(hooks.contains("NSIS_HOOK_PREUNINSTALL"));
-    assert!(hooks.contains("--restore-owned-statusline"));
-    assert!(hooks.contains(
+    let hooks = fs::read_to_string(manifest_dir.join("windows/hooks.nsh"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let preuninstall = nsis_hook_body(&hooks, "NSIS_HOOK_PREUNINSTALL");
+    let postuninstall = nsis_hook_body(&hooks, "NSIS_HOOK_POSTUNINSTALL");
+    assert!(preuninstall.contains("--restore-owned-statusline"));
+    assert!(preuninstall.contains(
         "IfFileExists \"$INSTDIR\\agentjuice-statusline.exe\" restore_owned_statusline restore_owned_statusline_missing_bridge"
     ));
-    assert!(hooks.contains(
-        "IfFileExists \"$LOCALAPPDATA\\agent-juice\\wrap-meta.json\" restore_owned_statusline_repair_required restore_owned_statusline_done"
+    assert!(preuninstall.contains(
+        "IfFileExists \"$LOCALAPPDATA\\agent-juice\\wrap-meta.json\" restore_owned_statusline_repair_required 0"
     ));
-    assert!(hooks.contains("Repair or reinstall Juice before uninstalling"));
-    assert!(hooks.contains("StrCpy $0 1"));
-    assert!(hooks.contains("${If} $0 <> 0"));
-    assert!(hooks.contains("MessageBox MB_OK|MB_ICONSTOP"));
-    assert!(hooks.contains("/SD IDOK"));
-    assert!(hooks.contains("Abort"));
-    assert!(hooks.contains("NSIS_HOOK_POSTUNINSTALL"));
-    assert!(hooks.contains("$DeleteAppDataCheckboxState = 1"));
-    assert!(hooks.contains(r#"RmDir /r "$LOCALAPPDATA\agent-juice""#));
-    assert!(hooks.matches("$UpdateMode <> 1").count() >= 2);
+    assert!(preuninstall.contains(
+        "IfFileExists \"$LOCALAPPDATA\\agent-juice\\antigravity-cli-binding.dpapi\" restore_owned_statusline_repair_required restore_owned_statusline_done"
+    ));
+    assert!(preuninstall.contains("Repair or reinstall Juice before uninstalling"));
+    assert!(preuninstall.contains("StrCpy $0 1"));
+    assert!(preuninstall.contains("MessageBox MB_OK|MB_ICONSTOP"));
+    assert!(preuninstall.contains("/SD IDOK"));
+    assert!(postuninstall.contains("$DeleteAppDataCheckboxState = 1"));
+    assert!(postuninstall.contains(r#"RmDir /r "$LOCALAPPDATA\agent-juice""#));
+    assert!(postuninstall.contains("$UpdateMode <> 1"));
 
-    let preuninstall = hooks
-        .split("!macro NSIS_HOOK_POSTUNINSTALL")
-        .next()
-        .unwrap();
+    let check = preuninstall
+        .find(r#"!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}""#)
+        .expect("stop the app before restoring any managed status line");
     let update_guard = preuninstall.find("$UpdateMode <> 1").unwrap();
     let repair_required = preuninstall
         .find("restore_owned_statusline_repair_required:")
@@ -1051,6 +1063,7 @@ fn nsis_uninstall_hooks_restore_before_removal_and_delete_canonical_data_dir() {
     let failure_gate = preuninstall.find("${If} $0 <> 0").unwrap();
     let restore_abort = preuninstall.rfind("Abort").unwrap();
     let guard_end = preuninstall.rfind("${EndIf}").unwrap();
+    assert!(check < update_guard);
     assert!(update_guard < repair_required);
     assert!(repair_required < repair_abort);
     assert!(repair_abort < restore);
@@ -1058,6 +1071,263 @@ fn nsis_uninstall_hooks_restore_before_removal_and_delete_canonical_data_dir() {
     assert!(restore < failure_gate);
     assert!(failure_gate < restore_abort);
     assert!(restore_abort < guard_end);
+}
+
+#[test]
+fn nsis_uninstall_cancellation_precedes_restore_and_file_changes() {
+    let hooks = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks.nsh"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let preuninstall = nsis_hook_body(&hooks, "NSIS_HOOK_PREUNINSTALL");
+    let first_command = preuninstall
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with(';'))
+        .unwrap();
+    assert_eq!(
+        first_command,
+        r#"!insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}""#,
+        "cancellation must abort before restoration, metadata access, or file movement"
+    );
+    for mutation in ["Delete ", "Rename ", "MoveFileExW", "RmDir "] {
+        assert!(
+            !preuninstall.contains(mutation),
+            "the preuninstall hook must leave deletion and movement to Tauri: {mutation}"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn compile_uninstall_nsis_fixture(compiler: &Path, script: &str, directory: &Path) {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(compiler)
+        .args(["/INPUTCHARSET", "UTF8", "/NOCD", "/V2", "-"])
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "NSIS fixture compile failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+fn uninstall_nsis_fixture_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .replace('$', "$$")
+        .replace('"', "$\\\"")
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires JUICE_NSIS_COMPILER; isolated hooks only, no app stop/install/uninstall"]
+fn nsis_uninstall_cancel_fixture_preserves_owned_statusline_and_helper() {
+    use std::os::windows::process::CommandExt;
+
+    let compiler = PathBuf::from(std::env::var_os("JUICE_NSIS_COMPILER").unwrap());
+    let root = temp_root("nsis-uninstall");
+    let helper = root.join("fixture-helper.exe");
+    let helper_script = format!(
+        r#"Unicode true
+Name "Status line restore fixture"
+OutFile "{}"
+RequestExecutionLevel user
+SilentInstall silent
+Section
+  FileOpen $1 "$EXEDIR\restore-called" w
+  FileWrite $1 "called"
+  FileClose $1
+  IfFileExists "$EXEDIR\app-stopped" restore_after_stop 0
+  FileOpen $1 "$EXEDIR\restore-while-running" w
+  FileWrite $1 "running"
+  FileClose $1
+  restore_after_stop:
+  IfFileExists "$EXEDIR\restore-fails" restore_failed 0
+  FileOpen $1 "$EXEDIR\statusline.json" w
+  FileWrite $1 "original custom fixture"
+  FileClose $1
+  SetErrorLevel 0
+  Quit
+  restore_failed:
+    SetErrorLevel 1
+    Quit
+SectionEnd
+"#,
+        uninstall_nsis_fixture_path(&helper)
+    );
+    compile_uninstall_nsis_fixture(&compiler, &helper_script, &root);
+    let helper_bytes = fs::read(&helper).unwrap();
+    // Redirect only the metadata root; process checks and helper execution are fixtures.
+    let hooks = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks.nsh"))
+        .unwrap()
+        .replace("$LOCALAPPDATA", "$FixtureLocalAppData");
+    for (name, check_result, update_mode, helper_kind, metadata) in [
+        ("cancel-before-restore", 1, 0, 1, "wrap-meta.json"),
+        ("stop-failed", 2, 0, 1, "wrap-meta.json"),
+        ("restore-failed", 0, 0, 2, "wrap-meta.json"),
+        ("restore-launch-failed", 0, 0, 3, "wrap-meta.json"),
+        ("missing-claude-helper", 0, 0, 0, "wrap-meta.json"),
+        (
+            "missing-cli-helper",
+            0,
+            0,
+            0,
+            "antigravity-cli-binding.dpapi",
+        ),
+        ("missing-unowned-helper", 0, 0, 0, ""),
+        ("restore-before-removal", 0, 0, 1, "wrap-meta.json"),
+        ("update-skips-restore", 0, 1, 1, "wrap-meta.json"),
+        ("update-cancel", 1, 1, 1, "wrap-meta.json"),
+    ] {
+        let directory = root.join(name);
+        let data = directory.join("local-data").join("agent-juice");
+        fs::create_dir_all(&data).unwrap();
+        let canonical = directory.join("agentjuice-statusline.exe");
+        let original_helper = match helper_kind {
+            0 => None,
+            3 => Some(b"not an executable fixture".as_slice()),
+            _ => Some(helper_bytes.as_slice()),
+        };
+        if let Some(bytes) = original_helper {
+            fs::write(&canonical, bytes).unwrap();
+        }
+        if helper_kind == 2 {
+            fs::write(directory.join("restore-fails"), b"fixture failure").unwrap();
+        }
+        let app = directory.join("fixture-not-an-app.exe");
+        let quarantine = directory.join("agentjuice-statusline.juice-update-old.exe");
+        let settings = directory.join("statusline.json");
+        let backup = data.join("original-backup.fixture");
+        fs::write(&app, b"application fixture").unwrap();
+        fs::write(&quarantine, b"previous helper fixture").unwrap();
+        fs::write(&settings, b"owned statusline fixture").unwrap();
+        fs::write(&backup, b"original custom fixture").unwrap();
+        if !metadata.is_empty() {
+            fs::write(data.join(metadata), b"recovery metadata fixture").unwrap();
+        }
+        let executable = directory.join("fixture.exe");
+        let script = format!(
+            r#"Unicode true
+Name "Preuninstall hook fixture"
+OutFile "{}"
+InstallDir "{}"
+RequestExecutionLevel user
+SilentInstall silent
+!include LogicLib.nsh
+!define MAINBINARYNAME "fixture-not-an-app"
+!define PRODUCTNAME "Preuninstall hook fixture"
+Var UpdateMode
+Var FixtureLocalAppData
+Var FixtureCheckCount
+!macro CheckIfAppIsRunning executableName productName
+  IntOp $FixtureCheckCount $FixtureCheckCount + 1
+  ${{If}} {check_result} <> 0
+    Abort "fixture cancellation or termination failure"
+  ${{EndIf}}
+  FileOpen $1 "$INSTDIR\app-stopped" w
+  FileWrite $1 "stopped"
+  FileClose $1
+!macroend
+{hooks}
+Section
+  StrCpy $UpdateMode {update_mode}
+  StrCpy $FixtureLocalAppData "$INSTDIR\local-data"
+  !insertmacro NSIS_HOOK_PREUNINSTALL
+  !insertmacro CheckIfAppIsRunning "${{MAINBINARYNAME}}.exe" "${{PRODUCTNAME}}"
+  FileOpen $1 "$INSTDIR\checks-passed" w
+  FileWrite $1 $FixtureCheckCount
+  FileClose $1
+  Delete "$INSTDIR\fixture-not-an-app.exe"
+  Delete "$INSTDIR\agentjuice-statusline.exe"
+SectionEnd
+"#,
+            uninstall_nsis_fixture_path(&executable),
+            uninstall_nsis_fixture_path(&directory),
+        );
+        compile_uninstall_nsis_fixture(&compiler, &script, &directory);
+        let status = std::process::Command::new(&executable)
+            .args(["/S", &format!("/D={}", directory.display())])
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap();
+        let succeeds = check_result == 0
+            && (update_mode == 1 || helper_kind == 1 || (helper_kind == 0 && metadata.is_empty()));
+        assert_eq!(status.success(), succeeds, "{name}");
+        let restored = check_result == 0 && update_mode == 0 && helper_kind == 1;
+        assert_eq!(
+            fs::read(&settings).unwrap(),
+            if restored {
+                b"original custom fixture".as_slice()
+            } else {
+                b"owned statusline fixture".as_slice()
+            },
+            "{name}"
+        );
+        assert_eq!(
+            directory.join("restore-called").exists(),
+            check_result == 0 && update_mode == 0 && matches!(helper_kind, 1 | 2),
+            "{name}"
+        );
+        assert_eq!(
+            directory.join("app-stopped").exists(),
+            check_result == 0,
+            "{name}"
+        );
+        assert!(!directory.join("restore-while-running").exists(), "{name}");
+        if succeeds {
+            assert!(!canonical.exists(), "{name}");
+            assert!(!app.exists(), "{name}");
+            assert_eq!(
+                fs::read_to_string(directory.join("checks-passed")).unwrap(),
+                "2",
+                "{name}"
+            );
+        } else {
+            assert_eq!(
+                fs::read(&canonical).ok().as_deref(),
+                original_helper,
+                "{name}"
+            );
+            assert_eq!(fs::read(&app).unwrap(), b"application fixture", "{name}");
+            assert!(!directory.join("checks-passed").exists(), "{name}");
+        }
+        assert_eq!(
+            fs::read(&quarantine).unwrap(),
+            b"previous helper fixture",
+            "{name}"
+        );
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            b"original custom fixture",
+            "{name}"
+        );
+        if !metadata.is_empty() {
+            assert_eq!(
+                fs::read(data.join(metadata)).unwrap(),
+                b"recovery metadata fixture",
+                "{name}"
+            );
+        }
+        eprintln!("{name}: passed");
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

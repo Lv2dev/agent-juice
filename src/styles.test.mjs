@@ -448,7 +448,8 @@ test("token activity uses a bounded responsive grid and one custom tooltip", () 
   assert.match(panelJs, /activity\.cursorAccountRecord/);
   assert.match(panelJs, /activity\.mixedRecord/);
   assert.match(panelJs, /cell\.cursorTokens/);
-  assert.match(rustLib, /baseline\.activity_weeks != requested\.activity_weeks/);
+  const collectionChanges = rustLib.match(/impl CollectionChanges\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
+  assert.match(collectionChanges, /before\.enabled\(&Tool::Cursor\)[\s\S]*after\.enabled\(&Tool::Cursor\)[\s\S]*before\.activity_weeks != after\.activity_weeks/);
   assert.match(rustLib, /spawn_cursor_activity_refresh\(app\.clone\(\), settings\.clone\(\), false\)/);
   assert.match(panelCss, /\.activity-card\[data-filter="cursor"\]/);
   assert.match(panelBlock(".activity-filter"), /display: inline-flex/);
@@ -642,9 +643,10 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
     1,
     "all taskbar settings writes must use the generation-guarded update helper",
   );
+  const guardedUpdate = rustLib.match(/fn try_update_taskbar_settings\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
   assert.match(
-    rustLib,
-    /let settings = Settings::try_update\(mutator\)\?;\s*let revision = Settings::storage_revision\(\);\s*let generation = mark_taskbar_settings_changed\(\)/,
+    guardedUpdate,
+    /let \(settings, collection_changes\) = persist_settings_with_collection_policy\([\s\S]*?\|edit\| Settings::try_update\(edit\)[\s\S]*?\)\?;[\s\S]*?let revision = Settings::storage_revision\(\);\s*let generation = mark_taskbar_settings_changed\(\)/,
   );
   assert.match(
     rustLib,
@@ -676,8 +678,13 @@ test("taskbar first-run placement uses persisted per-tool state and retries afte
 
   const profileReconcile =
     rustLib.match(
-      /if let Some\(stable_topology\) = topology_stability\.observe[\s\S]*?let dock_result/,
+      /if let Some\(stable_topology\) = settled_topology[\s\S]*?let dock_result/,
     )?.[0] ?? "";
+  assert.match(
+    rustLib,
+    /let settled_topology = topology_stability\.observe\(profile_topology\.clone\(\)\);\s*if !topology_stability\.allows_native_layout\(&profile_topology\) \{[\s\S]*?continue;\s*\}[\s\S]*?migrate_legacy_taskbar_monitor_keys[\s\S]*?if let Some\(stable_topology\) = settled_topology/,
+    "native layout and key migration must wait for confirmed topology",
+  );
   assert.ok(
     profileReconcile.indexOf("reconcile_taskbar_layout_profile") <
       profileReconcile.indexOf("set_stable_taskbar_topology"),
@@ -1503,13 +1510,14 @@ test("panel meta removes estimated cost copy and occupies its own full-width row
 });
 
 test("release startup reconciles Claude statusline with the enabled tool state", () => {
-  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)/);
-  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*cfg!\(debug_assertions\)/);
-  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*statusline_bridge_path\(\)/);
-  assert.match(rustLib, /fn reconcile_claude_statusline_for_release\(enabled: bool\)[\s\S]*Settings::install_statusline_wrap[\s\S]*Settings::restore_statusline_if_installed/);
-  assert.match(rustLib, /spawn_claude_statusline_reconcile\(settings\.show_claude\)/);
-  assert.match(rustLib, /fn spawn_claude_statusline_reconcile\(enabled: bool\)[\s\S]*eprintln!\("\[statusline\] startup reconcile failed/);
-  assert.match(rustLib, /spawn_claude_statusline_reconcile\(settings\.show_claude\);[\s\S]*spawn_status_loop/);
+  const apply = rustLib.match(/fn apply_claude_statusline_for_release\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
+  const current = rustLib.match(/fn reconcile_claude_statusline_for_release\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
+  assert.match(apply, /cfg!\(debug_assertions\)/);
+  assert.match(apply, /statusline_bridge_path\(\)/);
+  assert.match(apply, /Settings::install_statusline_wrap[\s\S]*Settings::restore_statusline_if_installed/);
+  assert.match(current, /reconcile_current_collection_policy\([\s\S]*?Tool::Claude[\s\S]*?Settings::try_load/);
+  assert.match(rustLib, /fn spawn_claude_statusline_reconcile\(\)[\s\S]*eprintln!\("\[statusline\] startup reconcile failed/);
+  assert.match(rustLib, /spawn_claude_statusline_reconcile\(\);[\s\S]*spawn_status_loop/);
 });
 
 test("styles avoid decorative one-off effects and viewport font scaling", () => {
@@ -1796,7 +1804,7 @@ test("periodic providers reuse in-process transports and persistent RPC sessions
   assert.match(rustHttpTransport, /max_redirects\(0\)/);
   assert.match(rustCollector, /fn grok_billing_response[\s\S]*?grok_acp_broker\(\)\?\.request/);
   assert.match(rustCollector, /persistent_grok_broker_reuses_one_initialized_child/);
-  assert.match(rustLib, /set_grok_acp_enabled\(settings\.show_grok\)/);
+  assert.match(rustLib, /Tool::Grok => collector::set_grok_acp_enabled\(enabled\)/);
   assert.match(rustLib, /begin_grok_acp_shutdown\(\)/);
   assert.match(rustLib, /fn cursor_dashboard_success_never_starts_the_agent_fallback/);
   const bootstrap = panelJs.match(/async function bootstrap\(\)[\s\S]*?\n}\n\nbootstrap\(\);/)?.[0] ?? "";
@@ -1846,7 +1854,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.31"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.32"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
