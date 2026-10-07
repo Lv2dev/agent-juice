@@ -2,6 +2,7 @@ import { formStateFromSettings, payloadFromEntries } from "./settings-state.js";
 import { applyFont } from "./font.js";
 import { applyTranslations, t } from "./i18n.js";
 import { applyPanelSkin, applyTheme } from "./theme.js";
+import { createSettingsAuthority } from "./settings-revision.js";
 
 const form = document.querySelector("#settings-form");
 const statusEl = document.querySelector("#settings-status");
@@ -47,6 +48,7 @@ let updateInstallPromise = null;
 let toastTimer = null;
 let toastHideTimer = null;
 let settingsEventGeneration = 0;
+const settingsAuthority = createSettingsAuthority();
 let quitListenerReady = false;
 let quitFlushPromise = null;
 let quitAttemptGeneration = 0;
@@ -65,6 +67,14 @@ async function invoke(command, args) {
   const fn = tauriApi().core?.invoke;
   if (!fn) throw new Error(t("error.noTauri", currentLanguageSettings()));
   return fn(command, args);
+}
+
+function rememberAuthoritativeSettings(snapshot) {
+  return settingsAuthority.accept(snapshot);
+}
+
+function settingsForReply(snapshot, requestGeneration) {
+  return settingsAuthority.reply(snapshot, settingsEventGeneration !== requestGeneration);
 }
 
 function currentLanguageSettings() {
@@ -530,9 +540,9 @@ function publishPreview(savedSettings = null) {
 }
 
 function hydrateSettings(settings) {
+  setSettingsFormEnabled(true);
   fillForm(settings);
   hasLoadedSettings = true;
-  setSettingsFormEnabled(true);
 }
 
 async function loadSettings() {
@@ -544,8 +554,9 @@ async function loadSettings() {
     try {
       const settings = await invoke("get_settings");
       if (settingsEventGeneration !== requestGeneration) return;
-      if (!settings || typeof settings !== "object") throw new Error("invalid settings payload");
-      hydrateSettings(settings);
+      const current = settingsForReply(settings, requestGeneration);
+      if (!current) throw new Error("invalid settings payload");
+      hydrateSettings(current);
       setStatus("", "ready");
       return;
     } catch {
@@ -733,13 +744,14 @@ async function checkForUpdates() {
 }
 
 async function saveSettings(input, revision, edit) {
+  const requestGeneration = settingsEventGeneration;
   const response = await invoke("save_settings", { input, editBaseline: edit.baseline, editTopology: edit.topology });
   edit.baseline = input;
-  if (revision !== localRevision) return;
-
   const saved = response?.settings ?? response;
   const warnings = Array.isArray(response?.warnings) ? response.warnings : [];
-  const next = saved || input;
+  const next = settingsForReply(saved || input, requestGeneration);
+  if (revision !== localRevision) return;
+  if (!next) throw new Error("invalid settings payload");
   savedRevision = revision;
   window.dispatchEvent(new CustomEvent("settings-updated", { detail: next }));
   fillForm(next);
@@ -749,12 +761,14 @@ async function saveSettings(input, revision, edit) {
 
 async function rollbackFailedSave(revision, error) {
   if (revision !== localRevision) return;
+  const requestGeneration = settingsEventGeneration;
   let recovered = false;
   try {
     const persisted = await invoke("get_settings");
+    const current = settingsForReply(persisted, requestGeneration);
     if (revision !== localRevision) return;
-    if (!persisted || typeof persisted !== "object") throw new Error("invalid settings payload");
-    fillForm(persisted);
+    if (!current) throw new Error("invalid settings payload");
+    fillForm(current);
     savedRevision = revision;
     recovered = true;
   } catch {
@@ -839,17 +853,16 @@ function handleSettingsMutation(event) {
 async function runAction(action) {
   if (action === "clear-taskbar-layouts") {
     const actionRevision = localRevision;
-    const actionEventGeneration = settingsEventGeneration;
     await enqueueLatestSettingsSave();
+    const requestGeneration = settingsEventGeneration;
     const settings = await invoke("clear_taskbar_layout_profiles");
+    const current = settingsForReply(settings, requestGeneration);
     if (
-      settings &&
-      typeof settings === "object" &&
-      localRevision === actionRevision &&
-      settingsEventGeneration === actionEventGeneration
+      current &&
+      localRevision === actionRevision
     ) {
       settingsEventGeneration += 1;
-      hydrateSettings(settings);
+      hydrateSettings(current);
     }
     showSettingsToast(t("status.taskbarLayoutsCleared", currentLanguageSettings()));
     return;
@@ -970,12 +983,9 @@ async function bindSettingsUpdates() {
     quitFlushPromise = null;
   });
   void register("settings-updated", (event) => {
-      if (
-        localRevision === savedRevision &&
-        event.payload &&
-        typeof event.payload === "object"
-      ) {
-        settingsEventGeneration += 1;
+      if (!rememberAuthoritativeSettings(event.payload)) return;
+      settingsEventGeneration += 1;
+      if (localRevision === savedRevision) {
         hydrateSettings(event.payload);
       }
     });
@@ -1040,14 +1050,6 @@ if (form) {
 
       event.preventDefault();
       selectSettingsTab(settingsTabs[next].dataset.settingsTab, true);
-      return;
-    }
-
-    const activityScaleOption = event.target?.closest?.("[data-activity-scale-value]");
-    if (activityScaleOption) {
-      setField("activity_scale_mode", activityScaleOption.dataset.activityScaleValue);
-      updateOutputs();
-      scheduleAutosave();
       return;
     }
 

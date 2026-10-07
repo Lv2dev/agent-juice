@@ -34,6 +34,7 @@ pub fn set_enabled(enabled: bool) {
     cache.result = None;
     cache.retry_at = None;
     cache.failures = 0;
+    crate::antigravity_cli::clear_cached_source();
 }
 
 pub fn cached() -> Option<AgentStatus> {
@@ -43,17 +44,19 @@ pub fn cached() -> Option<AgentStatus> {
         .result
         .as_ref()
         .and_then(|r| r.as_ref().ok())
+        .filter(|status| crate::antigravity_cli::cached_source_alive(status))
         .cloned()
 }
 
 pub fn last_error() -> Option<Error> {
-    CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .result
-        .as_ref()
-        .and_then(|r| r.as_ref().err())
-        .copied()
+    let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match cache.result.as_ref()? {
+        Ok(status) if !crate::antigravity_cli::cached_source_alive(status) => {
+            Some(Error::AppRequired)
+        }
+        Ok(_) => None,
+        Err(error) => Some(*error),
+    }
 }
 
 pub fn refresh(force: bool, deadline: Instant) -> Option<AgentStatus> {
@@ -77,7 +80,12 @@ fn refresh_cache(
             return None;
         }
         if cache.busy || (!force && cache.retry_at.is_some_and(|at| Instant::now() < at)) {
-            return cache.result.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+            return cache
+                .result
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .filter(|status| crate::antigravity_cli::cached_source_alive(status))
+                .cloned();
         }
         cache.busy = true;
         cache.generation
@@ -101,7 +109,12 @@ fn refresh_cache(
     cache.retry_at = Some(Instant::now() + std::time::Duration::from_secs(delay));
     // No persisted or last-good account data across errors, closure or a toggle.
     cache.result = Some(result);
-    cache.result.as_ref().and_then(|r| r.as_ref().ok()).cloned()
+    cache
+        .result
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .filter(|status| crate::antigravity_cli::cached_source_alive(status))
+        .cloned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,12 +255,35 @@ pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<Agent
 pub fn collect(pc_id: &str, captured_at: &str, deadline: Instant) -> Result<AgentStatus, Error> {
     #[cfg(windows)]
     {
-        native::collect(pc_id, captured_at, deadline)
+        resolve_collection_source(native::collect(pc_id, captured_at, deadline), || {
+            if crate::antigravity_cli::connection_failed() {
+                return Err(Error::Unavailable);
+            }
+            let stale = crate::config::Settings::try_load()
+                .map(|s| s.stale_after_secs)
+                .unwrap_or(90);
+            crate::antigravity_cli::collect(pc_id, stale).map_err(|error| match error {
+                crate::antigravity_cli::CaptureError::AppRequired => Error::AppRequired,
+                crate::antigravity_cli::CaptureError::LoginRequired => Error::LoginRequired,
+                crate::antigravity_cli::CaptureError::Unavailable => Error::Unavailable,
+            })
+        })
     }
     #[cfg(not(windows))]
     {
         let _ = (pc_id, captured_at, deadline);
         Err(Error::AppRequired)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn resolve_collection_source(
+    desktop: Result<AgentStatus, Error>,
+    cli: impl FnOnce() -> Result<AgentStatus, Error>,
+) -> Result<AgentStatus, Error> {
+    match desktop {
+        Err(Error::AppRequired) => cli(),
+        result => result,
     }
 }
 
@@ -257,6 +293,44 @@ mod native;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_is_selected_only_without_desktop_and_keeps_input_timestamp() {
+        let mut cli = parse_status(
+            &fixture(serde_json::json!([{"bucketId":"gemini-weekly","remainingFraction":0.5}])),
+            "pc",
+            "2026-10-06T00:00:00Z",
+        )
+        .unwrap();
+        cli.session_id = "antigravity-cli:1:2".into();
+        cli.session.active = false;
+        let selected = resolve_collection_source(Err(Error::AppRequired), || Ok(cli)).unwrap();
+        assert_eq!(selected.captured_at, "2026-10-06T00:00:00Z");
+        assert!(!selected.session.active);
+        assert!(selected.primary.is_none());
+    }
+
+    #[test]
+    fn desktop_results_and_failures_never_mix_with_cli_accounts() {
+        for error in [Error::LoginRequired, Error::Unavailable] {
+            assert_eq!(
+                resolve_collection_source(Err(error), || panic!(
+                    "desktop source must remain exclusive"
+                ))
+                .err(),
+                Some(error)
+            );
+        }
+        let gui = parse_status(
+            &fixture(serde_json::json!([{"bucketId":"gemini-5h","remainingFraction":1.0}])),
+            "pc",
+            "2026-10-06T00:00:00Z",
+        )
+        .unwrap();
+        let selected =
+            resolve_collection_source(Ok(gui), || panic!("GUI wins without invoking CLI")).unwrap();
+        assert_eq!(selected.session_id, "antigravity-gui");
+    }
     use serde_json::json;
 
     #[test]
@@ -410,6 +484,32 @@ mod tests {
         assert!(refresh_cache(&state, true, || Err(Error::AppRequired)).is_none());
         assert!(state.lock().unwrap().result.as_ref().unwrap().is_err());
         assert!(refresh_cache(&state, false, || panic!("missing app cooldown")).is_none());
+    }
+
+    #[test]
+    fn closed_cli_source_is_not_returned_during_busy_backoff_or_publication() {
+        let mut closed = parse_status(
+            &fixture(json!([{"bucketId":"gemini-5h","remainingFraction":0.5}])),
+            "PC",
+            "now",
+        )
+        .unwrap();
+        closed.session_id = "antigravity-cli:4294967295:0".into();
+        for busy in [true, false] {
+            let state = Mutex::new(Cache {
+                enabled: true,
+                busy,
+                retry_at: Some(Instant::now() + std::time::Duration::from_secs(60)),
+                result: Some(Ok(closed.clone())),
+                ..Default::default()
+            });
+            assert!(refresh_cache(&state, false, || panic!("cached path only")).is_none());
+        }
+        let state = Mutex::new(Cache {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(refresh_cache(&state, true, || Ok(closed)).is_none());
     }
 
     #[test]

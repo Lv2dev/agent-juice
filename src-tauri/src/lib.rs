@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod adapters;
 pub mod antigravity;
+pub mod antigravity_cli;
 mod claude_desktop;
 pub mod codex_activity;
 pub mod collector;
@@ -69,6 +70,7 @@ const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
 const CURSOR_USAGE_CACHE_MIN_SECS: i64 = 5 * 60;
 const CURSOR_USAGE_TIMEOUT_SECS: u64 = 20;
 const CURSOR_AGENT_FALLBACK_MAX_RESERVE_SECS: u64 = 10;
+const CURSOR_SCOPE_REVALIDATION_MAX_SECS: u64 = 1;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
 const ACTIVITY_BACKFILL_MAX_PASSES: usize = 16;
 const ACTIVITY_BACKFILL_MAX_SECS: u64 = 30;
@@ -116,17 +118,28 @@ struct TaskbarPauseState(AtomicBool);
 
 #[derive(Default)]
 struct TaskbarMenuState {
-    claude: Mutex<TaskbarMenuLayout>,
-    codex: Mutex<TaskbarMenuLayout>,
-    grok: Mutex<TaskbarMenuLayout>,
-    cursor: Mutex<TaskbarMenuLayout>,
-    antigravity: Mutex<TaskbarMenuLayout>,
+    claude: Mutex<TaskbarMenuSlot>,
+    codex: Mutex<TaskbarMenuSlot>,
+    grok: Mutex<TaskbarMenuSlot>,
+    cursor: Mutex<TaskbarMenuSlot>,
+    antigravity: Mutex<TaskbarMenuSlot>,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 struct TaskbarMenuLayout {
     open: bool,
     ratio: Option<f32>,
+}
+
+#[derive(Default)]
+struct TaskbarMenuSlot {
+    revision: u64,
+    layout: TaskbarMenuLayout,
+}
+
+#[derive(Debug)]
+struct TaskbarMenuWrite {
+    revision: u64,
 }
 
 #[derive(Default)]
@@ -183,12 +196,23 @@ fn taskbar_content_width_decision(
 }
 
 #[derive(Default)]
+struct TaskbarContentLayoutSlot {
+    revision: u64,
+    layout: Option<TaskbarContentLayout>,
+}
+
+struct TaskbarContentLayoutWrite {
+    revision: u64,
+    previous: Option<TaskbarContentLayout>,
+}
+
+#[derive(Default)]
 struct TaskbarContentLayoutState {
-    claude: Mutex<Option<TaskbarContentLayout>>,
-    codex: Mutex<Option<TaskbarContentLayout>>,
-    grok: Mutex<Option<TaskbarContentLayout>>,
-    cursor: Mutex<Option<TaskbarContentLayout>>,
-    antigravity: Mutex<Option<TaskbarContentLayout>>,
+    claude: Mutex<TaskbarContentLayoutSlot>,
+    codex: Mutex<TaskbarContentLayoutSlot>,
+    grok: Mutex<TaskbarContentLayoutSlot>,
+    cursor: Mutex<TaskbarContentLayoutSlot>,
+    antigravity: Mutex<TaskbarContentLayoutSlot>,
 }
 
 #[derive(Default)]
@@ -304,7 +328,7 @@ struct CachedStatusAttempt {
 
 #[derive(Clone)]
 enum CursorStatusSource {
-    Agent,
+    Agent(Option<cursor_dashboard::AccountScope>),
     Dashboard(cursor_dashboard::AccountScope),
 }
 
@@ -313,6 +337,8 @@ struct CursorCachedStatusAttempt {
     attempted_at: DateTime<Utc>,
     last_good: Option<AgentStatus>,
     source: Option<CursorStatusSource>,
+    // Failed display values must not erase the identity used to guard fallback.
+    known_scope: Option<cursor_dashboard::AccountScope>,
     error: Option<CollectionErrorKind>,
     retry_at: DateTime<Utc>,
     consecutive_failures: u32,
@@ -468,6 +494,8 @@ static TASKBAR_LAYOUT_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TASKBAR_PROFILE_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TASKBAR_SETTINGS_WRITE_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static TASKBAR_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static COLLECTION_POLICY_RECOVERY: Lazy<Mutex<CollectionPolicyRecovery>> =
+    Lazy::new(|| Mutex::new(CollectionPolicyRecovery::default()));
 static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -532,6 +560,165 @@ struct TaskbarSettingsSnapshot {
     settings: Settings,
     revision: Option<(u64, std::time::SystemTime)>,
     generation: u64,
+    collection_changes: CollectionChanges,
+}
+
+fn collection_tool_index(tool: &Tool) -> usize {
+    match tool {
+        Tool::Claude => 0,
+        Tool::Codex => 1,
+        Tool::Grok => 2,
+        Tool::Cursor => 3,
+        Tool::Antigravity => 4,
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CollectionPolicyRetry {
+    pending: bool,
+    failures: u32,
+    retry_at: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
+struct CollectionPolicyRecovery {
+    entries: [CollectionPolicyRetry; TASKBAR_TOOLS.len()],
+}
+
+impl CollectionPolicyRecovery {
+    fn record(&mut self, tool: &Tool, failed: bool, now: std::time::Instant) {
+        if !matches!(
+            tool,
+            Tool::Claude | Tool::Codex | Tool::Grok | Tool::Antigravity
+        ) {
+            return;
+        }
+        let entry = &mut self.entries[collection_tool_index(tool)];
+        if failed {
+            entry.pending = true;
+            entry.failures = entry.failures.saturating_add(1);
+            let delay = std::time::Duration::from_secs(
+                (1u64 << entry.failures.saturating_sub(1).min(6)).min(60),
+            );
+            entry.retry_at = Some(now.checked_add(delay).unwrap_or(now));
+        } else {
+            *entry = CollectionPolicyRetry::default();
+        }
+    }
+
+    fn due(&self, tool: &Tool, now: std::time::Instant) -> bool {
+        let entry = &self.entries[collection_tool_index(tool)];
+        entry.pending && entry.retry_at.is_none_or(|at| now >= at)
+    }
+
+    fn any_due(&self, now: std::time::Instant) -> bool {
+        [&Tool::Claude, &Tool::Codex, &Tool::Grok, &Tool::Antigravity]
+            .into_iter()
+            .any(|tool| self.due(tool, now))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CollectionPolicy {
+    enabled: [bool; TASKBAR_TOOLS.len()],
+    activity_weeks: u16,
+}
+
+impl CollectionPolicy {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            enabled: [
+                settings.show_claude,
+                settings.show_codex,
+                settings.show_grok,
+                settings.show_cursor,
+                settings.show_antigravity,
+            ],
+            activity_weeks: settings.activity_weeks,
+        }
+    }
+
+    fn enabled(&self, tool: &Tool) -> bool {
+        self.enabled[collection_tool_index(tool)]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CollectionChanges {
+    transitions: [Option<bool>; TASKBAR_TOOLS.len()],
+    cursor_activity_range_changed: bool,
+}
+
+impl CollectionChanges {
+    fn between(before: CollectionPolicy, after: CollectionPolicy) -> Self {
+        Self {
+            transitions: std::array::from_fn(|index| {
+                (before.enabled[index] != after.enabled[index]).then_some(after.enabled[index])
+            }),
+            cursor_activity_range_changed: before.enabled(&Tool::Cursor)
+                && after.enabled(&Tool::Cursor)
+                && before.activity_weeks != after.activity_weeks,
+        }
+    }
+
+    fn transition(&self, tool: &Tool) -> Option<bool> {
+        self.transitions[collection_tool_index(tool)]
+    }
+
+    fn enabled_now(&self, tool: &Tool) -> bool {
+        self.transition(tool) == Some(true)
+    }
+
+    fn any(&self) -> bool {
+        self.transitions.iter().any(Option::is_some)
+    }
+}
+
+fn mutate_settings_with_collection_changes(
+    current: &mut Settings,
+    mutator: impl FnOnce(&mut Settings) -> anyhow::Result<()>,
+) -> anyhow::Result<CollectionChanges> {
+    let before = CollectionPolicy::from_settings(current);
+    mutator(current)?;
+    Ok(CollectionChanges::between(
+        before,
+        CollectionPolicy::from_settings(current),
+    ))
+}
+
+fn persist_settings_with_collection_policy(
+    update: impl FnOnce(&mut dyn FnMut(&mut Settings) -> anyhow::Result<()>) -> anyhow::Result<Settings>,
+    mutator: impl FnOnce(&mut Settings) -> anyhow::Result<()>,
+    load_current: impl FnOnce() -> anyhow::Result<Settings>,
+    mut apply_claude: impl FnMut(bool) -> anyhow::Result<()>,
+) -> anyhow::Result<(Settings, CollectionChanges)> {
+    let mut mutator = Some(mutator);
+    let mut changes = CollectionChanges::default();
+    let mut claude_attempted = false;
+    let result = update(&mut |current| {
+        changes = mutate_settings_with_collection_changes(
+            current,
+            mutator.take().expect("settings mutation must run once"),
+        )?;
+        if let Some(enabled) = changes.transition(&Tool::Claude) {
+            claude_attempted = true;
+            apply_claude(enabled)?;
+        }
+        Ok(())
+    });
+    match result {
+        Ok(settings) => Ok((settings, changes)),
+        Err(error) => {
+            if claude_attempted {
+                // The caller holds the settings gate, so no newer in-process save can interleave.
+                let rollback = load_current().and_then(|current| apply_claude(current.show_claude));
+                if let Err(rollback_error) = rollback {
+                    anyhow::bail!("{error}; Claude collection rollback failed: {rollback_error}");
+                }
+            }
+            Err(error)
+        }
+    }
 }
 
 fn update_taskbar_settings(
@@ -549,13 +736,25 @@ fn try_update_taskbar_settings(
     let _guard = TASKBAR_SETTINGS_WRITE_GATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let settings = Settings::try_update(mutator)?;
+    let (settings, collection_changes) = persist_settings_with_collection_policy(
+        |edit| Settings::try_update(edit),
+        mutator,
+        Settings::try_load,
+        |enabled| apply_claude_statusline_for_release(enabled).map_err(anyhow::Error::msg),
+    )?;
+    if collection_changes.transition(&Tool::Claude).is_some() {
+        COLLECTION_POLICY_RECOVERY
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .record(&Tool::Claude, false, std::time::Instant::now());
+    }
     let revision = Settings::storage_revision();
     let generation = mark_taskbar_settings_changed();
     Ok(TaskbarSettingsSnapshot {
         settings,
         revision,
         generation,
+        collection_changes,
     })
 }
 
@@ -1020,6 +1219,9 @@ fn collect_representatives_with_options_and_late_app(
     force_cursor_usage: bool,
     late_cursor_app: Option<tauri::AppHandle>,
 ) -> Vec<AgentStatus> {
+    if recover_pending_collection_policies().is_err() {
+        eprintln!("[collector] pending collection policy recovery failed");
+    }
     if !settings.show_claude
         && !settings.show_codex
         && !settings.show_grok
@@ -1064,16 +1266,16 @@ fn collect_representatives_with_options_and_late_app(
                     cursor_deadline,
                 );
                 deliver_cursor_result(sender, result, |result| {
-                    if result.attempted {
-                        let Some(app) = late_cursor_app else {
-                            return;
-                        };
-                        let mut snapshot = combined_collection_last_result();
-                        snapshot.extend(result.statuses);
-                        let snapshot =
-                            filter_enabled_statuses(latest_per_tool(&snapshot), &cursor_settings);
-                        emit_collection_snapshot(&app, &snapshot);
-                    }
+                    let Some(app) = late_cursor_app else {
+                        return;
+                    };
+                    let _ = publish_late_cursor_result(
+                        result,
+                        Settings::try_load,
+                        combined_collection_last_result,
+                        &CURSOR_USAGE_CACHE,
+                        |snapshot| emit_validated_collection_snapshot(&app, &snapshot),
+                    );
                 });
             })
             .ok();
@@ -1119,10 +1321,26 @@ fn collect_representatives_with_options_and_late_app(
         statuses.extend(antigravity::cached());
         drop(thread);
     }
-    let statuses = filter_enabled_statuses(latest_per_tool(&statuses), settings);
+    let statuses = filter_enabled_statuses(
+        filter_current_cursor_samples(latest_per_tool(&statuses), &CURSOR_USAGE_CACHE),
+        settings,
+    );
     if emit_on_time_cursor {
         if let Some(app) = on_time_cursor_app {
-            emit_collection_snapshot(&app, &statuses);
+            let _ = publish_late_cursor_result(
+                CursorCollectionResult {
+                    attempted: true,
+                    statuses: statuses
+                        .iter()
+                        .filter(|status| status.tool == Tool::Cursor)
+                        .cloned()
+                        .collect(),
+                },
+                Settings::try_load,
+                combined_collection_last_result,
+                &CURSOR_USAGE_CACHE,
+                |snapshot| emit_validated_collection_snapshot(&app, &snapshot),
+            );
         }
     }
     statuses
@@ -1147,7 +1365,7 @@ fn collect_cursor_representative(
             .collect()
     });
     CursorCollectionResult {
-        statuses,
+        statuses: filter_current_cursor_samples(statuses, &CURSOR_USAGE_CACHE),
         attempted,
     }
 }
@@ -1204,7 +1422,46 @@ fn combined_collection_last_result() -> Vec<AgentStatus> {
     let mut statuses = COLLECTION_COORDINATOR.last_result();
     statuses.extend(CURSOR_COLLECTION_COORDINATOR.last_result());
     statuses.extend(antigravity::cached());
-    latest_per_tool(&statuses)
+    filter_current_cursor_samples(latest_per_tool(&statuses), &CURSOR_USAGE_CACHE)
+}
+
+fn filter_current_cursor_samples(
+    mut statuses: Vec<AgentStatus>,
+    cache: &Mutex<Option<CursorCachedStatusAttempt>>,
+) -> Vec<AgentStatus> {
+    let cached = cache.lock().unwrap_or_else(|error| error.into_inner());
+    let current = cached
+        .as_ref()
+        .filter(|cached| {
+            let scope_valid = match cached.source {
+                Some(CursorStatusSource::Dashboard(scope))
+                | Some(CursorStatusSource::Agent(Some(scope))) => cached.known_scope == Some(scope),
+                Some(CursorStatusSource::Agent(None)) => cached.known_scope.is_none(),
+                None => false,
+            };
+            scope_valid
+                && !matches!(
+                    cached.error,
+                    Some(
+                        CollectionErrorKind::LoginRequired
+                            | CollectionErrorKind::SourceChanged
+                            | CollectionErrorKind::CredentialsDecode
+                            | CollectionErrorKind::Unavailable
+                    )
+                )
+        })
+        .and_then(|cached| cached.last_good.as_ref());
+    statuses.retain(|status| {
+        if status.tool != Tool::Cursor {
+            return true;
+        }
+        current.is_some_and(|current| {
+            let mut sample = status.clone();
+            sample.session.active = current.session.active;
+            sample == *current
+        })
+    });
+    statuses
 }
 
 fn deliver_cursor_result<T>(
@@ -1215,6 +1472,33 @@ fn deliver_cursor_result<T>(
     if let Err(std::sync::mpsc::SendError(value)) = sender.send(value) {
         on_late(value);
     }
+}
+
+fn publish_late_cursor_result(
+    result: CursorCollectionResult,
+    load_current_settings: impl FnOnce() -> anyhow::Result<Settings>,
+    current_snapshot: impl FnOnce() -> Vec<AgentStatus>,
+    cursor_cache: &Mutex<Option<CursorCachedStatusAttempt>>,
+    publish: impl FnOnce(Vec<AgentStatus>),
+) -> anyhow::Result<()> {
+    if !result.attempted {
+        return Ok(());
+    }
+    // Keep settings writes out until the current-settings snapshot is published.
+    with_taskbar_settings_read(|generation| {
+        let settings = load_current_settings()?;
+        if !settings.show_cursor {
+            return Ok(());
+        }
+        let mut snapshot = current_snapshot();
+        snapshot.extend(result.statuses);
+        let snapshot = filter_current_cursor_samples(snapshot, cursor_cache);
+        let snapshot = filter_enabled_statuses(latest_per_tool(&snapshot), &settings);
+        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation {
+            publish(snapshot);
+        }
+        Ok(())
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1712,9 +1996,46 @@ fn claude_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> Colle
     }
 }
 
-fn emit_collection_snapshot(app: &tauri::AppHandle, statuses: &[AgentStatus]) {
+fn consume_current_collection_snapshot<T>(
+    load_current_settings: impl FnOnce() -> anyhow::Result<Settings>,
+    current_snapshot: impl FnOnce() -> Vec<AgentStatus>,
+    cursor_cache: &Mutex<Option<CursorCachedStatusAttempt>>,
+    consume: impl FnOnce(Vec<AgentStatus>) -> T,
+) -> anyhow::Result<T> {
+    with_taskbar_settings_read(|generation| {
+        let settings = load_current_settings()?;
+        let snapshot = filter_current_cursor_samples(current_snapshot(), cursor_cache);
+        let snapshot = filter_enabled_statuses(latest_per_tool(&snapshot), &settings);
+        anyhow::ensure!(
+            TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation,
+            "settings changed while publishing collection"
+        );
+        Ok(consume(snapshot))
+    })
+}
+
+fn current_collection_snapshot() -> anyhow::Result<Vec<AgentStatus>> {
+    consume_current_collection_snapshot(
+        Settings::try_load,
+        combined_collection_last_result,
+        &CURSOR_USAGE_CACHE,
+        |snapshot| snapshot,
+    )
+}
+
+fn emit_collection_snapshot(app: &tauri::AppHandle) {
+    let _ = consume_current_collection_snapshot(
+        Settings::try_load,
+        combined_collection_last_result,
+        &CURSOR_USAGE_CACHE,
+        |snapshot| emit_validated_collection_snapshot(app, &snapshot),
+    );
+}
+
+fn emit_validated_collection_snapshot(app: &tauri::AppHandle, statuses: &[AgentStatus]) {
+    let statuses = filter_current_cursor_samples(statuses.to_vec(), &CURSOR_USAGE_CACHE);
     let _ = app.emit("collection-health-updated", collection_health_snapshot());
-    let _ = app.emit("status-updated", statuses);
+    let _ = app.emit("status-updated", &statuses);
 }
 
 fn remaining_refresh_budget(
@@ -1967,42 +2288,40 @@ fn collect_cursor_usage_status(
     force: bool,
     deadline: std::time::Instant,
 ) -> Option<AgentStatus> {
+    let mut previous = CURSOR_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
     if !force {
-        let cached = CURSOR_USAGE_CACHE
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone();
-        if let Some(cached) = cached.as_ref() {
+        if let Some(cached) = previous.as_mut() {
             let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
             let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
             if now >= cached.attempted_at && (retry_backoff_active || success_cache_fresh) {
                 cached.last_good.as_ref()?;
-                let scope_matches = match cached.source {
-                    Some(CursorStatusSource::Dashboard(scope)) => {
-                        cursor_dashboard::read_credentials(
-                            std::time::Instant::now() + std::time::Duration::from_millis(300),
-                        )
-                        .is_ok_and(|credentials| credentials.scope == scope)
-                    }
-                    Some(CursorStatusSource::Agent) => true,
-                    None => false,
-                };
-                if scope_matches {
+                let current_scope = current_cursor_scope(
+                    deadline.min(std::time::Instant::now() + std::time::Duration::from_millis(300)),
+                );
+                if revalidate_cursor_cached_source(cached, current_scope) {
                     let mut status = cached.last_good.clone()?;
                     derive_active(&mut status, cursor_stale_after_secs(settings), now);
                     return Some(status);
                 }
-                *CURSOR_USAGE_CACHE
+                if let Some(cached) = CURSOR_USAGE_CACHE
                     .lock()
-                    .unwrap_or_else(|err| err.into_inner()) = None;
+                    .unwrap_or_else(|err| err.into_inner())
+                    .as_mut()
+                {
+                    cached.last_good = None;
+                    cached.source = None;
+                    cached.error = Some(CollectionErrorKind::SourceChanged);
+                    cached.known_scope = cached
+                        .known_scope
+                        .or(previous.as_ref().and_then(|cached| cached.known_scope));
+                }
             }
         }
     }
 
-    let previous = CURSOR_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clone();
     let captured_at = now.to_rfc3339();
     let cursor_budget = deadline.saturating_duration_since(std::time::Instant::now());
     let fallback_reserve = std::time::Duration::from_secs(CURSOR_AGENT_FALLBACK_MAX_RESERVE_SECS)
@@ -2011,7 +2330,14 @@ fn collect_cursor_usage_status(
         .checked_sub(fallback_reserve)
         .unwrap_or_else(std::time::Instant::now);
     let dashboard_outcome =
-        collect_cursor_dashboard_status(pc_id, &captured_at, dashboard_deadline);
+        collect_cursor_dashboard_status(pc_id, &captured_at, dashboard_deadline, deadline);
+    let observed_scope = match &dashboard_outcome {
+        Ok((_, scope)) => Some(*scope),
+        Err((_, scope)) => *scope,
+    };
+    if let Some(scope) = observed_scope {
+        remember_cursor_account_scope(&CURSOR_USAGE_CACHE, now, scope);
+    }
     if let Err((dashboard_error, scope)) = &dashboard_outcome {
         let same_scope_last_good = scope.is_some_and(|scope| {
             matches!(
@@ -2028,6 +2354,7 @@ fn collect_cursor_usage_status(
                 .and_then(|cached| cached.last_good.clone())
             {
                 return cache_cursor_status(
+                    &CURSOR_USAGE_CACHE,
                     now,
                     Some(status),
                     scope.map(CursorStatusSource::Dashboard),
@@ -2037,21 +2364,107 @@ fn collect_cursor_usage_status(
             }
         }
     }
-    let outcome = resolve_cursor_dashboard_first(dashboard_outcome, || {
-        collect_cursor_agent_status(pc_id, &captured_at, deadline)
-    });
+    let fallback_scope = dashboard_outcome
+        .as_ref()
+        .err()
+        .and_then(|(_, scope)| *scope);
+    let outcome = resolve_cursor_dashboard_first(
+        dashboard_outcome,
+        || collect_cursor_agent_status(pc_id, &captured_at, deadline, fallback_scope),
+        || current_cursor_scope(deadline),
+        previous
+            .as_ref()
+            .and_then(|cached| cached.known_scope)
+            .or(observed_scope),
+    );
 
     let (last_good, source, error) = match outcome {
         Ok((status, source)) => (Some(status), Some(source), None),
         Err(error) => (None, None, Some(error)),
     };
-    cache_cursor_status(now, last_good, source, error, settings)
+    cache_cursor_status(&CURSOR_USAGE_CACHE, now, last_good, source, error, settings)
+}
+
+fn remember_cursor_account_scope(
+    cache: &Mutex<Option<CursorCachedStatusAttempt>>,
+    now: DateTime<Utc>,
+    scope: cursor_dashboard::AccountScope,
+) {
+    let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    let cached = cache.get_or_insert_with(|| CursorCachedStatusAttempt {
+        attempted_at: now,
+        last_good: None,
+        source: None,
+        known_scope: None,
+        error: None,
+        retry_at: now,
+        consecutive_failures: 0,
+    });
+    cached.known_scope = cached.known_scope.or(Some(scope));
+    let source_changed = match cached.source {
+        Some(CursorStatusSource::Dashboard(previous))
+        | Some(CursorStatusSource::Agent(Some(previous))) => previous != scope,
+        Some(CursorStatusSource::Agent(None)) => true,
+        None => false,
+    };
+    if source_changed {
+        cached.last_good = None;
+        cached.source = None;
+        cached.error = Some(CollectionErrorKind::SourceChanged);
+    }
+}
+
+fn revalidate_cursor_cached_source(
+    cached: &mut CursorCachedStatusAttempt,
+    current_scope: Result<cursor_dashboard::AccountScope, CollectionErrorKind>,
+) -> bool {
+    let matches = match cached.source {
+        Some(CursorStatusSource::Dashboard(scope))
+        | Some(CursorStatusSource::Agent(Some(scope))) => current_scope == Ok(scope),
+        Some(CursorStatusSource::Agent(None)) if cached.known_scope.is_none() => matches!(
+            current_scope,
+            Err(CollectionErrorKind::LoginRequired | CollectionErrorKind::Unavailable)
+        ),
+        _ => false,
+    };
+    if !matches {
+        // Once credentials appear, a later read failure must not revive legacy-only values.
+        cached.known_scope = cached.known_scope.or(current_scope.ok());
+        cached.last_good = None;
+        cached.source = None;
+        cached.error = Some(CollectionErrorKind::SourceChanged);
+    }
+    matches
+}
+
+fn current_cursor_scope(
+    deadline: std::time::Instant,
+) -> Result<cursor_dashboard::AccountScope, CollectionErrorKind> {
+    cursor_dashboard::read_credentials(deadline)
+        .map(|credentials| credentials.scope)
+        .map_err(|error| dashboard_collection_error(error.kind))
+}
+
+fn validate_cursor_dashboard_response<T>(
+    expected: cursor_dashboard::AccountScope,
+    response: Result<T, CollectionErrorKind>,
+    current_scope: impl FnOnce() -> Result<cursor_dashboard::AccountScope, CollectionErrorKind>,
+) -> Result<T, (CollectionErrorKind, Option<cursor_dashboard::AccountScope>)> {
+    // Revalidate failed responses too, before retaining last-good or starting a fallback.
+    match current_scope() {
+        Ok(current) if current == expected => response.map_err(|error| (error, Some(expected))),
+        Err(CollectionErrorKind::LoginRequired) => {
+            Err((CollectionErrorKind::LoginRequired, Some(expected)))
+        }
+        _ => Err((CollectionErrorKind::SourceChanged, Some(expected))),
+    }
 }
 
 fn collect_cursor_dashboard_status(
     pc_id: &str,
     captured_at: &str,
     deadline: std::time::Instant,
+    revalidation_deadline: std::time::Instant,
 ) -> Result<
     (AgentStatus, cursor_dashboard::AccountScope),
     (CollectionErrorKind, Option<cursor_dashboard::AccountScope>),
@@ -2059,8 +2472,14 @@ fn collect_cursor_dashboard_status(
     let credentials = cursor_dashboard::read_credentials(deadline)
         .map_err(|error| (dashboard_collection_error(error.kind), None))?;
     let scope = credentials.scope;
-    let usage = cursor_dashboard::current_period_usage(&credentials, deadline)
-        .map_err(|error| (dashboard_collection_error(error.kind), Some(scope)))?;
+    let response = cursor_dashboard::current_period_usage(&credentials, deadline)
+        .map_err(|error| dashboard_collection_error(error.kind));
+    let usage = validate_cursor_dashboard_response(scope, response, || {
+        current_cursor_scope(cursor_scope_revalidation_deadline(
+            revalidation_deadline,
+            std::time::Instant::now(),
+        ))
+    })?;
     let reset = DateTime::<Utc>::from_timestamp_millis(usage.billing_cycle_end_ms)
         .ok_or((CollectionErrorKind::Parse, Some(scope)))?;
     let status = adapters::cursor::dashboard_usage_status(
@@ -2074,10 +2493,18 @@ fn collect_cursor_dashboard_status(
     Ok((status, scope))
 }
 
+fn cursor_scope_revalidation_deadline(
+    outer_deadline: std::time::Instant,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    outer_deadline.min(now + std::time::Duration::from_secs(CURSOR_SCOPE_REVALIDATION_MAX_SECS))
+}
+
 fn collect_cursor_agent_status(
     pc_id: &str,
     captured_at: &str,
     deadline: std::time::Instant,
+    expected_scope: Option<cursor_dashboard::AccountScope>,
 ) -> Result<AgentStatus, CollectionErrorKind> {
     if std::time::Instant::now() >= deadline {
         return Err(CollectionErrorKind::Deadline);
@@ -2085,7 +2512,25 @@ fn collect_cursor_agent_status(
     let workspace = paths::data_dir()
         .map(|path| path.join("cursor-usage-workspace"))
         .ok_or(CollectionErrorKind::Unavailable)?;
-    let raw = cursor_pty::capture_cursor_usage_until(&workspace, deadline).map_err(|error| {
+    let proof = match expected_scope {
+        Some(expected) => {
+            let proof = cursor_dashboard::read_cli_identity(deadline)
+                .map_err(|error| dashboard_collection_error(error.kind))?;
+            ensure_cursor_cli_scope(expected, proof.scope)?;
+            Some(proof)
+        }
+        None => None,
+    };
+    let capture = match proof.as_ref() {
+        Some(proof) => {
+            cursor_pty::capture_cursor_usage_with_identity_until(&workspace, deadline, proof)
+        }
+        None => cursor_pty::capture_cursor_usage_until(&workspace, deadline),
+    };
+    let raw = capture.map_err(|error| {
+        if let Some(error) = error.downcast_ref::<cursor_dashboard::DashboardError>() {
+            return dashboard_collection_error(error.kind);
+        }
         if std::time::Instant::now() >= deadline
             || format!("{error:#}")
                 .to_ascii_lowercase()
@@ -2098,6 +2543,17 @@ fn collect_cursor_agent_status(
     })?;
     adapters::cursor::parse_usage_status(&raw, pc_id, captured_at)
         .map_err(|_| CollectionErrorKind::Parse)
+}
+
+fn ensure_cursor_cli_scope(
+    expected: cursor_dashboard::AccountScope,
+    actual: cursor_dashboard::AccountScope,
+) -> Result<(), CollectionErrorKind> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(CollectionErrorKind::SourceChanged)
+    }
 }
 
 fn cursor_agent_fallback_allowed(error: &CollectionErrorKind) -> bool {
@@ -2115,19 +2571,44 @@ fn resolve_cursor_dashboard_first(
         (CollectionErrorKind, Option<cursor_dashboard::AccountScope>),
     >,
     collect_agent: impl FnOnce() -> Result<AgentStatus, CollectionErrorKind>,
+    current_scope: impl FnOnce() -> Result<cursor_dashboard::AccountScope, CollectionErrorKind>,
+    previous_scope: Option<cursor_dashboard::AccountScope>,
 ) -> Result<(AgentStatus, CursorStatusSource), CollectionErrorKind> {
     match dashboard {
         Ok((status, scope)) => Ok((status, CursorStatusSource::Dashboard(scope))),
+        Err((error, None)) if previous_scope.is_some() => {
+            Err(if error == CollectionErrorKind::LoginRequired {
+                CollectionErrorKind::LoginRequired
+            } else {
+                CollectionErrorKind::SourceChanged
+            })
+        }
+        Err((CollectionErrorKind::LoginRequired, Some(_))) => {
+            Err(CollectionErrorKind::LoginRequired)
+        }
         Err((dashboard_error, _)) if !cursor_agent_fallback_allowed(&dashboard_error) => {
             Err(dashboard_error)
         }
-        Err((dashboard_error, _)) => match collect_agent() {
-            Ok(status) => Ok((status, CursorStatusSource::Agent)),
-            Err(agent_error) => Err(combine_cursor_collection_errors(
-                agent_error,
-                dashboard_error,
-            )),
-        },
+        Err((dashboard_error, scope)) => {
+            let result = collect_agent();
+            let result = if let Some(scope) = scope {
+                validate_cursor_dashboard_response(scope, result, current_scope)
+                    .map_err(|(error, _)| error)
+            } else {
+                result
+            };
+            match result {
+                Ok(status) => Ok((status, CursorStatusSource::Agent(scope))),
+                Err(CollectionErrorKind::SourceChanged) => Err(CollectionErrorKind::SourceChanged),
+                Err(CollectionErrorKind::LoginRequired) if scope.is_some() => {
+                    Err(CollectionErrorKind::LoginRequired)
+                }
+                Err(agent_error) => Err(combine_cursor_collection_errors(
+                    agent_error,
+                    dashboard_error,
+                )),
+            }
+        }
     }
 }
 
@@ -2139,7 +2620,7 @@ fn dashboard_collection_error(kind: cursor_dashboard::DashboardErrorKind) -> Col
         | cursor_dashboard::DashboardErrorKind::Oversized => CollectionErrorKind::Parse,
         cursor_dashboard::DashboardErrorKind::LoginRequired => CollectionErrorKind::LoginRequired,
         cursor_dashboard::DashboardErrorKind::Unavailable => CollectionErrorKind::Unavailable,
-        cursor_dashboard::DashboardErrorKind::ScopeChanged => CollectionErrorKind::Transport,
+        cursor_dashboard::DashboardErrorKind::ScopeChanged => CollectionErrorKind::SourceChanged,
     }
 }
 
@@ -2147,6 +2628,11 @@ fn combine_cursor_collection_errors(
     agent: CollectionErrorKind,
     dashboard: CollectionErrorKind,
 ) -> CollectionErrorKind {
+    if matches!(agent, CollectionErrorKind::SourceChanged)
+        || matches!(dashboard, CollectionErrorKind::SourceChanged)
+    {
+        return CollectionErrorKind::SourceChanged;
+    }
     if matches!(dashboard, CollectionErrorKind::LoginRequired) {
         return CollectionErrorKind::LoginRequired;
     }
@@ -2167,17 +2653,22 @@ fn combine_cursor_collection_errors(
 }
 
 fn cache_cursor_status(
+    cache: &Mutex<Option<CursorCachedStatusAttempt>>,
     now: DateTime<Utc>,
     last_good: Option<AgentStatus>,
     source: Option<CursorStatusSource>,
     error: Option<CollectionErrorKind>,
     settings: &Settings,
 ) -> Option<AgentStatus> {
-    let previous_failures = CURSOR_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
+    let mut cached = cache.lock().unwrap_or_else(|err| err.into_inner());
+    let previous_failures = cached
         .as_ref()
         .map_or(0, |cached| cached.consecutive_failures);
+    let known_scope = match source.as_ref() {
+        Some(CursorStatusSource::Dashboard(scope))
+        | Some(CursorStatusSource::Agent(Some(scope))) => Some(*scope),
+        _ => cached.as_ref().and_then(|cached| cached.known_scope),
+    };
     let consecutive_failures = if error.is_some() {
         previous_failures.saturating_add(1)
     } else {
@@ -2187,16 +2678,16 @@ fn cache_cursor_status(
         collection_retry_delay_secs(error, CURSOR_USAGE_CACHE_MIN_SECS, consecutive_failures)
     });
     let retry_at = now + chrono::Duration::seconds(retry_secs);
-    *CURSOR_USAGE_CACHE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some(CursorCachedStatusAttempt {
+    *cached = Some(CursorCachedStatusAttempt {
         attempted_at: now,
         last_good: last_good.clone(),
         source,
+        known_scope,
         error,
         retry_at,
         consecutive_failures,
     });
+    drop(cached);
     let mut status = last_good?;
     derive_active(&mut status, cursor_stale_after_secs(settings), now);
     Some(status)
@@ -2452,10 +2943,10 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
                         return;
                     };
                     let activity_settings = settings.clone();
-                    let (statuses, collected) =
+                    let (_, collected) =
                         collect_force_refresh_off_thread(settings, Some(app.clone())).await;
                     if collected {
-                        emit_collection_snapshot(&app, &statuses);
+                        emit_collection_snapshot(&app);
                     }
                     spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
                     spawn_cursor_activity_refresh(app, activity_settings, true);
@@ -2589,10 +3080,10 @@ fn spawn_status_loop(
             if !started.active {
                 continue;
             }
-            let representatives = collect_representatives_off_thread(settings, false).await;
+            let _ = collect_representatives_off_thread(settings, false).await;
 
             if !system_activity.publish_if_current(started, || {
-                emit_collection_snapshot(&handle, &representatives);
+                emit_collection_snapshot(&handle);
             }) {
                 continue;
             }
@@ -3183,6 +3674,10 @@ struct TaskbarTopologyStability {
 
 #[cfg(windows)]
 impl TaskbarTopologyStability {
+    fn allows_native_layout(&self, topology: &TaskbarTopology) -> bool {
+        topology.is_valid() && self.active.as_ref() == Some(topology)
+    }
+
     fn rearm(&mut self) {
         self.candidate = TaskbarTopology::default();
         self.observations = 0;
@@ -3320,6 +3815,7 @@ fn initialize_pending_taskbar_targets<R: tauri::Runtime>(
             settings: settings.clone(),
             revision: Settings::storage_revision(),
             generation: TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire),
+            collection_changes: CollectionChanges::default(),
         });
     }
     let taskbar = taskbar::shell_taskbar_window_for_key("")?;
@@ -3464,7 +3960,7 @@ fn taskbar_content_width_for_mode(
 fn taskbar_content_layout_slot<'a>(
     state: &'a TaskbarContentLayoutState,
     tool: &str,
-) -> Option<&'a Mutex<Option<TaskbarContentLayout>>> {
+) -> Option<&'a Mutex<TaskbarContentLayoutSlot>> {
     match normalize_taskbar_tool(tool)? {
         "claude" => Some(&state.claude),
         "codex" => Some(&state.codex),
@@ -3480,23 +3976,138 @@ fn taskbar_content_layout<R: tauri::Runtime>(
     settings: &Settings,
     tool: &str,
 ) -> Option<TaskbarContentLayout> {
-    let state = manager.try_state::<TaskbarContentLayoutState>()?;
-    let layout = taskbar_content_layout_slot(&state, tool)?
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clone()?;
-    taskbar_content_width_for_mode(&settings.bar_mode, Some(&layout)).map(|_| layout)
+    taskbar_content_layout_snapshot(manager, settings, tool)?.1
 }
 
-fn set_taskbar_content_layout<R: tauri::Runtime>(
+fn taskbar_content_layout_snapshot<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    settings: &Settings,
+    tool: &str,
+) -> Option<(u64, Option<TaskbarContentLayout>)> {
+    let state = manager.try_state::<TaskbarContentLayoutState>()?;
+    let slot = taskbar_content_layout_slot(&state, tool)?
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    Some((
+        slot.revision,
+        slot.layout
+            .as_ref()
+            .filter(|layout| {
+                taskbar_content_width_for_mode(&settings.bar_mode, Some(layout)).is_some()
+            })
+            .cloned(),
+    ))
+}
+
+#[cfg(windows)]
+fn taskbar_content_layout_revision<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     tool: &str,
-    layout: Option<TaskbarContentLayout>,
-) -> Option<TaskbarContentLayout> {
+) -> Option<u64> {
     let state = manager.try_state::<TaskbarContentLayoutState>()?;
-    let slot = taskbar_content_layout_slot(&state, tool)?;
+    let slot = taskbar_content_layout_slot(&state, tool)?
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    Some(slot.revision)
+}
+
+#[cfg(windows)]
+fn validate_taskbar_content_layout_plan(
+    revisions: &[(&str, Option<u64>)],
+    mut current: impl FnMut(&str) -> Option<u64>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        revisions
+            .iter()
+            .all(|(tool, revision)| current(tool) == *revision),
+        "taskbar content changed while layout was being planned"
+    );
+    Ok(())
+}
+
+fn begin_taskbar_content_layout<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    expected_revision: u64,
+    layout: TaskbarContentLayout,
+) -> anyhow::Result<TaskbarContentLayoutWrite> {
+    let state = manager
+        .try_state::<TaskbarContentLayoutState>()
+        .ok_or_else(|| anyhow::anyhow!("taskbar content state is unavailable"))?;
+    let slot = taskbar_content_layout_slot(&state, tool)
+        .ok_or_else(|| anyhow::anyhow!("taskbar content slot is unavailable"))?;
+    begin_taskbar_content_layout_in_slot(slot, expected_revision, layout)
+}
+
+fn acknowledge_taskbar_content_layout<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    expected_revision: u64,
+) -> anyhow::Result<()> {
+    let state = manager
+        .try_state::<TaskbarContentLayoutState>()
+        .ok_or_else(|| anyhow::anyhow!("taskbar content state is unavailable"))?;
+    let slot = taskbar_content_layout_slot(&state, tool)
+        .ok_or_else(|| anyhow::anyhow!("taskbar content slot is unavailable"))?;
+    acknowledge_taskbar_content_layout_in_slot(slot, expected_revision)
+}
+
+fn acknowledge_taskbar_content_layout_in_slot(
+    slot: &Mutex<TaskbarContentLayoutSlot>,
+    expected_revision: u64,
+) -> anyhow::Result<()> {
     let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
-    std::mem::replace(&mut *current, layout)
+    anyhow::ensure!(
+        current.revision == expected_revision,
+        "taskbar content changed while measuring"
+    );
+    current.revision = current.revision.wrapping_add(1);
+    Ok(())
+}
+
+fn begin_taskbar_content_layout_in_slot(
+    slot: &Mutex<TaskbarContentLayoutSlot>,
+    expected_revision: u64,
+    layout: TaskbarContentLayout,
+) -> anyhow::Result<TaskbarContentLayoutWrite> {
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    anyhow::ensure!(
+        current.revision == expected_revision,
+        "taskbar content changed while measuring"
+    );
+    current.revision = current.revision.wrapping_add(1);
+    let previous = current.layout.replace(layout);
+    Ok(TaskbarContentLayoutWrite {
+        revision: current.revision,
+        previous,
+    })
+}
+
+fn rollback_taskbar_content_layout<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    write: TaskbarContentLayoutWrite,
+) {
+    let Some(state) = manager.try_state::<TaskbarContentLayoutState>() else {
+        return;
+    };
+    let Some(slot) = taskbar_content_layout_slot(&state, tool) else {
+        return;
+    };
+    rollback_taskbar_content_layout_in_slot(slot, write);
+}
+
+fn rollback_taskbar_content_layout_in_slot(
+    slot: &Mutex<TaskbarContentLayoutSlot>,
+    write: TaskbarContentLayoutWrite,
+) -> bool {
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    if current.revision != write.revision {
+        return false;
+    }
+    current.revision = current.revision.wrapping_add(1);
+    current.layout = write.previous;
+    true
 }
 
 fn update_taskbar_content_layout_ratio(layout: &mut Option<TaskbarContentLayout>, ratio: f32) {
@@ -3516,10 +4127,30 @@ fn set_taskbar_content_layout_ratio<R: tauri::Runtime>(
     let Some(slot) = taskbar_content_layout_slot(&state, tool) else {
         return;
     };
-    update_taskbar_content_layout_ratio(
-        &mut slot.lock().unwrap_or_else(|err| err.into_inner()),
-        ratio,
-    );
+    set_taskbar_content_layout_ratio_in_slot(slot, ratio);
+}
+
+fn set_taskbar_content_layout_ratio_in_slot(slot: &Mutex<TaskbarContentLayoutSlot>, ratio: f32) {
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    current.revision = current.revision.wrapping_add(1);
+    update_taskbar_content_layout_ratio(&mut current.layout, ratio);
+}
+
+#[cfg(windows)]
+fn set_taskbar_content_layout_ratio_for_generation<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    ratio: f32,
+    expected_generation: u64,
+) -> anyhow::Result<()> {
+    with_taskbar_settings_read(|generation| {
+        anyhow::ensure!(
+            generation == expected_generation,
+            "taskbar settings changed before position publication"
+        );
+        set_taskbar_content_layout_ratio(manager, tool, ratio);
+        Ok(())
+    })
 }
 
 fn sync_taskbar_content_layout_ratios<R: tauri::Runtime>(
@@ -3810,20 +4441,34 @@ fn set_taskbar_bars_paused<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, 
     }
 }
 
+fn taskbar_menu_slot<'a>(
+    state: &'a TaskbarMenuState,
+    tool: &str,
+) -> Option<&'a Mutex<TaskbarMenuSlot>> {
+    match normalize_taskbar_tool(tool)? {
+        "claude" => Some(&state.claude),
+        "codex" => Some(&state.codex),
+        "grok" => Some(&state.grok),
+        "cursor" => Some(&state.cursor),
+        "antigravity" => Some(&state.antigravity),
+        _ => None,
+    }
+}
+
+fn taskbar_menu_layout_snapshot<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+) -> Option<(u64, TaskbarMenuLayout)> {
+    let state = manager.try_state::<TaskbarMenuState>()?;
+    let slot = taskbar_menu_slot(&state, tool)?
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    Some((slot.revision, slot.layout))
+}
+
 fn taskbar_menu_is_open<R: tauri::Runtime>(manager: &impl tauri::Manager<R>, tool: &str) -> bool {
-    manager
-        .try_state::<TaskbarMenuState>()
-        .and_then(|state| {
-            let target = match normalize_taskbar_tool(tool) {
-                Some("claude") => Some(&state.claude),
-                Some("codex") => Some(&state.codex),
-                Some("grok") => Some(&state.grok),
-                Some("cursor") => Some(&state.cursor),
-                Some("antigravity") => Some(&state.antigravity),
-                _ => None,
-            }?;
-            Some(target.lock().unwrap_or_else(|err| err.into_inner()).open)
-        })
+    taskbar_menu_layout_snapshot(manager, tool)
+        .map(|(_, layout)| layout.open)
         .unwrap_or(false)
 }
 
@@ -3844,20 +4489,73 @@ fn set_taskbar_menu_layout<R: tauri::Runtime>(
     let Some(state) = manager.try_state::<TaskbarMenuState>() else {
         return;
     };
-    let target = match normalize_taskbar_tool(tool) {
-        Some("claude") => Some(&state.claude),
-        Some("codex") => Some(&state.codex),
-        Some("grok") => Some(&state.grok),
-        Some("cursor") => Some(&state.cursor),
-        Some("antigravity") => Some(&state.antigravity),
-        _ => None,
-    };
-    if let Some(target) = target {
-        *target.lock().unwrap_or_else(|err| err.into_inner()) = TaskbarMenuLayout {
-            open,
-            ratio: ratio.map(|value| value.clamp(0.0, 1.0)),
-        };
+    if let Some(slot) = taskbar_menu_slot(&state, tool) {
+        set_taskbar_menu_layout_in_slot(slot, open, ratio);
     }
+}
+
+fn set_taskbar_menu_layout_in_slot(
+    slot: &Mutex<TaskbarMenuSlot>,
+    open: bool,
+    ratio: Option<f32>,
+) -> TaskbarMenuWrite {
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    current.revision = current.revision.wrapping_add(1);
+    current.layout = TaskbarMenuLayout {
+        open,
+        ratio: ratio.map(|value| value.clamp(0.0, 1.0)),
+    };
+    TaskbarMenuWrite {
+        revision: current.revision,
+    }
+}
+
+fn set_taskbar_menu_layout_for_generation<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    open: bool,
+    ratio: Option<f32>,
+    expected_generation: u64,
+) -> anyhow::Result<TaskbarMenuWrite> {
+    with_taskbar_settings_read(|generation| {
+        anyhow::ensure!(
+            generation == expected_generation,
+            "taskbar settings changed before menu publication"
+        );
+        let state = manager
+            .try_state::<TaskbarMenuState>()
+            .ok_or_else(|| anyhow::anyhow!("taskbar menu state is unavailable"))?;
+        let slot = taskbar_menu_slot(&state, tool)
+            .ok_or_else(|| anyhow::anyhow!("taskbar menu slot is unavailable"))?;
+        Ok(set_taskbar_menu_layout_in_slot(slot, open, ratio))
+    })
+}
+
+fn close_taskbar_menu_layout_if_current<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    write: TaskbarMenuWrite,
+) -> bool {
+    let Some(state) = manager.try_state::<TaskbarMenuState>() else {
+        return false;
+    };
+    let Some(slot) = taskbar_menu_slot(&state, tool) else {
+        return false;
+    };
+    close_taskbar_menu_layout_in_slot_if_current(slot, write)
+}
+
+fn close_taskbar_menu_layout_in_slot_if_current(
+    slot: &Mutex<TaskbarMenuSlot>,
+    write: TaskbarMenuWrite,
+) -> bool {
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    if current.revision != write.revision {
+        return false;
+    }
+    current.revision = current.revision.wrapping_add(1);
+    current.layout = TaskbarMenuLayout::default();
+    true
 }
 
 fn taskbar_layout_ratio<R: tauri::Runtime>(
@@ -3865,18 +4563,8 @@ fn taskbar_layout_ratio<R: tauri::Runtime>(
     settings: &Settings,
     tool: &str,
 ) -> f32 {
-    let menu_ratio = manager.try_state::<TaskbarMenuState>().and_then(|state| {
-        let target = match normalize_taskbar_tool(tool) {
-            Some("claude") => Some(&state.claude),
-            Some("codex") => Some(&state.codex),
-            Some("grok") => Some(&state.grok),
-            Some("cursor") => Some(&state.cursor),
-            Some("antigravity") => Some(&state.antigravity),
-            _ => None,
-        }?;
-        let layout = *target.lock().unwrap_or_else(|err| err.into_inner());
-        layout.open.then_some(layout.ratio).flatten()
-    });
+    let menu_ratio = taskbar_menu_layout_snapshot(manager, tool)
+        .and_then(|(_, layout)| layout.open.then_some(layout.ratio).flatten());
     menu_ratio
         .or_else(|| taskbar_content_layout(manager, settings, tool).and_then(|layout| layout.ratio))
         .unwrap_or_else(|| taskbar_offset_ratio(settings, tool))
@@ -4074,6 +4762,42 @@ fn taskbar_from_snapshot<'a>(
         .or_else(|| snapshot.taskbars.iter().find(|taskbar| taskbar.primary))
         .or_else(|| snapshot.taskbars.first())
         .ok_or_else(|| anyhow::anyhow!("no shell taskbar windows found"))
+}
+
+#[cfg(windows)]
+fn taskbar_from_snapshot_for_layout<'a>(
+    snapshot: &'a TaskbarDockSnapshot,
+    preferred_key: &str,
+    topology_confirmed: bool,
+) -> anyhow::Result<&'a taskbar::ShellTaskbarWindow> {
+    let taskbar = taskbar_from_snapshot(snapshot, preferred_key)?;
+    // IPC-driven size/menu updates must not bypass the observer's fallback guard.
+    anyhow::ensure!(
+        taskbar_matches_monitor_key(taskbar, preferred_key) || topology_confirmed,
+        "taskbar monitor layout is not stable yet"
+    );
+    Ok(taskbar)
+}
+
+#[cfg(windows)]
+fn taskbar_matches_monitor_key(taskbar: &taskbar::ShellTaskbarWindow, key: &str) -> bool {
+    key.is_empty() || taskbar.key == key || taskbar.device_key == key || taskbar.legacy_key == key
+}
+
+#[cfg(windows)]
+fn with_confirmed_taskbar_fallback(
+    gate: &Mutex<()>,
+    expected: &TaskbarTopology,
+    current: impl FnOnce() -> TaskbarTopology,
+    apply: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    // Publication/invalidation also owns this gate; retain it through native commit.
+    let _profile_guard = try_taskbar_layout_gate(gate)?;
+    anyhow::ensure!(
+        expected.is_valid() && current() == *expected,
+        "taskbar monitor layout changed while layout was being planned"
+    );
+    apply()
 }
 
 #[cfg(windows)]
@@ -4309,7 +5033,7 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
 #[tauri::command]
 async fn get_status(app: tauri::AppHandle) -> Result<Vec<AgentStatus>, String> {
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
-    Ok(collect_representatives_off_thread_with_options(
+    collect_representatives_off_thread_with_options(
         settings,
         false,
         false,
@@ -4317,7 +5041,8 @@ async fn get_status(app: tauri::AppHandle) -> Result<Vec<AgentStatus>, String> {
         false,
         Some(app),
     )
-    .await)
+    .await;
+    current_collection_snapshot().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -4349,13 +5074,13 @@ async fn refresh_status(
     ensure_status_refresh_command(window.label())?;
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
     let activity_settings = settings.clone();
-    let (statuses, collected) = collect_force_refresh_off_thread(settings, Some(app.clone())).await;
+    let (_, collected) = collect_force_refresh_off_thread(settings, Some(app.clone())).await;
     if collected {
-        emit_collection_snapshot(&app, &statuses);
+        emit_collection_snapshot(&app);
     }
     spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
     spawn_cursor_activity_refresh(app, activity_settings, true);
-    Ok(statuses)
+    current_collection_snapshot().map_err(|err| err.to_string())
 }
 
 fn update_error_result() -> update::UpdateCheckResult {
@@ -4651,8 +5376,8 @@ fn open_release_page(window: tauri::Window, url: Option<String>) -> Result<(), S
 }
 
 #[tauri::command]
-async fn get_settings() -> Result<Settings, String> {
-    tauri::async_runtime::spawn_blocking(Settings::try_load)
+async fn get_settings() -> Result<SettingsSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(current_settings_snapshot)
         .await
         .map_err(|err| format!("settings load task failed: {err}"))?
         .map_err(|err| err.to_string())
@@ -4669,38 +5394,106 @@ fn get_system_text_scale(app: tauri::AppHandle) -> text_scale::TextScaleSnapshot
 async fn clear_taskbar_layout_profiles(
     window: tauri::Window,
     app: tauri::AppHandle,
-) -> Result<Settings, String> {
+) -> Result<SettingsSnapshot, String> {
     ensure_panel_command(window.label())?;
     drop(window);
     let pending_app = app.clone();
-    let settings = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let _profile_guard = TASKBAR_PROFILE_GATE
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let snapshot = update_taskbar_settings(|current| {
+        update_taskbar_settings(|current| {
             current.taskbar_layout_profiles.clear();
             current.taskbar_layout_memory_initialized = true;
         })?;
         clear_all_pending_taskbar_profile_placements(&pending_app);
-        Ok::<_, anyhow::Error>(snapshot.settings)
+        Ok::<_, anyhow::Error>(())
     })
     .await
     .map_err(|err| format!("taskbar layout reset task failed: {err}"))?
     .map_err(|err| err.to_string())?;
-    let _ = app.emit("settings-updated", &settings);
-    Ok(settings)
+    publish_current_settings(&app).map_err(|err| err.to_string())
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SettingsSnapshot {
+    #[serde(flatten)]
+    settings: Settings,
+    settings_revision: String,
+}
+
+#[derive(Default)]
+struct SettingsPublicationState {
+    revision: u64,
+    generation: u64,
+    settings: Option<Settings>,
+}
+
+static SETTINGS_PUBLICATION_STATE: Mutex<SettingsPublicationState> =
+    Mutex::new(SettingsPublicationState {
+        revision: 0,
+        generation: 0,
+        settings: None,
+    });
+
+fn settings_snapshot_in_state(
+    state: &mut SettingsPublicationState,
+    settings: Settings,
+    generation: u64,
+) -> anyhow::Result<SettingsSnapshot> {
+    if state.generation != generation || state.settings.as_ref() != Some(&settings) {
+        let revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("settings publication revision exhausted"))?;
+        state.revision = revision;
+        state.generation = generation;
+        state.settings = Some(settings.clone());
+    }
+    Ok(SettingsSnapshot {
+        settings,
+        settings_revision: state.revision.to_string(),
+    })
+}
+
+fn with_current_settings_snapshot<T>(
+    reader: impl FnOnce(&SettingsSnapshot) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    with_taskbar_settings_read(|generation| {
+        let settings = Settings::try_load()?;
+        let snapshot = settings_snapshot_in_state(
+            &mut SETTINGS_PUBLICATION_STATE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()),
+            settings,
+            generation,
+        )?;
+        // Keep the settings gate through publication, not through awaited side effects.
+        reader(&snapshot)
+    })
+}
+
+fn current_settings_snapshot() -> anyhow::Result<SettingsSnapshot> {
+    with_current_settings_snapshot(|snapshot| Ok(snapshot.clone()))
+}
+
+fn publish_current_settings(app: &tauri::AppHandle) -> anyhow::Result<SettingsSnapshot> {
+    with_current_settings_snapshot(|snapshot| {
+        let _ = app.emit("settings-updated", snapshot);
+        Ok(snapshot.clone())
+    })
 }
 
 #[derive(serde::Serialize)]
 struct SaveSettingsResult {
-    settings: Settings,
+    settings: SettingsSnapshot,
     taskbar_applied: bool,
     autostart_applied: bool,
     warnings: Vec<String>,
 }
 
 fn settings_apply_report(
-    settings: Settings,
+    settings: SettingsSnapshot,
     taskbar_result: Result<(), String>,
     autostart_result: Result<(), String>,
 ) -> SaveSettingsResult {
@@ -4996,27 +5789,6 @@ async fn save_settings(
     let mut requested = merge_settings_edits(&baseline, edit_baseline.as_ref(), &edit_request)
         .map_err(|err| err.to_string())?;
     let previous_language = baseline.language.clone();
-    let previous_show_claude = baseline.show_claude;
-    let previous_show_codex = baseline.show_codex;
-    let previous_show_grok = baseline.show_grok;
-    let claude_collection_transition =
-        (baseline.show_claude != requested.show_claude).then_some(requested.show_claude);
-    let claude_enabled_now = !baseline.show_claude && requested.show_claude;
-    let codex_enabled_now = !baseline.show_codex && requested.show_codex;
-    let grok_enabled_now = !baseline.show_grok && requested.show_grok;
-    let cursor_enabled_now = !baseline.show_cursor && requested.show_cursor;
-    let antigravity_enabled_now = !baseline.show_antigravity && requested.show_antigravity;
-    let cursor_activity_range_changed = baseline.show_cursor
-        && requested.show_cursor
-        && baseline.activity_weeks != requested.activity_weeks;
-    let tool_collection_changed = baseline.show_claude != requested.show_claude
-        || baseline.show_codex != requested.show_codex
-        || baseline.show_grok != requested.show_grok
-        || baseline.show_cursor != requested.show_cursor
-        || baseline.show_antigravity != requested.show_antigravity;
-    if let Some(enabled) = claude_collection_transition {
-        reconcile_claude_statusline_off_thread(enabled).await?;
-    }
     let drag_was_active = taskbar_drag_active(&app);
     preserve_taskbar_targets(&baseline, &mut requested);
     #[cfg(windows)]
@@ -5066,46 +5838,62 @@ async fn save_settings(
             }
             Ok(())
         })?;
-        Ok::<_, anyhow::Error>((snapshot.settings, autostart_changed, snapshot.generation))
+        Ok::<_, anyhow::Error>((snapshot, autostart_changed))
     })
     .await;
     let save_result = match save_result {
         Ok(result) => result.map_err(|err| err.to_string()),
         Err(err) => Err(format!("settings save task failed: {err}")),
     };
-    let (settings, autostart_changed, generation) = match save_result {
-        Ok(saved) => saved,
-        Err(save_error) => {
-            if claude_collection_transition.is_some() {
-                if let Err(rollback_error) =
-                    reconcile_claude_statusline_off_thread(previous_show_claude).await
-                {
-                    return Err(format!(
-                        "{save_error}; Claude collection rollback failed: {rollback_error}"
-                    ));
-                }
-            }
-            return Err(save_error);
-        }
-    };
+    let (snapshot, autostart_changed) = save_result?;
+    let TaskbarSettingsSnapshot {
+        settings,
+        generation,
+        collection_changes,
+        ..
+    } = snapshot;
+    let claude_enabled_now = collection_changes.enabled_now(&Tool::Claude);
+    let codex_enabled_now = collection_changes.enabled_now(&Tool::Codex);
+    let grok_enabled_now = collection_changes.enabled_now(&Tool::Grok);
+    let cursor_enabled_now = collection_changes.enabled_now(&Tool::Cursor);
+    let antigravity_enabled_now = collection_changes.enabled_now(&Tool::Antigravity);
     if previous_language != settings.language {
         if let Err(error) = refresh_tray_menu(&app, &settings.language) {
             eprintln!("[tray] menu language update failed: {error}");
         }
     }
-    if previous_show_codex != settings.show_codex {
-        if let Err(error) = collector::set_codex_app_server_enabled(settings.show_codex) {
+    if collection_changes.transition(&Tool::Codex).is_some() {
+        if let Err(error) = reconcile_broker_policy_off_thread(Tool::Codex).await {
             eprintln!("[codex] app-server broker state update failed: {error}");
         }
     }
-    if previous_show_grok != settings.show_grok {
-        if let Err(error) = collector::set_grok_acp_enabled(settings.show_grok) {
+    if collection_changes.transition(&Tool::Grok).is_some() {
+        if let Err(error) = reconcile_broker_policy_off_thread(Tool::Grok).await {
             eprintln!("[grok] ACP broker state update failed: {error}");
         }
     }
-    antigravity::set_enabled(settings.show_antigravity);
+    if collection_changes.transition(&Tool::Antigravity).is_some()
+        && reconcile_antigravity_cli_off_thread().await.is_err()
+    {
+        eprintln!(
+            "[antigravity] CLI connection reconciliation failed; GUI collection remains available"
+        );
+    }
+    if recover_pending_collection_policies_off_thread()
+        .await
+        .is_err()
+    {
+        eprintln!("[collector] pending collection policy recovery failed");
+    }
     if !taskbar_drag_active(&app) {
-        sync_taskbar_content_layout_ratios(&app, &settings);
+        let _ = with_taskbar_settings_read(|current_generation| {
+            anyhow::ensure!(
+                current_generation == generation,
+                "taskbar settings changed before ratio synchronization"
+            );
+            sync_taskbar_content_layout_ratios(&app, &settings);
+            Ok(())
+        });
     }
     let taskbar_result = if taskbar_drag_active(&app) {
         Ok(())
@@ -5127,10 +5915,8 @@ async fn save_settings(
     } else {
         Ok(())
     };
-    let _ = app.emit("settings-updated", &settings);
-    if tool_collection_changed {
-        let visible = filter_enabled_statuses(combined_collection_last_result(), &settings);
-        emit_collection_snapshot(&app, &visible);
+    if collection_changes.any() {
+        emit_collection_snapshot(&app);
         if claude_enabled_now
             || codex_enabled_now
             || grok_enabled_now
@@ -5142,7 +5928,7 @@ async fn save_settings(
             tauri::async_runtime::spawn(async move {
                 let force_claude =
                     claude_enabled_now && refresh_settings.claude_account_auto_collect_on;
-                let statuses = collect_representatives_off_thread_with_options(
+                let _ = collect_representatives_off_thread_with_options(
                     refresh_settings,
                     codex_enabled_now,
                     force_claude,
@@ -5151,7 +5937,7 @@ async fn save_settings(
                     Some(refresh_app.clone()),
                 )
                 .await;
-                emit_collection_snapshot(&refresh_app, &statuses);
+                emit_collection_snapshot(&refresh_app);
             });
             if claude_enabled_now || codex_enabled_now || grok_enabled_now {
                 spawn_activity_refresh(app.clone(), settings.clone(), codex_enabled_now);
@@ -5161,10 +5947,11 @@ async fn save_settings(
             }
         }
     }
-    if cursor_activity_range_changed {
+    if collection_changes.cursor_activity_range_changed {
         spawn_cursor_activity_refresh(app.clone(), settings.clone(), false);
     }
-    let report = settings_apply_report(settings, taskbar_result, autostart_result);
+    let published = publish_current_settings(&app).map_err(|err| err.to_string())?;
+    let report = settings_apply_report(published, taskbar_result, autostart_result);
     retry_settings_side_effects(app, !report.taskbar_applied, !report.autostart_applied);
     Ok(report)
 }
@@ -5221,11 +6008,12 @@ fn move_taskbar_bar(
     grab_offset_x: i32,
     persist: bool,
 ) -> Result<Settings, String> {
-    let mut settings = Settings::try_load().map_err(|err| err.to_string())?;
     ensure_matching_bar_command(window.label(), &tool)?;
 
     #[cfg(windows)]
     {
+        let (mut settings, mut settings_generation) =
+            load_settings_with_generation().map_err(|err| err.to_string())?;
         let tool =
             normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
         let width = taskbar_dock_width_for_manager(&app, &settings, tool)
@@ -5245,16 +6033,18 @@ fn move_taskbar_bar(
         .ok_or_else(|| "invalid shell taskbar rectangle".to_string())?;
         position_taskbar_bar_on_taskbar(&app, tool, rect).map_err(|err| err.to_string())?;
         if persist {
-            settings = update_taskbar_settings(|current| {
+            let snapshot = update_taskbar_settings(|current| {
                 set_taskbar_target(current, tool, &taskbar.key, ratio);
             })
-            .map(|snapshot| snapshot.settings)
             .map_err(|err| err.to_string())?;
-            let _ = app.emit("settings-updated", &settings);
+            settings = snapshot.settings;
+            settings_generation = snapshot.generation;
+            let _ = publish_current_settings(&app);
         } else {
             set_taskbar_target(&mut settings, tool, &taskbar.key, ratio);
         }
-        set_taskbar_content_layout_ratio(&app, tool, ratio);
+        set_taskbar_content_layout_ratio_for_generation(&app, tool, ratio, settings_generation)
+            .map_err(|err| err.to_string())?;
         Ok(settings)
     }
 
@@ -5403,6 +6193,9 @@ async fn set_taskbar_content_width(
     let tool = normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
     let (settings, settings_generation) =
         load_settings_with_generation().map_err(|err| err.to_string())?;
+    if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != settings_generation {
+        return Err("taskbar settings changed before content layout update".into());
+    }
     if mode.as_ref().is_some_and(|mode| mode != &settings.bar_mode) {
         return Err("taskbar mode changed while measuring".into());
     }
@@ -5418,7 +6211,8 @@ async fn set_taskbar_content_width(
     #[cfg(not(windows))]
     let target_scale = 1.0;
     let width = taskbar_measured_logical_length(width, device_pixel_ratio, target_scale)?;
-    let previous = taskbar_content_layout(&app, &settings, tool);
+    let (layout_revision, previous) = taskbar_content_layout_snapshot(&app, &settings, tool)
+        .ok_or_else(|| "taskbar content snapshot is unavailable".to_string())?;
     let layout_matches = previous
         .as_ref()
         .is_some_and(|layout| layout.mode == settings.bar_mode && layout.width == width);
@@ -5445,7 +6239,11 @@ async fn set_taskbar_content_width(
         TaskbarContentWidthDecision::RetryAfterTarget => {
             return Err("taskbar target is not initialized".into())
         }
-        TaskbarContentWidthDecision::AlreadyApplied => return Ok(false),
+        TaskbarContentWidthDecision::AlreadyApplied => {
+            acknowledge_taskbar_content_layout(&app, tool, layout_revision)
+                .map_err(|err| err.to_string())?;
+            return Ok(false);
+        }
         TaskbarContentWidthDecision::Apply => {}
     }
 
@@ -5485,9 +6283,10 @@ async fn set_taskbar_content_width(
         width,
         ratio,
     };
-    set_taskbar_content_layout(&app, tool, Some(next));
+    let write = begin_taskbar_content_layout(&app, tool, layout_revision, next)
+        .map_err(|err| err.to_string())?;
     if let Err(err) = apply_taskbar_dock_for_generation(&app, &settings, settings_generation) {
-        set_taskbar_content_layout(&app, tool, previous);
+        rollback_taskbar_content_layout(&app, tool, write);
         return Err(err.to_string());
     }
     Ok(true)
@@ -5570,9 +6369,11 @@ async fn set_taskbar_menu_open(
     if open && menu_ratio.is_none() {
         return Err("taskbar menu geometry is unavailable".into());
     }
-    set_taskbar_menu_layout(&app, &tool, open, menu_ratio);
+    let write =
+        set_taskbar_menu_layout_for_generation(&app, &tool, open, menu_ratio, settings_generation)
+            .map_err(|err| err.to_string())?;
     if let Err(err) = apply_taskbar_dock_for_generation(&app, &settings, settings_generation) {
-        set_taskbar_menu_state(&app, &tool, false);
+        close_taskbar_menu_layout_if_current(&app, &tool, write);
         return Err(err.to_string());
     }
     Ok(())
@@ -5633,14 +6434,27 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         },
     }
 
+    let content_revisions = TASKBAR_TOOLS
+        .iter()
+        .map(|tool| (*tool, taskbar_content_layout_revision(manager, tool)))
+        .collect::<Vec<_>>();
     let taskbar_paused = taskbar_bars_paused(manager);
+    let topology_confirmed =
+        stable_taskbar_topology_matches(manager, &taskbar_profile_topology_keys(snapshot));
     let mut actions = Vec::with_capacity(TASKBAR_TOOLS.len());
+    let mut menu_cleanup = Vec::new();
+    let mut queue_menu_cleanup = |tool| {
+        if let Some((revision, _)) = taskbar_menu_layout_snapshot(manager, tool) {
+            menu_cleanup.push((tool, TaskbarMenuWrite { revision }));
+        }
+    };
+    let mut requires_confirmed_topology = false;
     for tool in TASKBAR_TOOLS {
         let window_handle = taskbar_window_handle(manager, tool);
         let width = match taskbar_dock_width_for_manager(manager, settings, tool) {
             Some(width) => taskbar_width_with_menu(width, taskbar_menu_is_open(manager, tool)),
             None => {
-                set_taskbar_menu_state(manager, tool, false);
+                queue_menu_cleanup(tool);
                 if let Some(handle) = window_handle {
                     actions.push(Action::Hide(tool, handle));
                 }
@@ -5648,13 +6462,17 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
             }
         };
         if !taskbar_target_initialized(settings, tool) {
-            set_taskbar_menu_state(manager, tool, false);
+            queue_menu_cleanup(tool);
             if let Some(handle) = window_handle {
                 actions.push(Action::Hide(tool, handle));
             }
             continue;
         }
-        let taskbar = taskbar_from_snapshot(snapshot, taskbar_monitor_key(settings, tool))?;
+        let taskbar = taskbar_from_snapshot_for_layout(
+            snapshot,
+            taskbar_monitor_key(settings, tool),
+            topology_confirmed,
+        )?;
         let width = taskbar_physical_length_for_window(width, taskbar.hwnd);
         let (fullscreen_active, maximized_active) = snapshot
             .monitor_states
@@ -5668,7 +6486,7 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
             maximized_active,
             taskbar_paused,
         ) {
-            set_taskbar_menu_state(manager, tool, false);
+            queue_menu_cleanup(tool);
             if let Some(handle) = window_handle {
                 actions.push(Action::Hide(tool, handle));
             }
@@ -5694,6 +6512,8 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         .ok_or_else(|| anyhow::anyhow!("invalid shell taskbar rectangle"))?;
         let handle =
             window_handle.ok_or_else(|| anyhow::anyhow!("no taskbar bar window for {tool}"))?;
+        requires_confirmed_topology |=
+            !taskbar_matches_monitor_key(taskbar, taskbar_monitor_key(settings, tool));
         actions.push(Action::Position {
             tool,
             handle,
@@ -5751,27 +6571,45 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
     }
 
     let _layout_guard = try_taskbar_layout_gate(&TASKBAR_LAYOUT_GATE)?;
-    if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != expected_generation {
-        anyhow::bail!("taskbar settings changed while layout was being planned");
+    let commit = || {
+        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != expected_generation {
+            anyhow::bail!("taskbar settings changed while layout was being planned");
+        }
+        validate_taskbar_content_layout_plan(&content_revisions, |tool| {
+            taskbar_content_layout_revision(manager, tool)
+        })?;
+        for action in actions {
+            let (tool, handle) = match action {
+                Action::Hide(tool, handle) => (tool, handle),
+                Action::Position { tool, handle, .. } => (tool, handle),
+            };
+            if taskbar_window_handle(manager, tool) != Some(handle) {
+                anyhow::bail!("taskbar window changed while layout was being planned");
+            }
+            let hwnd = windows::Win32::Foundation::HWND(handle.raw as *mut core::ffi::c_void);
+            if !taskbar::window_is_valid(hwnd) {
+                anyhow::bail!("taskbar window was destroyed while layout was being planned");
+            }
+            match action {
+                Action::Hide(_, _) => taskbar::hide_window(hwnd)?,
+                Action::Position { rect, .. } => apply_taskbar_overlay(hwnd, rect)?,
+            }
+        }
+        for (tool, write) in menu_cleanup {
+            close_taskbar_menu_layout_if_current(manager, tool, write);
+        }
+        Ok(())
+    };
+    if requires_confirmed_topology {
+        with_confirmed_taskbar_fallback(
+            &TASKBAR_PROFILE_GATE,
+            &taskbar_profile_topology_keys(snapshot),
+            || stable_taskbar_topology(manager),
+            commit,
+        )
+    } else {
+        commit()
     }
-    for action in actions {
-        let (tool, handle) = match action {
-            Action::Hide(tool, handle) => (tool, handle),
-            Action::Position { tool, handle, .. } => (tool, handle),
-        };
-        if taskbar_window_handle(manager, tool) != Some(handle) {
-            anyhow::bail!("taskbar window changed while layout was being planned");
-        }
-        let hwnd = windows::Win32::Foundation::HWND(handle.raw as *mut core::ffi::c_void);
-        if !taskbar::window_is_valid(hwnd) {
-            anyhow::bail!("taskbar window was destroyed while layout was being planned");
-        }
-        match action {
-            Action::Hide(_, _) => taskbar::hide_window(hwnd)?,
-            Action::Position { rect, .. } => apply_taskbar_overlay(hwnd, rect)?,
-        }
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -5950,8 +6788,13 @@ fn save_taskbar_drag_target(
         }
     }
     drop(_profile_guard);
-    set_taskbar_content_layout_ratio(app, tool, taskbar_offset_ratio(&settings, tool));
-    let _ = app.emit("settings-updated", &settings);
+    set_taskbar_content_layout_ratio_for_generation(
+        app,
+        tool,
+        taskbar_offset_ratio(&settings, tool),
+        settings_generation,
+    )?;
+    let _ = publish_current_settings(app);
     apply_taskbar_dock_for_generation(app, &settings, settings_generation)?;
     Ok(())
 }
@@ -6495,8 +7338,11 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                                 settings_valid = true;
                                 profile_ratio_sync_pending = false;
                                 if settings_event_pending {
-                                    let _ = app.emit("settings-updated", &settings);
-                                    settings_event_pending = false;
+                                    settings_event_pending =
+                                        publish_current_settings(&app).is_err();
+                                    if settings_event_pending {
+                                        settings_valid = false;
+                                    }
                                 }
                                 topology_stability.rearm();
                             }
@@ -6542,6 +7388,19 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                             continue;
                         }
                     };
+                    let profile_topology = taskbar_profile_topology_keys(&snapshot);
+                    if !stable_taskbar_topology_matches(&app, &profile_topology) {
+                        let _profile_guard = TASKBAR_PROFILE_GATE
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner());
+                        let _ = set_stable_taskbar_topology(&app, &TaskbarTopology::default());
+                    }
+                    let settled_topology = topology_stability.observe(profile_topology.clone());
+                    if !topology_stability.allows_native_layout(&profile_topology) {
+                        last_signature = None;
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
                     let topology_signature = taskbar_topology_signature(&snapshot);
                     if last_topology_signature.as_ref() != Some(&topology_signature) {
                         emit_taskbar_topology(&app, &settings, &snapshot);
@@ -6560,14 +7419,7 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                             eprintln!("[taskbar] monitor key migration failed: {err}");
                         }
                     }
-                    let profile_topology = taskbar_profile_topology_keys(&snapshot);
-                    if !stable_taskbar_topology_matches(&app, &profile_topology) {
-                        let _profile_guard = TASKBAR_PROFILE_GATE
-                            .lock()
-                            .unwrap_or_else(|err| err.into_inner());
-                        let _ = set_stable_taskbar_topology(&app, &TaskbarTopology::default());
-                    }
-                    if let Some(stable_topology) = topology_stability.observe(profile_topology) {
+                    if let Some(stable_topology) = settled_topology {
                         let _profile_guard = TASKBAR_PROFILE_GATE
                             .lock()
                             .unwrap_or_else(|err| err.into_inner());
@@ -6658,7 +7510,7 @@ fn statusline_bridge_path() -> Result<String, String> {
         })
 }
 
-fn reconcile_claude_statusline_for_release(enabled: bool) -> Result<(), String> {
+fn apply_claude_statusline_for_release(enabled: bool) -> Result<(), String> {
     if cfg!(debug_assertions) {
         return Ok(());
     }
@@ -6672,16 +7524,216 @@ fn reconcile_claude_statusline_for_release(enabled: bool) -> Result<(), String> 
     }
 }
 
-async fn reconcile_claude_statusline_off_thread(enabled: bool) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || reconcile_claude_statusline_for_release(enabled))
+fn reconcile_claude_statusline_for_release() -> Result<(), String> {
+    reconcile_current_collection_policy(
+        &Tool::Claude,
+        Settings::try_load,
+        |enabled| apply_claude_statusline_for_release(enabled).map_err(anyhow::Error::msg),
+        |failed| {
+            COLLECTION_POLICY_RECOVERY
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .record(&Tool::Claude, failed, std::time::Instant::now());
+        },
+    )
+    .map_err(|err| err.to_string())
+}
+
+async fn reconcile_claude_statusline_off_thread() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(reconcile_claude_statusline_for_release)
         .await
         .map_err(|err| format!("Claude collection task failed: {err}"))?
 }
 
-fn spawn_claude_statusline_reconcile(enabled: bool) {
+fn spawn_claude_statusline_reconcile() {
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = reconcile_claude_statusline_off_thread(enabled).await {
+        if let Err(err) = reconcile_claude_statusline_off_thread().await {
             eprintln!("[statusline] startup reconcile failed: {err}");
+        }
+    });
+}
+
+fn reconcile_current_collection_policy(
+    tool: &Tool,
+    load_settings: impl FnOnce() -> anyhow::Result<Settings>,
+    reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
+    publish_failure: impl FnOnce(bool),
+) -> anyhow::Result<()> {
+    with_taskbar_settings_read(|_| {
+        // Keep the current setting, binding change and health publication in one order.
+        let result = apply_collection_policy_from_settings(tool, load_settings(), reconcile);
+        publish_failure(result.is_err());
+        result
+    })
+}
+
+fn apply_collection_policy_from_settings(
+    tool: &Tool,
+    settings: anyhow::Result<Settings>,
+    reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match settings {
+        Ok(settings) => reconcile(CollectionPolicy::from_settings(&settings).enabled(tool)),
+        Err(error) if matches!(tool, Tool::Codex | Tool::Grok) => match reconcile(false) {
+            Ok(()) => Err(error),
+            Err(disable_error) => Err(disable_error.context("could not disable collection policy")),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+fn reconcile_current_antigravity_cli(
+    load_settings: impl FnOnce() -> anyhow::Result<Settings>,
+    reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
+    publish_failure: impl FnOnce(bool),
+) -> anyhow::Result<()> {
+    reconcile_current_collection_policy(
+        &Tool::Antigravity,
+        load_settings,
+        reconcile,
+        publish_failure,
+    )
+}
+
+fn reconcile_broker_policy_for(tool: &Tool) -> anyhow::Result<()> {
+    reconcile_current_collection_policy(
+        tool,
+        Settings::try_load,
+        |enabled| match tool {
+            Tool::Codex => collector::set_codex_app_server_enabled(enabled),
+            Tool::Grok => collector::set_grok_acp_enabled(enabled),
+            _ => anyhow::bail!("unsupported collection broker"),
+        },
+        |failed| {
+            COLLECTION_POLICY_RECOVERY
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .record(tool, failed, std::time::Instant::now());
+        },
+    )
+}
+
+fn recover_pending_collection_policies_with(
+    state: &Mutex<CollectionPolicyRecovery>,
+    clock: impl Fn() -> std::time::Instant,
+    mut load_settings: impl FnMut() -> anyhow::Result<Settings>,
+    mut reconcile: impl FnMut(&Tool, bool) -> anyhow::Result<()>,
+    mut publish_failure: impl FnMut(&Tool, bool),
+) -> anyhow::Result<()> {
+    let due = {
+        let state = state.lock().unwrap_or_else(|err| err.into_inner());
+        state.any_due(clock())
+    };
+    if !due {
+        return Ok(());
+    }
+    with_taskbar_settings_read(|_| {
+        let mut last_error = None;
+        for tool in [&Tool::Claude, &Tool::Codex, &Tool::Grok, &Tool::Antigravity] {
+            // Recheck after acquiring the gate: a newer direct apply may have repaired it.
+            if !state
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .due(tool, clock())
+            {
+                continue;
+            }
+            let result = apply_collection_policy_from_settings(tool, load_settings(), |enabled| {
+                reconcile(tool, enabled)
+            });
+            state.lock().unwrap_or_else(|err| err.into_inner()).record(
+                tool,
+                result.is_err(),
+                clock(),
+            );
+            publish_failure(tool, result.is_err());
+            if let Err(error) = result {
+                last_error = Some(error);
+            }
+        }
+        match last_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    })
+}
+
+fn recover_pending_collection_policies() -> anyhow::Result<()> {
+    recover_pending_collection_policies_with(
+        &COLLECTION_POLICY_RECOVERY,
+        std::time::Instant::now,
+        Settings::try_load,
+        |tool, enabled| match tool {
+            Tool::Claude => {
+                apply_claude_statusline_for_release(enabled).map_err(anyhow::Error::msg)
+            }
+            Tool::Codex => collector::set_codex_app_server_enabled(enabled),
+            Tool::Grok => collector::set_grok_acp_enabled(enabled),
+            Tool::Antigravity => apply_antigravity_cli_policy_for_release(enabled),
+            _ => anyhow::bail!("unsupported collection broker"),
+        },
+        |tool, failed| {
+            if *tool == Tool::Antigravity {
+                antigravity_cli::set_connection_failed(failed);
+            }
+        },
+    )
+}
+
+async fn recover_pending_collection_policies_off_thread() -> anyhow::Result<()> {
+    let due = COLLECTION_POLICY_RECOVERY
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .any_due(std::time::Instant::now());
+    if !due {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(recover_pending_collection_policies)
+        .await
+        .map_err(|_| anyhow::anyhow!("collection policy recovery task failed"))?
+}
+
+async fn reconcile_broker_policy_off_thread(tool: Tool) -> anyhow::Result<()> {
+    tauri::async_runtime::spawn_blocking(move || reconcile_broker_policy_for(&tool))
+        .await
+        .map_err(|_| anyhow::anyhow!("collection policy task failed"))?
+}
+
+fn apply_antigravity_cli_policy_for_release(enabled: bool) -> anyhow::Result<()> {
+    antigravity::set_enabled(enabled);
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let bridge = statusline_bridge_path()
+        .map_err(|_| anyhow::anyhow!("Antigravity CLI bridge path unavailable"))?;
+    antigravity_cli::binding::reconcile(enabled, std::path::Path::new(&bridge))
+}
+
+fn reconcile_antigravity_cli_for_release() -> Result<(), String> {
+    reconcile_current_antigravity_cli(
+        Settings::try_load,
+        apply_antigravity_cli_policy_for_release,
+        |failed| {
+            COLLECTION_POLICY_RECOVERY
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .record(&Tool::Antigravity, failed, std::time::Instant::now());
+            antigravity_cli::set_connection_failed(failed);
+        },
+    )
+    .map_err(|_| "Antigravity CLI connection could not be updated".to_string())
+}
+
+async fn reconcile_antigravity_cli_off_thread() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(reconcile_antigravity_cli_for_release)
+        .await
+        .map_err(|_| "Antigravity CLI connection task failed".to_string())?
+}
+
+fn spawn_antigravity_cli_reconcile() {
+    tauri::async_runtime::spawn(async move {
+        if reconcile_antigravity_cli_off_thread().await.is_err() {
+            eprintln!("[antigravity] CLI connection reconciliation failed");
         }
     });
 }
@@ -6820,11 +7872,7 @@ pub fn run() {
                     None
                 }
             };
-            if let Err(error) = collector::set_codex_app_server_enabled(
-                settings
-                    .as_ref()
-                    .is_some_and(|settings| settings.show_codex),
-            ) {
+            if let Err(error) = reconcile_broker_policy_for(&Tool::Codex) {
                 eprintln!("[codex] app-server broker startup failed: {error}");
             }
             antigravity::set_enabled(
@@ -6832,9 +7880,7 @@ pub fn run() {
                     .as_ref()
                     .is_some_and(|settings| settings.show_antigravity),
             );
-            if let Err(error) = collector::set_grok_acp_enabled(
-                settings.as_ref().is_some_and(|settings| settings.show_grok),
-            ) {
+            if let Err(error) = reconcile_broker_policy_for(&Tool::Grok) {
                 eprintln!("[grok] ACP broker startup failed: {error}");
             }
             if let Some(settings) = settings.as_ref() {
@@ -6854,8 +7900,10 @@ pub fn run() {
                     }
                 };
                 retry_settings_side_effects(app.handle().clone(), taskbar_retry, autostart_retry);
-                spawn_claude_statusline_reconcile(settings.show_claude);
             }
+            // Current-policy workers record a retry even if the first read failed.
+            spawn_claude_statusline_reconcile();
+            spawn_antigravity_cli_reconcile();
             let (system_activity, system_activity_shutdown) =
                 system_activity::SystemActivityMonitor::start();
             app.manage(system_activity_shutdown);
@@ -7915,6 +8963,389 @@ mod tests {
         assert_eq!(stability.observe(office.clone()), Some(office));
     }
 
+    #[cfg(windows)]
+    fn g3207_taskbar_snapshot() -> super::TaskbarDockSnapshot {
+        use crate::taskbar::{DockRect, ShellTaskbarWindow};
+        use windows::Win32::Foundation::HWND;
+
+        super::TaskbarDockSnapshot {
+            taskbars: vec![
+                ShellTaskbarWindow {
+                    hwnd: HWND(std::ptr::dangling_mut::<core::ffi::c_void>()),
+                    dpi: 96,
+                    left: 0,
+                    top: 1392,
+                    right: 3440,
+                    bottom: 1440,
+                    monitor: DockRect {
+                        x: 0,
+                        y: 0,
+                        width: 3440,
+                        height: 1440,
+                    },
+                    key: "monitor-path:primary".into(),
+                    device_key: "device:primary".into(),
+                    legacy_key: "monitor:0,0,3440,1440".into(),
+                    primary: true,
+                },
+                ShellTaskbarWindow {
+                    hwnd: HWND(2usize as *mut core::ffi::c_void),
+                    dpi: 144,
+                    left: 3440,
+                    top: 1392,
+                    right: 6000,
+                    bottom: 1440,
+                    monitor: DockRect {
+                        x: 3440,
+                        y: 0,
+                        width: 2560,
+                        height: 1440,
+                    },
+                    key: "monitor-path:secondary".into(),
+                    device_key: "device:secondary".into(),
+                    legacy_key: "monitor:3440,0,2560,1440".into(),
+                    primary: false,
+                },
+            ],
+            monitor_states: Default::default(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn g3207_observe_native_targets(
+        observer: &mut super::TaskbarTopologyStability,
+        snapshot: &super::TaskbarDockSnapshot,
+        settings: &Settings,
+        targets: &mut Vec<String>,
+    ) {
+        let topology = super::taskbar_profile_topology_keys(snapshot);
+        observer.observe(topology.clone());
+        if observer.allows_native_layout(&topology) {
+            *targets = super::TASKBAR_TOOLS
+                .into_iter()
+                .map(|tool| {
+                    super::taskbar_from_snapshot(
+                        snapshot,
+                        super::taskbar_monitor_key(settings, tool),
+                    )
+                    .unwrap()
+                    .key
+                    .clone()
+                })
+                .collect();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_partial_snapshot_never_relocates_five_bars_or_changes_saved_keys() {
+        for missing_samples in [1, 2] {
+            let complete = g3207_taskbar_snapshot();
+            let mut partial = g3207_taskbar_snapshot();
+            partial.taskbars.pop();
+            let mut settings = Settings {
+                taskbar_layout_memory_on: false,
+                ..Settings::default()
+            };
+            for tool in super::TASKBAR_TOOLS {
+                super::set_taskbar_target(&mut settings, tool, "monitor-path:secondary", 0.5);
+            }
+            let saved = serde_json::to_value(&settings).unwrap();
+            let mut observer = super::TaskbarTopologyStability::default();
+            let mut targets = Vec::new();
+            for _ in 0..3 {
+                g3207_observe_native_targets(&mut observer, &complete, &settings, &mut targets);
+            }
+            let original = vec!["monitor-path:secondary".to_string(); 5];
+            assert_eq!(targets, original);
+            // The raw selector really falls back; the observation must not reach native apply.
+            assert_eq!(
+                super::taskbar_from_snapshot(&partial, "monitor-path:secondary")
+                    .unwrap()
+                    .key,
+                "monitor-path:primary"
+            );
+            for _ in 0..missing_samples {
+                g3207_observe_native_targets(&mut observer, &partial, &settings, &mut targets);
+                assert_eq!(
+                    targets, original,
+                    "unconfirmed partial snapshot moved every bar"
+                );
+            }
+            for _ in 0..3 {
+                g3207_observe_native_targets(&mut observer, &complete, &settings, &mut targets);
+                assert_eq!(targets, original);
+            }
+            assert_eq!(serde_json::to_value(&settings).unwrap(), saved);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_temporary_monitor_path_lookup_failure_keeps_native_targets() {
+        let complete = g3207_taskbar_snapshot();
+        let mut aliases = g3207_taskbar_snapshot();
+        for taskbar in &mut aliases.taskbars {
+            taskbar.key = taskbar.device_key.clone();
+        }
+        let mut settings = Settings::default();
+        for tool in super::TASKBAR_TOOLS {
+            super::set_taskbar_target(&mut settings, tool, "monitor-path:secondary", 0.5);
+        }
+        let mut observer = super::TaskbarTopologyStability::default();
+        let mut targets = Vec::new();
+        for _ in 0..3 {
+            g3207_observe_native_targets(&mut observer, &complete, &settings, &mut targets);
+        }
+        let original = targets.clone();
+        for _ in 0..2 {
+            g3207_observe_native_targets(&mut observer, &aliases, &settings, &mut targets);
+            assert_eq!(targets, original, "temporary key fallback moved every bar");
+        }
+        for _ in 0..3 {
+            g3207_observe_native_targets(&mut observer, &complete, &settings, &mut targets);
+            assert_eq!(targets, original);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_confirmed_monitor_disconnect_retains_primary_fallback() {
+        let complete = g3207_taskbar_snapshot();
+        let mut disconnected = g3207_taskbar_snapshot();
+        disconnected.taskbars.pop();
+        let mut settings = Settings::default();
+        super::set_taskbar_target(&mut settings, "claude", "monitor-path:secondary", 0.5);
+        let mut observer = super::TaskbarTopologyStability::default();
+        let mut targets = Vec::new();
+        for _ in 0..3 {
+            g3207_observe_native_targets(&mut observer, &complete, &settings, &mut targets);
+        }
+        let original = targets.clone();
+        for _ in 0..2 {
+            g3207_observe_native_targets(&mut observer, &disconnected, &settings, &mut targets);
+            assert_eq!(targets, original);
+        }
+        g3207_observe_native_targets(&mut observer, &disconnected, &settings, &mut targets);
+        assert_eq!(targets, vec!["monitor-path:primary".to_string(); 5]);
+        assert_eq!(
+            settings.claude_taskbar_monitor_key,
+            "monitor-path:secondary"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_start_menu_cover_reapplies_same_monitor_without_waiting_again() {
+        let snapshot = g3207_taskbar_snapshot();
+        let topology = super::taskbar_profile_topology_keys(&snapshot);
+        let mut observer = super::TaskbarTopologyStability::default();
+        for _ in 0..3 {
+            observer.observe(topology.clone());
+        }
+        assert!(super::taskbar_observation_requires_reapply(
+            true, true, true, true
+        ));
+        assert_eq!(observer.observe(topology.clone()), None);
+        assert!(observer.allows_native_layout(&topology));
+        for tool in super::TASKBAR_TOOLS {
+            let mut settings = Settings::default();
+            super::set_taskbar_target(&mut settings, tool, "monitor-path:secondary", 0.5);
+            assert_eq!(
+                super::taskbar_from_snapshot(
+                    &snapshot,
+                    super::taskbar_monitor_key(&settings, tool)
+                )
+                .unwrap()
+                .key,
+                "monitor-path:secondary"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_ipc_layout_cannot_use_unconfirmed_monitor_fallback() {
+        let complete = g3207_taskbar_snapshot();
+        let mut partial = g3207_taskbar_snapshot();
+        partial.taskbars.pop();
+        assert!(
+            super::taskbar_from_snapshot_for_layout(&partial, "monitor-path:secondary", false)
+                .is_err()
+        );
+        assert_eq!(
+            super::taskbar_from_snapshot_for_layout(&partial, "monitor-path:secondary", true)
+                .unwrap()
+                .key,
+            "monitor-path:primary"
+        );
+        assert_eq!(
+            super::taskbar_from_snapshot_for_layout(&complete, "monitor-path:secondary", false)
+                .unwrap()
+                .key,
+            "monitor-path:secondary"
+        );
+        assert_eq!(
+            super::taskbar_from_snapshot_for_layout(&complete, "device:secondary", false)
+                .unwrap()
+                .key,
+            "monitor-path:secondary"
+        );
+        assert_eq!(
+            super::taskbar_from_snapshot_for_layout(&complete, "monitor:3440,0,2560,1440", false)
+                .unwrap()
+                .key,
+            "monitor-path:secondary"
+        );
+        assert_eq!(
+            super::taskbar_from_snapshot_for_layout(&complete, "", false)
+                .unwrap()
+                .key,
+            "monitor-path:primary"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_invalid_topology_rearms_native_placement_guard() {
+        let snapshot = g3207_taskbar_snapshot();
+        let topology = super::taskbar_profile_topology_keys(&snapshot);
+        let mut observer = super::TaskbarTopologyStability::default();
+        assert!(!observer.allows_native_layout(&topology));
+        for _ in 0..3 {
+            observer.observe(topology.clone());
+        }
+        assert!(observer.allows_native_layout(&topology));
+        observer.observe(Default::default());
+        assert!(!observer.allows_native_layout(&topology));
+        for _ in 0..2 {
+            observer.observe(topology.clone());
+            assert!(!observer.allows_native_layout(&topology));
+        }
+        observer.observe(topology.clone());
+        assert!(observer.allows_native_layout(&topology));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_fallback_commit_rejects_invalidated_or_replaced_publication() {
+        let snapshot = g3207_taskbar_snapshot();
+        let expected = super::taskbar_profile_topology_keys(&snapshot);
+        let mut disconnected = g3207_taskbar_snapshot();
+        disconnected.taskbars.pop();
+        for current in [
+            Default::default(),
+            super::taskbar_profile_topology_keys(&disconnected),
+        ] {
+            let gate = std::sync::Mutex::new(());
+            let mut applied = false;
+            assert!(super::with_confirmed_taskbar_fallback(
+                &gate,
+                &expected,
+                || current,
+                || {
+                    applied = true;
+                    Ok(())
+                }
+            )
+            .is_err());
+            assert!(!applied);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_fallback_commit_keeps_publication_gate_until_native_actions_finish() {
+        let snapshot = g3207_taskbar_snapshot();
+        let expected = super::taskbar_profile_topology_keys(&snapshot);
+        let gate = std::sync::Mutex::new(());
+        super::with_confirmed_taskbar_fallback(
+            &gate,
+            &expected,
+            || {
+                assert!(matches!(
+                    gate.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                expected.clone()
+            },
+            || {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            assert!(matches!(
+                                gate.try_lock(),
+                                Err(std::sync::TryLockError::WouldBlock)
+                            ));
+                        })
+                        .join()
+                        .unwrap();
+                });
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(gate.try_lock().is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_fallback_commit_profile_contention_fails_without_waiting() {
+        let snapshot = g3207_taskbar_snapshot();
+        let topology = super::taskbar_profile_topology_keys(&snapshot);
+        let gate = std::sync::Mutex::new(());
+        let _held = gate.lock().unwrap();
+        assert!(super::with_confirmed_taskbar_fallback(
+            &gate,
+            &topology,
+            || panic!("must not inspect topology while publication is busy"),
+            || panic!("must not commit while publication is busy")
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3207_start_button_outside_bar_does_not_begin_drag_at_mixed_dpi() {
+        use crate::taskbar::DockRect;
+        for x in [-2560, 3440] {
+            for dpi in [96, 144, 192] {
+                let taskbar = DockRect {
+                    x,
+                    y: 1392,
+                    width: 2560,
+                    height: 48,
+                };
+                let length = super::taskbar_physical_length(260, dpi);
+                let bar = crate::taskbar::dock_rect_for_taskbar_at_offset(
+                    x,
+                    1392,
+                    x + 2560,
+                    1440,
+                    length,
+                    0.5,
+                )
+                .unwrap();
+                assert!(!super::taskbar_drag_candidate_precheck(
+                    (taskbar.x + 60, 1416),
+                    bar,
+                    false,
+                    false,
+                    true,
+                    true
+                ));
+                assert!(super::taskbar_drag_candidate_precheck(
+                    (bar.x + length / 2, 1416),
+                    bar,
+                    false,
+                    false,
+                    true,
+                    true
+                ));
+            }
+        }
+    }
+
     #[test]
     fn taskbar_layout_contention_fails_without_waiting() {
         let gate = std::sync::Mutex::new(());
@@ -8083,6 +9514,240 @@ mod tests {
     }
 
     #[test]
+    fn cursor_first_observed_account_survives_all_failed_collection_paths() {
+        use super::CollectionErrorKind as E;
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            team_id: Some(12),
+        };
+        let settings = Settings::default();
+        let now = chrono::Utc::now();
+        for initial in 0..3 {
+            for error in [
+                E::Deadline,
+                E::Transport,
+                E::Parse,
+                E::LoginRequired,
+                E::SourceChanged,
+            ] {
+                let cache = std::sync::Mutex::new(None);
+                match initial {
+                    0 => {}
+                    1 => {
+                        super::cache_cursor_status(
+                            &cache,
+                            now,
+                            Some(status_for_signature("legacy-a")),
+                            Some(super::CursorStatusSource::Agent(None)),
+                            None,
+                            &settings,
+                        );
+                    }
+                    _ => {
+                        super::cache_cursor_status(
+                            &cache,
+                            now,
+                            None,
+                            None,
+                            Some(E::Unavailable),
+                            &settings,
+                        );
+                    }
+                }
+                super::remember_cursor_account_scope(&cache, now, scope);
+                assert!(cache.lock().unwrap().as_ref().unwrap().last_good.is_none());
+                super::cache_cursor_status(&cache, now, None, None, Some(error), &settings);
+                let known = cache.lock().unwrap().as_ref().unwrap().known_scope;
+                assert_eq!(known, Some(scope));
+                let result = super::resolve_cursor_dashboard_first(
+                    Err((E::Unavailable, None)),
+                    || panic!("observed credentials must block legacy fallback after failure"),
+                    || panic!("blocked fallback must not read credentials again"),
+                    known,
+                );
+                assert!(matches!(result, Err(E::SourceChanged)));
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_observed_account_preserves_known_identity_until_verified_success() {
+        let a = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let b = crate::cursor_dashboard::AccountScope { user_id: 8, ..a };
+        let now = chrono::Utc::now();
+        let settings = Settings::default();
+        for source in [
+            super::CursorStatusSource::Dashboard(a),
+            super::CursorStatusSource::Agent(Some(a)),
+        ] {
+            let cache = std::sync::Mutex::new(None);
+            super::cache_cursor_status(
+                &cache,
+                now,
+                Some(status_for_signature("account-a")),
+                Some(source),
+                None,
+                &settings,
+            );
+            super::remember_cursor_account_scope(&cache, now, a);
+            assert_eq!(
+                cache
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .last_good
+                    .as_ref()
+                    .unwrap()
+                    .session_id,
+                "account-a"
+            );
+            super::remember_cursor_account_scope(&cache, now, b);
+            {
+                let cached = cache.lock().unwrap();
+                let cached = cached.as_ref().unwrap();
+                assert_eq!(cached.known_scope, Some(a));
+                assert!(cached.last_good.is_none() && cached.source.is_none());
+            }
+            super::cache_cursor_status(
+                &cache,
+                now,
+                Some(status_for_signature("account-b")),
+                Some(super::CursorStatusSource::Dashboard(b)),
+                None,
+                &settings,
+            );
+            assert_eq!(cache.lock().unwrap().as_ref().unwrap().known_scope, Some(b));
+        }
+    }
+
+    #[test]
+    fn cursor_unscoped_cache_yields_to_new_credentials_and_blocks_legacy_revival() {
+        use super::CollectionErrorKind as E;
+        let cache = std::sync::Mutex::new(None);
+        let settings = Settings::default();
+        let now = chrono::Utc::now();
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            team_id: Some(12),
+        };
+        super::cache_cursor_status(
+            &cache,
+            now,
+            Some(status_for_signature("legacy-account-a")),
+            Some(super::CursorStatusSource::Agent(None)),
+            None,
+            &settings,
+        );
+        let mut cached = cache.lock().unwrap().clone().unwrap();
+        assert!(!super::revalidate_cursor_cached_source(
+            &mut cached,
+            Ok(scope)
+        ));
+        assert!(cached.last_good.is_none() && cached.source.is_none());
+        assert_eq!(cached.error, Some(E::SourceChanged));
+        assert_eq!(cached.known_scope, Some(scope));
+        for error in [E::Unavailable, E::LoginRequired, E::Deadline, E::Parse] {
+            let result = super::resolve_cursor_dashboard_first(
+                Err((error.clone(), None)),
+                || panic!("new credentials must block unverified legacy fallback"),
+                || panic!("blocked fallback must not read credentials again"),
+                cached.known_scope,
+            );
+            let expected = if error == E::LoginRequired {
+                E::LoginRequired
+            } else {
+                E::SourceChanged
+            };
+            assert!(matches!(result, Err(value) if value == expected));
+        }
+    }
+
+    #[test]
+    fn cursor_unscoped_cache_remains_valid_without_available_credentials() {
+        use super::CollectionErrorKind as E;
+        let settings = Settings::default();
+        let now = chrono::Utc::now();
+        for error in [E::Unavailable, E::LoginRequired] {
+            let cache = std::sync::Mutex::new(None);
+            super::cache_cursor_status(
+                &cache,
+                now,
+                Some(status_for_signature("cli-only")),
+                Some(super::CursorStatusSource::Agent(None)),
+                None,
+                &settings,
+            );
+            let mut cached = cache.lock().unwrap().clone().unwrap();
+            assert!(super::revalidate_cursor_cached_source(
+                &mut cached,
+                Err(error)
+            ));
+            assert_eq!(cached.last_good.unwrap().session_id, "cli-only");
+            assert!(matches!(
+                cached.source,
+                Some(super::CursorStatusSource::Agent(None))
+            ));
+            assert!(cached.known_scope.is_none() && cached.error.is_none());
+        }
+    }
+
+    #[test]
+    fn cursor_unscoped_cache_does_not_treat_uncertain_credentials_as_absent() {
+        use super::CollectionErrorKind as E;
+        for error in [E::Deadline, E::Parse, E::Transport, E::SourceChanged] {
+            let cache = std::sync::Mutex::new(None);
+            super::cache_cursor_status(
+                &cache,
+                chrono::Utc::now(),
+                Some(status_for_signature("cli-only")),
+                Some(super::CursorStatusSource::Agent(None)),
+                None,
+                &Settings::default(),
+            );
+            let mut cached = cache.lock().unwrap().clone().unwrap();
+            assert!(!super::revalidate_cursor_cached_source(
+                &mut cached,
+                Err(error)
+            ));
+            assert!(cached.last_good.is_none() && cached.source.is_none());
+            assert_eq!(cached.error, Some(E::SourceChanged));
+        }
+    }
+
+    #[test]
+    fn cursor_scoped_cache_revalidation_preserves_existing_identity_protection() {
+        let a = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let b = crate::cursor_dashboard::AccountScope { user_id: 8, ..a };
+        for source in [
+            super::CursorStatusSource::Dashboard(a),
+            super::CursorStatusSource::Agent(Some(a)),
+        ] {
+            let cache = std::sync::Mutex::new(None);
+            super::cache_cursor_status(
+                &cache,
+                chrono::Utc::now(),
+                Some(status_for_signature("account-a")),
+                Some(source),
+                None,
+                &Settings::default(),
+            );
+            let mut cached = cache.lock().unwrap().clone().unwrap();
+            assert!(super::revalidate_cursor_cached_source(&mut cached, Ok(a)));
+            assert_eq!(cached.last_good.as_ref().unwrap().session_id, "account-a");
+            assert!(!super::revalidate_cursor_cached_source(&mut cached, Ok(b)));
+            assert!(cached.last_good.is_none() && cached.source.is_none());
+            assert_eq!(cached.known_scope, Some(a));
+        }
+    }
+
+    #[test]
     fn cursor_dashboard_success_never_starts_the_agent_fallback() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8097,6 +9762,8 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(status_for_signature("agent"))
             },
+            || panic!("successful Dashboard response already validated"),
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -8111,6 +9778,8 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(status_for_signature("must-not-run"))
             },
+            || panic!("transport error must not start a fallback"),
+            None,
         );
         assert!(matches!(
             transport,
@@ -8124,10 +9793,366 @@ mod tests {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(status_for_signature("agent"))
             },
+            || panic!("legacy fallback has no Dashboard scope to revalidate"),
+            None,
         )
         .unwrap();
-        assert!(matches!(login.1, super::CursorStatusSource::Agent));
+        assert!(matches!(login.1, super::CursorStatusSource::Agent(None)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cursor_response_identity_changes_clear_cache_and_block_fallback() {
+        use super::CollectionErrorKind as E;
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: Some(11),
+        };
+        let changed_user = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            ..scope
+        };
+        let changed_team = crate::cursor_dashboard::AccountScope {
+            team_id: Some(12),
+            ..scope
+        };
+        let settings = Settings::default();
+        let now = chrono::Utc::now();
+        for current in [
+            Ok(changed_user),
+            Ok(changed_team),
+            Err(E::LoginRequired),
+            Err(E::Unavailable),
+            Err(E::Deadline),
+            Err(E::Parse),
+        ] {
+            for response in [
+                Ok(status_for_signature("old-account-response")),
+                Err(E::Transport),
+                Err(E::Parse),
+                Err(E::LoginRequired),
+            ] {
+                let cache = std::sync::Mutex::new(None);
+                assert!(super::cache_cursor_status(
+                    &cache,
+                    now,
+                    Some(status_for_signature("old-account-cached")),
+                    Some(super::CursorStatusSource::Dashboard(scope)),
+                    None,
+                    &settings,
+                )
+                .is_some());
+                let expected_error = if current == Err(E::LoginRequired) {
+                    E::LoginRequired
+                } else {
+                    E::SourceChanged
+                };
+                let checked =
+                    super::validate_cursor_dashboard_response(scope, response, || current.clone())
+                        .map(|status| (status, scope));
+                let result = super::resolve_cursor_dashboard_first(
+                    checked,
+                    || panic!("changed or signed-out account must not start legacy fallback"),
+                    || panic!("blocked fallback must not revalidate again"),
+                    Some(scope),
+                );
+                let error = result.err().unwrap();
+                assert_eq!(error, expected_error);
+                assert!(super::cache_cursor_status(
+                    &cache,
+                    now,
+                    None,
+                    None,
+                    Some(error),
+                    &settings,
+                )
+                .is_none());
+                let guard = cache.lock().unwrap();
+                let cached = guard.as_ref().unwrap();
+                assert!(cached.last_good.is_none());
+                assert!(cached.source.is_none());
+                assert_eq!(cached.error, Some(expected_error));
+            }
+        }
+        assert_eq!(
+            super::dashboard_collection_error(
+                crate::cursor_dashboard::DashboardErrorKind::ScopeChanged
+            ),
+            E::SourceChanged
+        );
+    }
+
+    #[test]
+    fn cursor_cli_fallback_cannot_label_another_account_with_gui_scope() {
+        use super::CollectionErrorKind as E;
+        let gui = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            team_id: None,
+        };
+        let cli = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let mut captures = 0;
+        let result = super::resolve_cursor_dashboard_first(
+            Err((E::Parse, Some(gui))),
+            || {
+                super::ensure_cursor_cli_scope(gui, cli)?;
+                captures += 1;
+                Ok(status_for_signature("cli-account-a"))
+            },
+            || Ok(gui),
+            Some(gui),
+        );
+        assert!(matches!(result, Err(E::SourceChanged)));
+        assert_eq!(captures, 0);
+        assert!(super::ensure_cursor_cli_scope(gui, gui).is_ok());
+        assert!(matches!(
+            super::ensure_cursor_cli_scope(
+                gui,
+                crate::cursor_dashboard::AccountScope {
+                    team_id: Some(42),
+                    ..gui
+                }
+            ),
+            Err(E::SourceChanged)
+        ));
+    }
+
+    #[test]
+    fn cursor_known_scope_survives_repeated_failed_queries_and_recovers() {
+        use super::CollectionErrorKind as E;
+        let cache = std::sync::Mutex::new(None);
+        let settings = Settings::default();
+        let now = chrono::Utc::now();
+        let a = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: Some(11),
+        };
+        let b = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            team_id: None,
+        };
+        assert!(super::cache_cursor_status(
+            &cache,
+            now,
+            Some(status_for_signature("account-a")),
+            Some(super::CursorStatusSource::Dashboard(a)),
+            None,
+            &settings
+        )
+        .is_some());
+        for error in [E::SourceChanged, E::LoginRequired, E::Unavailable, E::Parse] {
+            assert!(
+                super::cache_cursor_status(&cache, now, None, None, Some(error), &settings)
+                    .is_none()
+            );
+            let prior = cache.lock().unwrap().as_ref().unwrap().known_scope;
+            assert_eq!(prior, Some(a));
+            for elapsed in [1, 3600] {
+                let result = super::resolve_cursor_dashboard_first(
+                    Err((E::Unavailable, None)),
+                    || panic!("failed known credentials must not enable unverified fallback"),
+                    || panic!("no fallback should require this reader"),
+                    prior,
+                );
+                assert!(matches!(result, Err(E::SourceChanged)));
+                super::cache_cursor_status(
+                    &cache,
+                    now + chrono::Duration::seconds(elapsed),
+                    None,
+                    None,
+                    Some(E::SourceChanged),
+                    &settings,
+                );
+                let cached = cache.lock().unwrap();
+                let cached = cached.as_ref().unwrap();
+                assert_eq!(cached.known_scope, Some(a));
+                assert!(cached.last_good.is_none() && cached.source.is_none());
+            }
+        }
+        let (status, source) = super::resolve_cursor_dashboard_first(
+            Ok((status_for_signature("account-b"), b)),
+            || panic!("verified Dashboard should not fallback"),
+            || panic!("response was already checked"),
+            Some(a),
+        )
+        .unwrap();
+        let fresh =
+            super::cache_cursor_status(&cache, now, Some(status), Some(source), None, &settings)
+                .unwrap();
+        assert_eq!(fresh.session_id, "account-b");
+        assert_eq!(cache.lock().unwrap().as_ref().unwrap().known_scope, Some(b));
+        super::cache_cursor_status(&cache, now, None, None, Some(E::LoginRequired), &settings);
+        assert_eq!(cache.lock().unwrap().as_ref().unwrap().known_scope, Some(b));
+    }
+
+    #[test]
+    fn cursor_first_cli_only_fallback_remains_available_without_known_scope() {
+        use super::CollectionErrorKind as E;
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let settings = Settings::default();
+        super::cache_cursor_status(&cache, now, None, None, Some(E::Unavailable), &settings);
+        let prior = cache.lock().unwrap().as_ref().unwrap().known_scope;
+        assert_eq!(prior, None);
+        let (status, source) = super::resolve_cursor_dashboard_first(
+            Err((E::Unavailable, None)),
+            || Ok(status_for_signature("cli-only")),
+            || panic!("legacy-only has no identity reader"),
+            prior,
+        )
+        .unwrap();
+        assert!(super::cache_cursor_status(
+            &cache,
+            now,
+            Some(status),
+            Some(source),
+            None,
+            &settings
+        )
+        .is_some());
+        assert_eq!(cache.lock().unwrap().as_ref().unwrap().known_scope, None);
+    }
+
+    #[test]
+    fn cursor_revalidation_uses_remaining_outer_budget_after_http_timeout() {
+        use super::CollectionErrorKind as E;
+        let now = std::time::Instant::now();
+        let expired_http = now - std::time::Duration::from_millis(1);
+        let outer = now + std::time::Duration::from_secs(10);
+        let check = super::cursor_scope_revalidation_deadline(outer, now);
+        assert!(expired_http < now && check > now);
+        assert_eq!(check, now + std::time::Duration::from_secs(1));
+        let short_outer = now + std::time::Duration::from_millis(200);
+        assert_eq!(
+            super::cursor_scope_revalidation_deadline(short_outer, now),
+            short_outer
+        );
+        assert_eq!(
+            super::cursor_scope_revalidation_deadline(expired_http, now),
+            expired_http
+        );
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let result = super::validate_cursor_dashboard_response::<AgentStatus>(
+            scope,
+            Err(E::Deadline),
+            || {
+                assert!(check > now);
+                Ok(scope)
+            },
+        );
+        assert!(matches!(result, Err((E::Deadline, Some(actual))) if actual == scope));
+        let changed = super::validate_cursor_dashboard_response::<AgentStatus>(
+            scope,
+            Err(E::Deadline),
+            || {
+                Ok(crate::cursor_dashboard::AccountScope {
+                    user_id: 8,
+                    ..scope
+                })
+            },
+        );
+        assert!(matches!(changed, Err((E::SourceChanged, _))));
+    }
+
+    #[test]
+    fn cursor_response_revalidation_preserves_same_scope_success_and_errors() {
+        use super::CollectionErrorKind as E;
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let mut calls = 0;
+        let good = super::validate_cursor_dashboard_response(
+            scope,
+            Ok(status_for_signature("same-account")),
+            || {
+                calls += 1;
+                Ok(scope)
+            },
+        )
+        .unwrap();
+        assert_eq!(good.session_id, "same-account");
+        assert_eq!(calls, 1);
+        for error in [E::Transport, E::Deadline, E::Parse, E::LoginRequired] {
+            let result = super::validate_cursor_dashboard_response::<AgentStatus>(
+                scope,
+                Err(error.clone()),
+                || Ok(scope),
+            );
+            assert!(matches!(result, Err((actual, Some(actual_scope)))
+                if actual == error && actual_scope == scope));
+        }
+        let result = super::resolve_cursor_dashboard_first(
+            Err((E::LoginRequired, Some(scope))),
+            || panic!("401 for a known account must not resurrect a legacy account"),
+            || panic!("known-account auth failure blocks fallback"),
+            Some(scope),
+        );
+        assert!(matches!(result, Err(E::LoginRequired)));
+        for error in [E::LoginRequired, E::Unavailable, E::Parse, E::Deadline] {
+            let result = super::resolve_cursor_dashboard_first(
+                Err((error.clone(), None)),
+                || panic!("lost known credentials must not resurrect a legacy account"),
+                || panic!("lost known credentials block fallback"),
+                Some(scope),
+            );
+            let expected = if error == E::LoginRequired {
+                E::LoginRequired
+            } else {
+                E::SourceChanged
+            };
+            assert!(matches!(result, Err(actual) if actual == expected));
+        }
+    }
+
+    #[test]
+    fn cursor_fallback_revalidates_known_scope_before_returning_values() {
+        use super::CollectionErrorKind as E;
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let other = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            ..scope
+        };
+        for after in [
+            Ok(scope),
+            Ok(other),
+            Err(E::LoginRequired),
+            Err(E::Unavailable),
+        ] {
+            let current = std::cell::RefCell::new(Ok(scope));
+            let mut calls = 0;
+            let result = super::resolve_cursor_dashboard_first(
+                Err((E::Parse, Some(scope))),
+                || {
+                    calls += 1;
+                    *current.borrow_mut() = after.clone();
+                    Ok(status_for_signature("legacy-account"))
+                },
+                || current.borrow().clone(),
+                Some(scope),
+            );
+            assert_eq!(calls, 1);
+            match after {
+                Ok(value) if value == scope => {
+                    let (status, source) = result.unwrap();
+                    assert_eq!(status.session_id, "legacy-account");
+                    assert!(
+                        matches!(source, super::CursorStatusSource::Agent(Some(value))
+                        if value == scope)
+                    );
+                }
+                Err(E::LoginRequired) => assert!(matches!(result, Err(E::LoginRequired))),
+                _ => assert!(matches!(result, Err(E::SourceChanged))),
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -9620,19 +11645,83 @@ mod tests {
     fn settings_apply_report_keeps_saved_settings_and_all_side_effect_failures() {
         let settings = Settings::default();
         let report = super::settings_apply_report(
-            settings.clone(),
+            super::SettingsSnapshot {
+                settings: settings.clone(),
+                settings_revision: "7".into(),
+            },
             Err("taskbar unavailable".into()),
             Err("registry denied".into()),
         );
 
-        assert_eq!(report.settings.bar_mode, settings.bar_mode);
-        assert_eq!(report.settings.show_claude, settings.show_claude);
-        assert_eq!(report.settings.show_codex, settings.show_codex);
+        assert_eq!(report.settings.settings.bar_mode, settings.bar_mode);
+        assert_eq!(report.settings.settings.show_claude, settings.show_claude);
+        assert_eq!(report.settings.settings.show_codex, settings.show_codex);
+        assert_eq!(report.settings.settings_revision, "7");
         assert!(!report.taskbar_applied);
         assert!(!report.autostart_applied);
         assert_eq!(report.warnings.len(), 2);
         assert!(report.warnings[0].contains("taskbar unavailable"));
         assert!(report.warnings[1].contains("registry denied"));
+    }
+
+    #[test]
+    fn settings_publication_revisions_cover_commits_and_external_content_changes() {
+        let mut state = super::SettingsPublicationState::default();
+        let first = Settings::default();
+        let a = super::settings_snapshot_in_state(&mut state, first.clone(), 3).unwrap();
+        assert_eq!(a.settings_revision, "1");
+        let repeated = super::settings_snapshot_in_state(&mut state, first.clone(), 3).unwrap();
+        assert_eq!(repeated.settings_revision, a.settings_revision);
+        let identical_commit =
+            super::settings_snapshot_in_state(&mut state, first.clone(), 4).unwrap();
+        assert_eq!(identical_commit.settings_revision, "2");
+        let mut changed = first;
+        changed.bar_mode = "compact".into();
+        let external = super::settings_snapshot_in_state(&mut state, changed.clone(), 4).unwrap();
+        assert_eq!(external.settings_revision, "3");
+        let final_read = super::settings_snapshot_in_state(&mut state, changed, 4).unwrap();
+        assert_eq!(final_read.settings_revision, external.settings_revision);
+    }
+
+    #[test]
+    fn settings_publication_flat_snapshot_and_nested_reply_keep_decimal_u64() {
+        let mut state = super::SettingsPublicationState {
+            revision: u64::MAX - 1,
+            ..Default::default()
+        };
+        let snapshot =
+            super::settings_snapshot_in_state(&mut state, Settings::default(), 1).unwrap();
+        let flat = serde_json::to_value(&snapshot).unwrap();
+        assert!(flat.get("settings").is_none());
+        assert_eq!(flat["bar_mode"], "full");
+        assert_eq!(flat["settings_revision"], u64::MAX.to_string());
+        let report = super::settings_apply_report(snapshot, Ok(()), Ok(()));
+        let reply = serde_json::to_value(&report).unwrap();
+        assert_eq!(reply["settings"]["bar_mode"], flat["bar_mode"]);
+        assert_eq!(
+            reply["settings"]["settings_revision"],
+            flat["settings_revision"]
+        );
+    }
+
+    #[test]
+    fn settings_publication_revision_exhaustion_preserves_the_last_snapshot() {
+        let settings = Settings::default();
+        let mut state = super::SettingsPublicationState {
+            revision: u64::MAX,
+            generation: 2,
+            settings: Some(settings.clone()),
+        };
+        assert!(super::settings_snapshot_in_state(&mut state, settings.clone(), 3).is_err());
+        assert_eq!(state.revision, u64::MAX);
+        assert_eq!(state.generation, 2);
+        assert_eq!(state.settings.as_ref(), Some(&settings));
+        assert_eq!(
+            super::settings_snapshot_in_state(&mut state, settings, 2)
+                .unwrap()
+                .settings_revision,
+            u64::MAX.to_string()
+        );
     }
 
     #[test]
@@ -9796,6 +11885,2209 @@ mod tests {
             assert_eq!(result[0].session_id, "shared");
         }
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn broker_policy_recovery_reenables_after_transient_read_error() {
+        for tool in [Tool::Codex, Tool::Grok] {
+            let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+            let now = std::time::Instant::now();
+            let mut applied = Vec::new();
+            assert!(super::reconcile_current_collection_policy(
+                &tool,
+                || anyhow::bail!("fixture settings unavailable"),
+                |enabled| {
+                    applied.push(enabled);
+                    Ok(())
+                },
+                |failed| state.lock().unwrap().record(&tool, failed, now),
+            )
+            .is_err());
+            assert_eq!(applied, [false]);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(1),
+                || Ok(collection_test_settings(&tool, true)),
+                |actual_tool, enabled| {
+                    assert_eq!(actual_tool, &tool);
+                    applied.push(enabled);
+                    Ok(())
+                },
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(applied, [false, true]);
+            assert!(!state.lock().unwrap().entries[super::collection_tool_index(&tool)].pending);
+        }
+    }
+
+    #[test]
+    fn broker_policy_recovery_obeys_latest_off_and_skips_healthy_policies() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        let mut applied = Vec::new();
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(collection_test_settings(&Tool::Codex, false)),
+            |tool, enabled| {
+                assert_eq!(tool, &Tool::Codex);
+                applied.push(enabled);
+                Ok(())
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(applied, [false]);
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(500),
+            || panic!("healthy policy must not reload settings"),
+            |_, _| panic!("healthy policy must not be rewritten"),
+            |_, _| panic!("healthy policy must not republish health"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn broker_policy_recovery_keeps_disabled_on_read_errors_with_bounded_backoff() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let mut now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        for expected in [1, 2, 4, 8, 16, 32, 60, 60] {
+            let deadline = state.lock().unwrap().entries
+                [super::collection_tool_index(&Tool::Codex)]
+            .retry_at
+            .unwrap();
+            assert_eq!(deadline.duration_since(now).as_secs(), expected);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || deadline - std::time::Duration::from_millis(1),
+                || panic!("backoff must defer settings IO"),
+                |_, _| panic!("backoff must defer setter"),
+                |_, _| panic!("backoff must defer health publication"),
+            )
+            .unwrap();
+            now = deadline;
+            assert!(super::recover_pending_collection_policies_with(
+                &state,
+                || now,
+                || anyhow::bail!("fixture settings unavailable"),
+                |_, enabled| {
+                    assert!(!enabled);
+                    Ok(())
+                },
+                |_, _| {},
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn broker_policy_recovery_direct_success_cancels_pending_retry() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Grok, true, now);
+        super::reconcile_current_collection_policy(
+            &Tool::Grok,
+            || Ok(collection_test_settings(&Tool::Grok, true)),
+            |enabled| {
+                assert!(enabled);
+                Ok(())
+            },
+            |failed| state.lock().unwrap().record(&Tool::Grok, failed, now),
+        )
+        .unwrap();
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(2),
+            || panic!("direct success already repaired the policy"),
+            |_, _| panic!("duplicate apply"),
+            |_, _| panic!("duplicate health publication"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn broker_policy_recovery_rechecks_pending_after_waiting_for_settings_gate() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        let state = Arc::new(std::sync::Mutex::new(
+            super::CollectionPolicyRecovery::default(),
+        ));
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        let (started, ready) = mpsc::channel();
+        let worker_state = state.clone();
+        let worker = super::with_taskbar_settings_read(|_| {
+            let worker = std::thread::spawn(move || {
+                let first = AtomicBool::new(true);
+                super::recover_pending_collection_policies_with(
+                    &worker_state,
+                    || {
+                        if first.swap(false, Ordering::SeqCst) {
+                            started.send(()).unwrap();
+                        }
+                        now + std::time::Duration::from_secs(1)
+                    },
+                    || panic!("a newer direct apply cleared the pending entry"),
+                    |_, _| panic!("stale retry"),
+                    |_, _| panic!("stale health publication"),
+                )
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            state.lock().unwrap().record(&Tool::Codex, false, now);
+            Ok(worker)
+        })
+        .unwrap();
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn broker_policy_recovery_concurrent_callers_apply_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
+        };
+        let state = Arc::new(std::sync::Mutex::new(
+            super::CollectionPolicyRecovery::default(),
+        ));
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            let calls = calls.clone();
+            let ready = ready.clone();
+            workers.push(std::thread::spawn(move || {
+                ready.wait();
+                super::recover_pending_collection_policies_with(
+                    &state,
+                    || now + std::time::Duration::from_secs(1),
+                    || Ok(collection_test_settings(&Tool::Codex, true)),
+                    |_, enabled| {
+                        assert!(enabled);
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_, _| {},
+                )
+            }));
+        }
+        ready.wait();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn broker_policy_recovery_one_failure_does_not_starve_other_pending_tool() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        state.lock().unwrap().record(&Tool::Grok, true, now);
+        let mut calls = Vec::new();
+        assert!(super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(Settings {
+                show_codex: true,
+                show_grok: true,
+                ..Settings::default()
+            }),
+            |tool, enabled| {
+                assert!(enabled);
+                calls.push(tool.clone());
+                if *tool == Tool::Codex {
+                    anyhow::bail!("fixture setter unavailable")
+                }
+                Ok(())
+            },
+            |_, _| {},
+        )
+        .is_err());
+        assert_eq!(calls, [Tool::Codex, Tool::Grok]);
+        let state = state.lock().unwrap();
+        assert!(state.entries[super::collection_tool_index(&Tool::Codex)].pending);
+        assert!(!state.entries[super::collection_tool_index(&Tool::Grok)].pending);
+    }
+
+    #[test]
+    fn cli_policy_recovery_repairs_failed_enable_and_restore_from_current_settings() {
+        for enabled in [true, false] {
+            let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+            let now = std::time::Instant::now();
+            let mut attempts = Vec::new();
+            let mut health = Vec::new();
+            assert!(super::reconcile_current_antigravity_cli(
+                || Ok(collection_test_settings(&Tool::Antigravity, enabled)),
+                |current| {
+                    attempts.push(current);
+                    anyhow::bail!("fixture CLI settings locked")
+                },
+                |failed| {
+                    state
+                        .lock()
+                        .unwrap()
+                        .record(&Tool::Antigravity, failed, now);
+                    health.push(failed);
+                },
+            )
+            .is_err());
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(1),
+                || Ok(collection_test_settings(&Tool::Antigravity, enabled)),
+                |tool, current| {
+                    assert_eq!(tool, &Tool::Antigravity);
+                    attempts.push(current);
+                    Ok(())
+                },
+                |tool, failed| {
+                    assert_eq!(tool, &Tool::Antigravity);
+                    health.push(failed);
+                },
+            )
+            .unwrap();
+            assert_eq!(attempts, [enabled, enabled]);
+            assert_eq!(health, [true, false]);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(500),
+                || panic!("healthy CLI must not reload settings"),
+                |_, _| panic!("healthy CLI must not rewrite the binding"),
+                |_, _| panic!("healthy CLI must not republish failure"),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn cli_policy_recovery_starts_after_initial_settings_read_failure() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        let mut enabled = false;
+        assert!(super::reconcile_current_antigravity_cli(
+            || anyhow::bail!("fixture startup settings locked"),
+            |_| panic!("unknown startup policy must not touch CLI files"),
+            |failed| state
+                .lock()
+                .unwrap()
+                .record(&Tool::Antigravity, failed, now),
+        )
+        .is_err());
+        assert!(
+            state.lock().unwrap().entries[super::collection_tool_index(&Tool::Antigravity)].pending
+        );
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(collection_test_settings(&Tool::Antigravity, true)),
+            |tool, current| {
+                assert_eq!(tool, &Tool::Antigravity);
+                enabled = current;
+                Ok(())
+            },
+            |_, failed| assert!(!failed),
+        )
+        .unwrap();
+        assert!(enabled);
+        assert!(
+            !state.lock().unwrap().entries[super::collection_tool_index(&Tool::Antigravity)]
+                .pending
+        );
+    }
+
+    #[test]
+    fn cli_policy_recovery_obeys_latest_toggle_and_preserves_binding_on_read_failure() {
+        for enabled in [true, false] {
+            let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+            let now = std::time::Instant::now();
+            state.lock().unwrap().record(&Tool::Antigravity, true, now);
+            let mut health = Vec::new();
+            assert!(super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(1),
+                || anyhow::bail!("fixture settings unreadable"),
+                |_, _| panic!("unknown policy must not alter CLI files"),
+                |tool, failed| {
+                    assert_eq!(tool, &Tool::Antigravity);
+                    health.push(failed);
+                },
+            )
+            .is_err());
+            let mut applied = Vec::new();
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(3),
+                || Ok(collection_test_settings(&Tool::Antigravity, enabled)),
+                |tool, current| {
+                    assert_eq!(tool, &Tool::Antigravity);
+                    applied.push(current);
+                    Ok(())
+                },
+                |_, failed| health.push(failed),
+            )
+            .unwrap();
+            assert_eq!(applied, [enabled]);
+            assert_eq!(health, [true, false]);
+        }
+    }
+
+    #[test]
+    fn cli_policy_recovery_respects_backoff_and_bounded_failures() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let mut now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Antigravity, true, now);
+        for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
+            let due = state.lock().unwrap().entries
+                [super::collection_tool_index(&Tool::Antigravity)]
+            .retry_at
+            .unwrap();
+            assert_eq!(due.duration_since(now).as_secs(), seconds);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || due - std::time::Duration::from_millis(1),
+                || panic!("CLI backoff must defer IO"),
+                |_, _| panic!("CLI backoff must defer binding work"),
+                |_, _| panic!("CLI backoff must defer publication"),
+            )
+            .unwrap();
+            now = due;
+            assert!(super::recover_pending_collection_policies_with(
+                &state,
+                || now,
+                || Ok(collection_test_settings(&Tool::Antigravity, true)),
+                |_, _| anyhow::bail!("fixture binding remains unavailable"),
+                |_, failed| assert!(failed),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn cli_policy_recovery_rechecks_after_direct_success_and_publishes_under_gate() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        let state = Arc::new(std::sync::Mutex::new(
+            super::CollectionPolicyRecovery::default(),
+        ));
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Antigravity, true, now);
+        let (started, ready) = mpsc::channel();
+        let worker_state = state.clone();
+        let worker = super::with_taskbar_settings_read(|_| {
+            let worker = std::thread::spawn(move || {
+                let first = AtomicBool::new(true);
+                super::recover_pending_collection_policies_with(
+                    &worker_state,
+                    || {
+                        if first.swap(false, Ordering::SeqCst) {
+                            started.send(()).unwrap();
+                        }
+                        now + std::time::Duration::from_secs(1)
+                    },
+                    || panic!("direct success retired pending work"),
+                    |_, _| panic!("stale CLI apply"),
+                    |_, _| panic!("stale CLI failure publication"),
+                )
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            state.lock().unwrap().record(&Tool::Antigravity, false, now);
+            Ok(worker)
+        })
+        .unwrap();
+        worker.join().unwrap().unwrap();
+        state.lock().unwrap().record(&Tool::Antigravity, true, now);
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(collection_test_settings(&Tool::Antigravity, false)),
+            |_, enabled| {
+                assert!(!enabled);
+                Ok(())
+            },
+            |_, failed| {
+                assert!(!failed);
+                assert!(super::TASKBAR_SETTINGS_WRITE_GATE.try_lock().is_err());
+                assert!(
+                    !state.lock().unwrap().entries
+                        [super::collection_tool_index(&Tool::Antigravity)]
+                    .pending
+                );
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cli_policy_recovery_failure_does_not_starve_other_pending_tools() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Codex, true, now);
+        state.lock().unwrap().record(&Tool::Antigravity, true, now);
+        let mut health = Vec::new();
+        assert!(super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(Settings {
+                show_codex: true,
+                show_antigravity: true,
+                ..Settings::default()
+            }),
+            |tool, enabled| {
+                assert!(enabled);
+                if *tool == Tool::Antigravity {
+                    anyhow::bail!("fixture CLI binding locked");
+                }
+                assert_eq!(tool, &Tool::Codex);
+                Ok(())
+            },
+            |tool, failed| health.push((tool.clone(), failed)),
+        )
+        .is_err());
+        assert_eq!(health, [(Tool::Codex, false), (Tool::Antigravity, true)]);
+        assert!(!state.lock().unwrap().entries[super::collection_tool_index(&Tool::Codex)].pending);
+        assert!(
+            state.lock().unwrap().entries[super::collection_tool_index(&Tool::Antigravity)].pending
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_policy_recovery_retries_real_locked_binding_without_losing_original_settings() {
+        use crate::antigravity_cli::binding;
+        use std::os::windows::fs::OpenOptionsExt;
+        for enabled in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "juice-cli-policy-retry-{}-{}-{enabled}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            ));
+            let home = root.join("home");
+            let data = root.join("data");
+            let path = home.join(".gemini/antigravity-cli/settings.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = serde_json::json!({
+                "statusLine":{"type":"command","command":"echo fixture-original","padding":3},
+                "other":{"unchanged":true}
+            });
+            std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+            let helper = root.join("fixture.exe");
+            std::fs::write(&helper, b"never executed").unwrap();
+            if !enabled {
+                binding::install_at(&home, &data, &helper).unwrap();
+            }
+            let locked = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&path)
+                .unwrap();
+            let apply = |enabled| -> anyhow::Result<()> {
+                if enabled {
+                    binding::install_at(&home, &data, &helper).map(|_| ())
+                } else {
+                    binding::restore_at(&home, &data)
+                }
+            };
+            let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+            let now = std::time::Instant::now();
+            assert!(super::reconcile_current_antigravity_cli(
+                || Ok(collection_test_settings(&Tool::Antigravity, enabled)),
+                apply,
+                |failed| state
+                    .lock()
+                    .unwrap()
+                    .record(&Tool::Antigravity, failed, now),
+            )
+            .is_err());
+            drop(locked);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(1),
+                || Ok(collection_test_settings(&Tool::Antigravity, enabled)),
+                |tool, enabled| {
+                    assert_eq!(tool, &Tool::Antigravity);
+                    apply(enabled)
+                },
+                |_, failed| assert!(!failed),
+            )
+            .unwrap();
+            assert_eq!(
+                binding::load_owned_at(&home, &data).unwrap().is_some(),
+                enabled
+            );
+            let actual: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(actual["other"], original["other"]);
+            binding::restore_at(&home, &data).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                    .unwrap(),
+                original
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn taskbar_content_layout_rollback_preserves_a_new_position() {
+        let original = super::TaskbarContentLayout {
+            mode: "full".into(),
+            width: 100,
+            ratio: Some(0.8),
+        };
+        let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot {
+            revision: 0,
+            layout: Some(original.clone()),
+        });
+        let write = super::begin_taskbar_content_layout_in_slot(
+            &slot,
+            0,
+            super::TaskbarContentLayout {
+                width: 150,
+                ..original
+            },
+        )
+        .unwrap();
+        super::set_taskbar_content_layout_ratio_in_slot(&slot, 0.2);
+        assert!(!super::rollback_taskbar_content_layout_in_slot(
+            &slot, write
+        ));
+        let actual = slot.lock().unwrap().layout.clone().unwrap();
+        assert_eq!(actual.width, 150);
+        assert_eq!(actual.ratio, Some(0.2));
+    }
+
+    #[test]
+    fn taskbar_content_layout_rollback_preserves_newer_and_identical_measurements() {
+        for newer_width in [150, 240] {
+            let original = super::TaskbarContentLayout {
+                mode: "full".into(),
+                width: 100,
+                ratio: Some(0.8),
+            };
+            let candidate = super::TaskbarContentLayout {
+                width: 150,
+                ..original.clone()
+            };
+            let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot {
+                revision: 0,
+                layout: Some(original),
+            });
+            let old =
+                super::begin_taskbar_content_layout_in_slot(&slot, 0, candidate.clone()).unwrap();
+            let next = super::TaskbarContentLayout {
+                width: newer_width,
+                ..candidate
+            };
+            let _new =
+                super::begin_taskbar_content_layout_in_slot(&slot, old.revision, next.clone())
+                    .unwrap();
+            assert!(!super::rollback_taskbar_content_layout_in_slot(&slot, old));
+            assert_eq!(slot.lock().unwrap().layout, Some(next));
+        }
+    }
+
+    #[test]
+    fn taskbar_content_layout_stale_plan_cannot_replace_a_new_position() {
+        let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot {
+            revision: 8,
+            layout: Some(super::TaskbarContentLayout {
+                mode: "full".into(),
+                width: 100,
+                ratio: Some(0.8),
+            }),
+        });
+        super::set_taskbar_content_layout_ratio_in_slot(&slot, 0.2);
+        let stale = super::begin_taskbar_content_layout_in_slot(
+            &slot,
+            8,
+            super::TaskbarContentLayout {
+                mode: "full".into(),
+                width: 150,
+                ratio: Some(0.8),
+            },
+        );
+        assert!(stale.is_err());
+        let current = slot.lock().unwrap();
+        assert_eq!(current.revision, 9);
+        assert_eq!(current.layout.as_ref().unwrap().width, 100);
+        assert_eq!(current.layout.as_ref().unwrap().ratio, Some(0.2));
+    }
+
+    #[test]
+    fn taskbar_content_layout_normal_rollback_restores_the_raw_previous_mode() {
+        for previous in [
+            None,
+            Some(super::TaskbarContentLayout {
+                mode: "compact".into(),
+                width: 80,
+                ratio: Some(0.3),
+            }),
+        ] {
+            let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot {
+                revision: 4,
+                layout: previous.clone(),
+            });
+            let write = super::begin_taskbar_content_layout_in_slot(
+                &slot,
+                4,
+                super::TaskbarContentLayout {
+                    mode: "full".into(),
+                    width: 150,
+                    ratio: Some(0.8),
+                },
+            )
+            .unwrap();
+            assert!(
+                slot.try_lock().is_ok(),
+                "native placement must not inherit a cache lock"
+            );
+            assert!(super::rollback_taskbar_content_layout_in_slot(&slot, write));
+            let current = slot.lock().unwrap();
+            assert_eq!(current.revision, 6);
+            assert_eq!(current.layout, previous);
+        }
+    }
+
+    #[test]
+    fn taskbar_content_layout_identical_ratio_publication_invalidates_old_rollback() {
+        let candidate = super::TaskbarContentLayout {
+            mode: "full".into(),
+            width: 150,
+            ratio: Some(0.8),
+        };
+        let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot::default());
+        let write =
+            super::begin_taskbar_content_layout_in_slot(&slot, 0, candidate.clone()).unwrap();
+        super::set_taskbar_content_layout_ratio_in_slot(&slot, 0.8);
+        assert!(!super::rollback_taskbar_content_layout_in_slot(
+            &slot, write
+        ));
+        assert_eq!(slot.lock().unwrap().layout, Some(candidate));
+    }
+
+    #[test]
+    fn taskbar_content_layout_acknowledged_measurement_invalidates_old_rollback() {
+        let candidate = super::TaskbarContentLayout {
+            mode: "full".into(),
+            width: 150,
+            ratio: Some(0.8),
+        };
+        let slot = std::sync::Mutex::new(super::TaskbarContentLayoutSlot::default());
+        let write =
+            super::begin_taskbar_content_layout_in_slot(&slot, 0, candidate.clone()).unwrap();
+        super::acknowledge_taskbar_content_layout_in_slot(&slot, write.revision).unwrap();
+        assert!(!super::rollback_taskbar_content_layout_in_slot(
+            &slot, write
+        ));
+        assert_eq!(slot.lock().unwrap().layout, Some(candidate));
+        assert!(super::acknowledge_taskbar_content_layout_in_slot(&slot, 1).is_err());
+        assert_eq!(slot.lock().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn taskbar_menu_own_failure_closes_the_current_request() {
+        for open in [false, true] {
+            let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+            let write = super::set_taskbar_menu_layout_in_slot(&slot, open, Some(0.8));
+            assert!(super::close_taskbar_menu_layout_in_slot_if_current(
+                &slot, write
+            ));
+            let current = slot.lock().unwrap();
+            assert_eq!(current.layout, super::TaskbarMenuLayout::default());
+            assert_eq!(current.revision, 2);
+        }
+    }
+
+    #[test]
+    fn taskbar_menu_new_identical_open_and_aba_survive_old_cleanup() {
+        for aba in [false, true] {
+            let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+            let old = super::set_taskbar_menu_layout_in_slot(&slot, true, Some(0.8));
+            if aba {
+                super::set_taskbar_menu_layout_in_slot(&slot, false, None);
+            }
+            super::set_taskbar_menu_layout_in_slot(&slot, true, Some(0.8));
+            let before = slot.lock().unwrap().revision;
+            assert!(!super::close_taskbar_menu_layout_in_slot_if_current(
+                &slot, old
+            ));
+            let current = slot.lock().unwrap();
+            assert_eq!(current.revision, before);
+            assert!(current.layout.open);
+            assert_eq!(current.layout.ratio, Some(0.8));
+        }
+    }
+
+    #[test]
+    fn taskbar_menu_each_slot_versions_immediate_closed_publications() {
+        let state = super::TaskbarMenuState::default();
+        for tool in super::TASKBAR_TOOLS {
+            let slot = super::taskbar_menu_slot(&state, tool).unwrap();
+            let old = super::set_taskbar_menu_layout_in_slot(slot, true, Some(0.8));
+            super::set_taskbar_menu_layout_in_slot(slot, false, None);
+            super::set_taskbar_menu_layout_in_slot(slot, false, None);
+            assert!(!super::close_taskbar_menu_layout_in_slot_if_current(
+                slot, old
+            ));
+            let current = slot.lock().unwrap();
+            assert_eq!(current.revision, 3);
+            assert_eq!(current.layout, super::TaskbarMenuLayout::default());
+        }
+    }
+
+    #[test]
+    fn taskbar_menu_deferred_cleanup_owns_only_its_observed_revision() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        super::set_taskbar_menu_layout_in_slot(&slot, true, Some(0.8));
+        let pending = super::TaskbarMenuWrite {
+            revision: slot.lock().unwrap().revision,
+        };
+        super::set_taskbar_menu_layout_in_slot(&slot, true, Some(0.3));
+        assert!(!super::close_taskbar_menu_layout_in_slot_if_current(
+            &slot, pending
+        ));
+        assert_eq!(slot.lock().unwrap().layout.ratio, Some(0.3));
+        let current = super::TaskbarMenuWrite {
+            revision: slot.lock().unwrap().revision,
+        };
+        assert!(super::close_taskbar_menu_layout_in_slot_if_current(
+            &slot, current
+        ));
+        assert!(!slot.lock().unwrap().layout.open);
+    }
+
+    #[test]
+    fn taskbar_menu_publication_releases_the_slot_before_native_work() {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(super::TaskbarMenuSlot::default()));
+        let old = super::set_taskbar_menu_layout_in_slot(&slot, true, Some(0.8));
+        assert!(slot.try_lock().is_ok());
+        let newer_slot = slot.clone();
+        std::thread::spawn(move || {
+            super::set_taskbar_menu_layout_in_slot(&newer_slot, true, Some(0.5));
+        })
+        .join()
+        .unwrap();
+        assert!(!super::close_taskbar_menu_layout_in_slot_if_current(
+            &slot, old
+        ));
+        assert_eq!(slot.lock().unwrap().layout.ratio, Some(0.5));
+    }
+
+    #[test]
+    fn taskbar_menu_publication_keeps_existing_ratio_clamping() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        for (input, expected) in [
+            (Some(-1.0), Some(0.0)),
+            (Some(2.0), Some(1.0)),
+            (None, None),
+        ] {
+            super::set_taskbar_menu_layout_in_slot(&slot, true, input);
+            assert_eq!(slot.lock().unwrap().layout.ratio, expected);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskbar_content_layout_native_plan_rejects_retired_and_missing_state_revisions() {
+        let plan = [("claude", Some(4)), ("codex", Some(8)), ("cursor", None)];
+        let current = |tool: &str| match tool {
+            "claude" => Some(4),
+            "codex" => Some(8),
+            _ => None,
+        };
+        super::validate_taskbar_content_layout_plan(&plan, current).unwrap();
+        for changed in ["claude", "codex", "cursor"] {
+            assert!(super::validate_taskbar_content_layout_plan(&plan, |tool| {
+                if tool == changed {
+                    Some(99)
+                } else {
+                    current(tool)
+                }
+            })
+            .is_err());
+        }
+        assert!(super::validate_taskbar_content_layout_plan(&plan, |_| None).is_err());
+    }
+
+    #[test]
+    fn claude_policy_recovery_repairs_startup_read_and_binding_failures() {
+        for enabled in [true, false] {
+            for read_failed in [true, false] {
+                let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+                let now = std::time::Instant::now();
+                let mut attempts = Vec::new();
+                let result = super::reconcile_current_collection_policy(
+                    &Tool::Claude,
+                    || {
+                        if read_failed {
+                            anyhow::bail!("fixture startup settings locked");
+                        }
+                        Ok(collection_test_settings(&Tool::Claude, enabled))
+                    },
+                    |current| {
+                        attempts.push(current);
+                        anyhow::bail!("fixture Claude settings locked")
+                    },
+                    |failed| state.lock().unwrap().record(&Tool::Claude, failed, now),
+                );
+                assert!(result.is_err());
+                assert_eq!(attempts.len(), usize::from(!read_failed));
+                super::recover_pending_collection_policies_with(
+                    &state,
+                    || now + std::time::Duration::from_secs(1),
+                    || Ok(collection_test_settings(&Tool::Claude, enabled)),
+                    |tool, current| {
+                        assert_eq!(tool, &Tool::Claude);
+                        attempts.push(current);
+                        Ok(())
+                    },
+                    |tool, failed| {
+                        assert_eq!(tool, &Tool::Claude);
+                        assert!(!failed);
+                    },
+                )
+                .unwrap();
+                assert_eq!(attempts.last(), Some(&enabled));
+                assert_eq!(attempts.len(), 1 + usize::from(!read_failed));
+                super::recover_pending_collection_policies_with(
+                    &state,
+                    || now + std::time::Duration::from_secs(500),
+                    || panic!("healthy Claude must not reload settings"),
+                    |_, _| panic!("healthy Claude must not rewrite its statusline"),
+                    |_, _| panic!("healthy Claude must not publish failure"),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn claude_policy_recovery_preserves_unknown_files_and_uses_latest_toggle() {
+        for enabled in [true, false] {
+            let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+            let now = std::time::Instant::now();
+            state.lock().unwrap().record(&Tool::Claude, true, now);
+            assert!(super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(1),
+                || anyhow::bail!("fixture unreadable settings"),
+                |_, _| panic!("unknown Claude policy must not alter files"),
+                |tool, failed| {
+                    assert_eq!(tool, &Tool::Claude);
+                    assert!(failed);
+                },
+            )
+            .is_err());
+            let mut applied = None;
+            super::recover_pending_collection_policies_with(
+                &state,
+                || now + std::time::Duration::from_secs(3),
+                || Ok(collection_test_settings(&Tool::Claude, enabled)),
+                |tool, current| {
+                    assert_eq!(tool, &Tool::Claude);
+                    assert!(super::TASKBAR_SETTINGS_WRITE_GATE.try_lock().is_err());
+                    applied = Some(current);
+                    Ok(())
+                },
+                |_, failed| assert!(!failed),
+            )
+            .unwrap();
+            assert_eq!(applied, Some(enabled));
+        }
+    }
+
+    #[test]
+    fn claude_policy_recovery_backoff_and_direct_success_defer_unneeded_io() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let mut now = std::time::Instant::now();
+        state.lock().unwrap().record(&Tool::Claude, true, now);
+        for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
+            let due = state.lock().unwrap().entries[super::collection_tool_index(&Tool::Claude)]
+                .retry_at
+                .expect("failed Claude policy must have a retry deadline");
+            assert_eq!(due.duration_since(now).as_secs(), seconds);
+            super::recover_pending_collection_policies_with(
+                &state,
+                || due - std::time::Duration::from_millis(1),
+                || panic!("backoff must defer Claude settings IO"),
+                |_, _| panic!("backoff must defer Claude binding IO"),
+                |_, _| panic!("backoff must defer Claude health publication"),
+            )
+            .unwrap();
+            now = due;
+            assert!(super::recover_pending_collection_policies_with(
+                &state,
+                || now,
+                || Ok(collection_test_settings(&Tool::Claude, true)),
+                |_, _| anyhow::bail!("fixture file remains locked"),
+                |_, failed| assert!(failed),
+            )
+            .is_err());
+        }
+        state.lock().unwrap().record(&Tool::Claude, false, now);
+        super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(500),
+            || panic!("direct success must retire pending Claude work"),
+            |_, _| panic!("direct success must skip repeated Claude apply"),
+            |_, _| panic!("direct success must skip failure publication"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn claude_policy_recovery_failure_does_not_starve_other_pending_tools() {
+        let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+        let now = std::time::Instant::now();
+        for tool in [Tool::Claude, Tool::Codex, Tool::Grok, Tool::Antigravity] {
+            state.lock().unwrap().record(&tool, true, now);
+        }
+        let mut calls = Vec::new();
+        assert!(super::recover_pending_collection_policies_with(
+            &state,
+            || now + std::time::Duration::from_secs(1),
+            || Ok(Settings::default()),
+            |tool, _| {
+                calls.push(tool.clone());
+                if *tool == Tool::Claude {
+                    anyhow::bail!("fixture Claude binding failed");
+                }
+                Ok(())
+            },
+            |_, _| {},
+        )
+        .is_err());
+        assert_eq!(
+            calls,
+            [Tool::Claude, Tool::Codex, Tool::Grok, Tool::Antigravity]
+        );
+        assert!(state.lock().unwrap().entries[super::collection_tool_index(&Tool::Claude)].pending);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_policy_recovery_retries_real_file_lock_and_preserves_custom_command() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for enabled in [true, false] {
+            for user_changed in [true, false] {
+                let (root, home, data, _) = collection_transaction_fixture();
+                let path = home.join(".claude/settings.json");
+                let original = std::fs::read(&path).unwrap();
+                if !enabled || user_changed {
+                    apply_fixture_claude(&home, &data, true).unwrap();
+                }
+                let locked = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&path)
+                    .unwrap();
+                let state = std::sync::Mutex::new(super::CollectionPolicyRecovery::default());
+                let now = std::time::Instant::now();
+                assert!(super::reconcile_current_collection_policy(
+                    &Tool::Claude,
+                    || Ok(collection_test_settings(&Tool::Claude, enabled)),
+                    |current| apply_fixture_claude(&home, &data, current),
+                    |failed| state.lock().unwrap().record(&Tool::Claude, failed, now),
+                )
+                .is_err());
+                drop(locked);
+                let changed =
+                    br#"{"statusLine":{"command":"echo fixture-new-custom"},"other":"keep"}"#;
+                if user_changed {
+                    std::fs::write(&path, changed).unwrap();
+                }
+                let result = super::recover_pending_collection_policies_with(
+                    &state,
+                    || now + std::time::Duration::from_secs(1),
+                    || Ok(collection_test_settings(&Tool::Claude, enabled)),
+                    |tool, current| {
+                        assert_eq!(tool, &Tool::Claude);
+                        apply_fixture_claude(&home, &data, current)
+                    },
+                    |_, _| {},
+                );
+                if user_changed {
+                    assert!(result.is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), changed);
+                    assert!(
+                        state.lock().unwrap().entries[super::collection_tool_index(&Tool::Claude)]
+                            .pending
+                    );
+                } else {
+                    result.unwrap();
+                    let actual: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    assert_eq!(actual["other"], "keep");
+                    if enabled {
+                        assert!(actual["statusLine"]["command"]
+                            .as_str()
+                            .unwrap()
+                            .contains("agentjuice-statusline.exe"));
+                    } else {
+                        assert_eq!(
+                            actual,
+                            serde_json::from_slice::<serde_json::Value>(&original).unwrap()
+                        );
+                    }
+                    apply_fixture_claude(&home, &data, false).unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                            .unwrap(),
+                        serde_json::from_slice::<serde_json::Value>(&original).unwrap()
+                    );
+                }
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    fn collection_test_settings(tool: &Tool, enabled: bool) -> Settings {
+        let mut settings = Settings {
+            show_claude: false,
+            show_codex: false,
+            show_grok: false,
+            show_cursor: false,
+            show_antigravity: false,
+            ..Settings::default()
+        };
+        match tool {
+            Tool::Claude => settings.show_claude = enabled,
+            Tool::Codex => settings.show_codex = enabled,
+            Tool::Grok => settings.show_grok = enabled,
+            Tool::Cursor => settings.show_cursor = enabled,
+            Tool::Antigravity => settings.show_antigravity = enabled,
+        }
+        settings
+    }
+
+    #[test]
+    fn collection_policy_commit_tracks_every_tool_in_both_directions() {
+        for tool in [
+            Tool::Claude,
+            Tool::Codex,
+            Tool::Grok,
+            Tool::Cursor,
+            Tool::Antigravity,
+        ] {
+            for target in [true, false] {
+                let before = collection_test_settings(&tool, !target);
+                let requested = collection_test_settings(&tool, target);
+                let preflight =
+                    super::merge_settings_edits(&requested, Some(&before), &requested).unwrap();
+                assert_eq!(
+                    super::CollectionPolicy::from_settings(&preflight).enabled(&tool),
+                    target
+                );
+                let mut current = before.clone();
+                let changes =
+                    super::mutate_settings_with_collection_changes(&mut current, |current| {
+                        *current = super::merge_settings_edits(current, Some(&before), &requested)?;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(changes.transition(&tool), Some(target));
+                assert_eq!(changes.enabled_now(&tool), target);
+                assert!(changes.any());
+                let mut applied = None;
+                super::reconcile_current_collection_policy(
+                    &tool,
+                    || Ok(current.clone()),
+                    |enabled| {
+                        applied = Some(enabled);
+                        Ok(())
+                    },
+                    |_| {},
+                )
+                .unwrap();
+                assert_eq!(applied, Some(target));
+                let noop = super::mutate_settings_with_collection_changes(&mut current, |_| Ok(()))
+                    .unwrap();
+                assert!(!noop.any());
+            }
+        }
+    }
+
+    #[test]
+    fn collection_policy_delayed_jobs_read_latest_settings_for_all_tools() {
+        use std::sync::{Arc, Barrier, Mutex};
+        for tool in [
+            Tool::Claude,
+            Tool::Codex,
+            Tool::Grok,
+            Tool::Cursor,
+            Tool::Antigravity,
+        ] {
+            for latest in [true, false] {
+                let current = Arc::new(Mutex::new(collection_test_settings(&tool, !latest)));
+                let ready = Arc::new(Barrier::new(2));
+                let release = Arc::new(Barrier::new(2));
+                let worker_current = current.clone();
+                let worker_ready = ready.clone();
+                let worker_release = release.clone();
+                let worker_tool = tool.clone();
+                let worker = std::thread::spawn(move || {
+                    worker_ready.wait();
+                    worker_release.wait();
+                    let mut applied = None;
+                    super::reconcile_current_collection_policy(
+                        &worker_tool,
+                        || Ok(worker_current.lock().unwrap().clone()),
+                        |enabled| {
+                            assert!(matches!(
+                                super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                                Err(std::sync::TryLockError::WouldBlock)
+                            ));
+                            applied = Some(enabled);
+                            Ok(())
+                        },
+                        |_| {},
+                    )
+                    .unwrap();
+                    applied
+                });
+                ready.wait();
+                super::with_taskbar_settings_read(|_| {
+                    *current.lock().unwrap() = collection_test_settings(&tool, latest);
+                    Ok(())
+                })
+                .unwrap();
+                release.wait();
+                assert_eq!(worker.join().unwrap(), Some(latest));
+            }
+        }
+    }
+
+    #[test]
+    fn collection_policy_settings_failure_disables_brokers_but_leaves_files_untouched() {
+        for tool in [Tool::Claude, Tool::Codex, Tool::Grok, Tool::Antigravity] {
+            let mut applied = None;
+            let mut failed = false;
+            let result = super::reconcile_current_collection_policy(
+                &tool,
+                || anyhow::bail!("fixture settings read failed"),
+                |enabled| {
+                    applied = Some(enabled);
+                    Ok(())
+                },
+                |error| failed = error,
+            );
+            assert!(result.is_err());
+            assert!(failed);
+            assert_eq!(
+                applied,
+                if matches!(tool, Tool::Codex | Tool::Grok) {
+                    Some(false)
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn collection_policy_cursor_range_change_uses_final_settings_without_rebinding() {
+        let before = collection_test_settings(&Tool::Cursor, true);
+        let mut after = before.clone();
+        after.activity_weeks = if before.activity_weeks == 4 { 12 } else { 4 };
+        let changes = super::CollectionChanges::between(
+            super::CollectionPolicy::from_settings(&before),
+            super::CollectionPolicy::from_settings(&after),
+        );
+        assert!(changes.cursor_activity_range_changed);
+        assert!(!changes.any());
+        after.show_cursor = false;
+        let disabled = super::CollectionChanges::between(
+            super::CollectionPolicy::from_settings(&before),
+            super::CollectionPolicy::from_settings(&after),
+        );
+        assert!(!disabled.cursor_activity_range_changed);
+        assert_eq!(disabled.transition(&Tool::Cursor), Some(false));
+    }
+
+    fn collection_transaction_fixture() -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "juice-policy-transaction-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let home = root.join("home");
+        let data = root.join("data");
+        let path = data.join("settings.json");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(home.join(".claude/settings.json"),
+            br#"{"statusLine":{"type":"command","command":"echo original","extra":"keep"},"other":"keep"}"#).unwrap();
+        collection_test_settings(&Tool::Claude, false)
+            .save_to(&path)
+            .unwrap();
+        (root, home, data, path)
+    }
+
+    fn apply_fixture_claude(
+        home: &std::path::Path,
+        data: &std::path::Path,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if enabled {
+            Settings::install_statusline_wrap_at(home, data, "C:/Juice/agentjuice-statusline.exe")
+        } else {
+            Settings::restore_statusline_if_installed_at(home, data)
+        }
+    }
+
+    #[test]
+    fn collection_transaction_success_preserves_original_claude_subtree() {
+        let (root, home, data, path) = collection_transaction_fixture();
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        for enabled in [true, false] {
+            let (saved, changes) = super::persist_settings_with_collection_policy(
+                |edit| Settings::try_update_at(&path, edit),
+                |current| {
+                    current.show_claude = enabled;
+                    Ok(())
+                },
+                || Settings::try_load_from(&path),
+                |enabled| apply_fixture_claude(&home, &data, enabled),
+            )
+            .unwrap();
+            assert_eq!(saved.show_claude, enabled);
+            assert_eq!(changes.transition(&Tool::Claude), Some(enabled));
+        }
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(restored, original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collection_transaction_failed_write_restores_persisted_claude_policy() {
+        for desired in [true, false] {
+            let (root, home, data, path) = collection_transaction_fixture();
+            Settings::update_at(&path, |s| s.show_claude = !desired).unwrap();
+            apply_fixture_claude(&home, &data, !desired).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let original: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude/settings.json")).unwrap())
+                    .unwrap();
+            let mut applied = Vec::new();
+            let result = super::persist_settings_with_collection_policy(
+                |edit| {
+                    let mut current = Settings::try_load_from(&path)?;
+                    edit(&mut current)?;
+                    anyhow::bail!("fixture storage write failed")
+                },
+                |s| {
+                    s.show_claude = desired;
+                    Ok(())
+                },
+                || Settings::try_load_from(&path),
+                |enabled| {
+                    applied.push(enabled);
+                    apply_fixture_claude(&home, &data, enabled)
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(applied, [desired, !desired]);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            let restored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude/settings.json")).unwrap())
+                    .unwrap();
+            assert_eq!(restored, original);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn collection_transaction_rollback_reads_latest_persisted_state_not_old_baseline() {
+        for desired in [true, false] {
+            let (root, _home, _data, path) = collection_transaction_fixture();
+            Settings::update_at(&path, |s| s.show_claude = !desired).unwrap();
+            let mut applied = Vec::new();
+            let result = super::persist_settings_with_collection_policy(
+                |edit| {
+                    let mut current = Settings::try_load_from(&path)?;
+                    edit(&mut current)?;
+                    // Simulate an external successful write before the failed caller recovers.
+                    Settings::update_at(&path, |s| s.show_claude = desired)?;
+                    anyhow::bail!("fixture stale caller failed")
+                },
+                |s| {
+                    s.show_claude = desired;
+                    Ok(())
+                },
+                || Settings::try_load_from(&path),
+                |enabled| {
+                    applied.push(enabled);
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(applied, [desired, desired]);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn collection_transaction_failed_mutation_never_changes_claude_files() {
+        let mut applied = false;
+        let result = super::persist_settings_with_collection_policy(
+            |edit| {
+                let mut current = Settings::default();
+                edit(&mut current)?;
+                Ok(current)
+            },
+            |_| anyhow::bail!("fixture validation failed"),
+            || panic!("rollback must not read settings before any side effect"),
+            |_| {
+                applied = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!applied);
+    }
+
+    #[test]
+    fn collection_transaction_rollback_rejects_changed_user_statusline() {
+        let (root, home, data, path) = collection_transaction_fixture();
+        let user_change = br#"{"statusLine":{"command":"echo new-user"},"other":"new-user"}"#;
+        let result = super::persist_settings_with_collection_policy(
+            |edit| {
+                let mut current = Settings::try_load_from(&path)?;
+                edit(&mut current)?;
+                std::fs::write(home.join(".claude/settings.json"), user_change)?;
+                anyhow::bail!("fixture storage write failed")
+            },
+            |s| {
+                s.show_claude = true;
+                Ok(())
+            },
+            || Settings::try_load_from(&path),
+            |enabled| apply_fixture_claude(&home, &data, enabled),
+        );
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("rollback failed"));
+        assert_eq!(
+            std::fs::read(home.join(".claude/settings.json")).unwrap(),
+            user_change
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collection_transaction_apply_failure_rejects_save_and_repairs_original_policy() {
+        let (root, home, data, path) = collection_transaction_fixture();
+        let before = std::fs::read(&path).unwrap();
+        let mut applied = Vec::new();
+        let result = super::persist_settings_with_collection_policy(
+            |edit| Settings::try_update_at(&path, edit),
+            |current| {
+                current.show_claude = true;
+                Ok(())
+            },
+            || Settings::try_load_from(&path),
+            |enabled| {
+                applied.push(enabled);
+                if enabled {
+                    anyhow::bail!("fixture connection failed")
+                }
+                apply_fixture_claude(&home, &data, enabled)
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(applied, [true, false]);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn collection_transaction_keeps_settings_gate_through_write_failure_and_recovery() {
+        let held = || {
+            assert!(matches!(
+                super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ))
+        };
+        let mut applied = Vec::new();
+        let result = super::with_taskbar_settings_read(|_| {
+            super::persist_settings_with_collection_policy(
+                |edit| {
+                    held();
+                    let mut current = collection_test_settings(&Tool::Claude, false);
+                    edit(&mut current)?;
+                    anyhow::bail!("fixture write failed")
+                },
+                |current| {
+                    current.show_claude = true;
+                    Ok(())
+                },
+                || {
+                    held();
+                    Ok(collection_test_settings(&Tool::Claude, false))
+                },
+                |enabled| {
+                    held();
+                    applied.push(enabled);
+                    Ok(())
+                },
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(applied, [true, false]);
+    }
+
+    #[test]
+    fn antigravity_commit_transition_follows_current_merge_in_both_directions() {
+        for target in [true, false] {
+            let edit_baseline = Settings {
+                show_antigravity: !target,
+                ..Settings::default()
+            };
+            let edit_request = Settings {
+                show_antigravity: target,
+                ..Settings::default()
+            };
+            let preflight = edit_request.clone();
+            let planned =
+                super::merge_settings_edits(&preflight, Some(&edit_baseline), &edit_request)
+                    .unwrap();
+            assert_eq!(planned.show_antigravity, preflight.show_antigravity);
+            let mut current = edit_baseline.clone();
+            let transition =
+                super::mutate_settings_with_collection_changes(&mut current, |current| {
+                    *current =
+                        super::merge_settings_edits(current, Some(&edit_baseline), &edit_request)?;
+                    Ok(())
+                })
+                .unwrap()
+                .transition(&Tool::Antigravity);
+            assert_eq!(transition, Some(target));
+            assert_eq!(transition == Some(true), target);
+            assert_eq!(current.show_antigravity, target);
+            let mut applied = None;
+            if transition.is_some() {
+                super::reconcile_current_antigravity_cli(
+                    || Ok(current.clone()),
+                    |enabled| {
+                        applied = Some(enabled);
+                        Ok(())
+                    },
+                    |failed| assert!(!failed),
+                )
+                .unwrap();
+            }
+            assert_eq!(applied, Some(target));
+        }
+    }
+
+    #[test]
+    fn antigravity_commit_noop_skips_binding_changes() {
+        for target in [true, false] {
+            let edit_baseline = Settings {
+                show_antigravity: !target,
+                ..Settings::default()
+            };
+            let edit_request = Settings {
+                show_antigravity: target,
+                ..Settings::default()
+            };
+            let mut current = edit_request.clone();
+            let transition =
+                super::mutate_settings_with_collection_changes(&mut current, |current| {
+                    *current =
+                        super::merge_settings_edits(current, Some(&edit_baseline), &edit_request)?;
+                    Ok(())
+                })
+                .unwrap()
+                .transition(&Tool::Antigravity);
+            assert_eq!(transition, None);
+            assert_eq!(current.show_antigravity, target);
+        }
+    }
+
+    #[test]
+    fn antigravity_commit_unrelated_edit_preserves_concurrent_toggle_without_rebinding() {
+        for enabled in [true, false] {
+            let edit_baseline = Settings {
+                show_antigravity: !enabled,
+                ..Settings::default()
+            };
+            let edit_request = Settings {
+                theme: "dark".into(),
+                ..edit_baseline.clone()
+            };
+            let mut current = Settings {
+                show_antigravity: enabled,
+                ..edit_baseline.clone()
+            };
+            let transition =
+                super::mutate_settings_with_collection_changes(&mut current, |current| {
+                    *current =
+                        super::merge_settings_edits(current, Some(&edit_baseline), &edit_request)?;
+                    Ok(())
+                })
+                .unwrap()
+                .transition(&Tool::Antigravity);
+            assert_eq!(transition, None);
+            assert_eq!(current.show_antigravity, enabled);
+            assert_eq!(current.theme, "dark");
+        }
+    }
+
+    #[test]
+    fn antigravity_commit_metadata_matches_persisted_toggle_after_intervening_save() {
+        for target in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "juice-antigravity-commit-{}-{}-{target}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("settings.json");
+            let edit_baseline = Settings {
+                show_antigravity: !target,
+                ..Settings::default()
+            };
+            let edit_request = Settings {
+                show_antigravity: target,
+                ..Settings::default()
+            };
+            edit_request.save_to(&path).unwrap();
+            let preflight = Settings::try_load_from(&path).unwrap();
+            assert_eq!(preflight.show_antigravity, target);
+            Settings::update_at(&path, |current| current.show_antigravity = !target).unwrap();
+            let mut transition = None;
+            let saved = Settings::try_update_at(&path, |current| {
+                transition = super::mutate_settings_with_collection_changes(current, |current| {
+                    *current =
+                        super::merge_settings_edits(current, Some(&edit_baseline), &edit_request)?;
+                    Ok(())
+                })?
+                .transition(&Tool::Antigravity);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(transition, Some(target));
+            assert_eq!(saved.show_antigravity, target);
+            assert_eq!(
+                Settings::try_load_from(&path).unwrap().show_antigravity,
+                target
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn antigravity_commit_failed_mutation_does_not_publish_transition_or_save() {
+        let root = std::env::temp_dir().join(format!(
+            "juice-antigravity-commit-error-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let initial = Settings {
+            show_antigravity: false,
+            ..Settings::default()
+        };
+        initial.save_to(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut transition = None;
+        let result = Settings::try_update_at(&path, |current| {
+            transition = super::mutate_settings_with_collection_changes(current, |current| {
+                current.show_antigravity = true;
+                anyhow::bail!("fixture mutation failed")
+            })?
+            .transition(&Tool::Antigravity);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(transition, None);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delayed_antigravity_cli_reconciliation_uses_current_setting_in_both_directions() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Barrier,
+        };
+        for latest in [true, false] {
+            let current = Arc::new(AtomicBool::new(!latest));
+            let applied = Arc::new(AtomicBool::new(!latest));
+            let failed = Arc::new(AtomicBool::new(true));
+            let ready = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let worker_current = current.clone();
+            let worker_applied = applied.clone();
+            let worker_failed = failed.clone();
+            let worker_ready = ready.clone();
+            let worker_release = release.clone();
+            let worker = std::thread::spawn(move || {
+                let old_startup_setting = worker_current.load(Ordering::SeqCst);
+                worker_ready.wait();
+                worker_release.wait();
+                super::reconcile_current_antigravity_cli(
+                    || {
+                        let setting = worker_current.load(Ordering::SeqCst);
+                        assert_ne!(setting, old_startup_setting);
+                        Ok(Settings {
+                            show_antigravity: setting,
+                            ..Settings::default()
+                        })
+                    },
+                    |enabled| {
+                        worker_applied.store(enabled, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |error| worker_failed.store(error, Ordering::SeqCst),
+                )
+            });
+            ready.wait();
+            super::with_taskbar_settings_read(|_| {
+                current.store(latest, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+            super::reconcile_current_antigravity_cli(
+                || {
+                    Ok(Settings {
+                        show_antigravity: latest,
+                        ..Settings::default()
+                    })
+                },
+                |enabled| {
+                    applied.store(enabled, Ordering::SeqCst);
+                    Ok(())
+                },
+                |error| failed.store(error, Ordering::SeqCst),
+            )
+            .unwrap();
+            release.wait();
+            worker.join().unwrap().unwrap();
+            assert_eq!(applied.load(Ordering::SeqCst), latest);
+            assert!(!failed.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn antigravity_cli_reconciliation_holds_settings_gate_through_health_publication() {
+        let mut stages = Vec::new();
+        let gate_is_held = || {
+            assert!(matches!(
+                super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ))
+        };
+        super::reconcile_current_antigravity_cli(
+            || {
+                gate_is_held();
+                Ok(Settings::default())
+            },
+            |_| {
+                gate_is_held();
+                Ok(())
+            },
+            |failed| {
+                gate_is_held();
+                stages.push(failed);
+            },
+        )
+        .unwrap();
+        assert_eq!(stages, [false]);
+    }
+
+    #[test]
+    fn antigravity_cli_reconciliation_settings_failure_does_not_change_binding() {
+        let mut called = false;
+        let mut failed = false;
+        let result = super::reconcile_current_antigravity_cli(
+            || anyhow::bail!("fixture settings unavailable"),
+            |_| {
+                called = true;
+                Ok(())
+            },
+            |error| failed = error,
+        );
+        assert!(result.is_err());
+        assert!(!called);
+        assert!(failed);
+    }
+
+    #[test]
+    fn antigravity_cli_reconciliation_clears_previous_error_only_after_success() {
+        let mut failed = false;
+        assert!(super::reconcile_current_antigravity_cli(
+            || Ok(Settings::default()),
+            |_| anyhow::bail!("fixture binding unavailable"),
+            |error| failed = error,
+        )
+        .is_err());
+        assert!(failed);
+        super::reconcile_current_antigravity_cli(
+            || Ok(Settings::default()),
+            |_| Ok(()),
+            |error| failed = error,
+        )
+        .unwrap();
+        assert!(!failed);
+    }
+
+    #[test]
+    fn late_cursor_callback_preserves_a_tool_enabled_while_waiting() {
+        use std::sync::{mpsc, Arc, Barrier, Mutex};
+        let initial_settings = Settings {
+            show_claude: false,
+            show_codex: false,
+            show_grok: false,
+            show_cursor: true,
+            show_antigravity: false,
+            ..Settings::default()
+        };
+        let settings = Arc::new(Mutex::new(initial_settings.clone()));
+        let coordinator = Arc::new(super::CollectionCoordinator::default());
+        let cache = Arc::new(Mutex::new(None));
+        let mut cursor = status_for_signature("late-cursor");
+        cursor.tool = Tool::Cursor;
+        super::cache_cursor_status(
+            &cache,
+            chrono::Utc::now(),
+            Some(cursor.clone()),
+            Some(super::CursorStatusSource::Agent(None)),
+            None,
+            &initial_settings,
+        );
+        let release = Arc::new(Barrier::new(2));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(0);
+        let worker_settings = settings.clone();
+        let worker_coordinator = coordinator.clone();
+        let worker_release = release.clone();
+        let worker = std::thread::spawn(move || {
+            assert!(!worker_settings.lock().unwrap().show_grok);
+            started_tx.send(()).unwrap();
+            worker_release.wait();
+            let mut published = None;
+            super::deliver_cursor_result(
+                sender,
+                super::CursorCollectionResult {
+                    statuses: vec![cursor],
+                    attempted: true,
+                },
+                |result| {
+                    super::publish_late_cursor_result(
+                        result,
+                        || Ok(worker_settings.lock().unwrap().clone()),
+                        || worker_coordinator.last_result(),
+                        &cache,
+                        |snapshot| {
+                            assert!(matches!(
+                                super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                                Err(std::sync::TryLockError::WouldBlock)
+                            ));
+                            published = Some(snapshot);
+                        },
+                    )
+                    .unwrap();
+                },
+            );
+            published.unwrap()
+        });
+        started_rx.recv().unwrap();
+        // The original waiter has timed out before a newer settings/collection pass.
+        drop(receiver);
+        super::with_taskbar_settings_read(|_| {
+            settings.lock().unwrap().show_grok = true;
+            Ok(())
+        })
+        .unwrap();
+        let mut grok = status_for_signature("newly-enabled-grok");
+        grok.tool = Tool::Grok;
+        let disabled = status_for_signature("disabled-claude");
+        coordinator.run(false, || vec![grok.clone(), disabled]);
+        assert!(
+            super::filter_enabled_statuses(coordinator.last_result(), &initial_settings).is_empty()
+        );
+        release.wait();
+        let published = worker.join().unwrap();
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0], grok);
+        assert_eq!(published[1].session_id, "late-cursor");
+    }
+
+    #[test]
+    fn on_time_cursor_followup_publication_and_reply_use_current_settings_and_cache() {
+        let old_settings = Settings {
+            show_claude: false,
+            show_codex: false,
+            show_grok: false,
+            show_cursor: true,
+            show_antigravity: false,
+            ..Settings::default()
+        };
+        let mut cursor = status_for_signature("on-time-cursor");
+        cursor.tool = Tool::Cursor;
+        let cache = std::sync::Mutex::new(None);
+        super::cache_cursor_status(
+            &cache,
+            chrono::Utc::now(),
+            Some(cursor.clone()),
+            Some(super::CursorStatusSource::Agent(None)),
+            None,
+            &old_settings,
+        );
+        let mut grok = status_for_signature("new-current-grok");
+        grok.tool = Tool::Grok;
+        let latest = vec![grok.clone(), cursor.clone()];
+        let stale_reply = super::filter_enabled_statuses(latest.clone(), &old_settings);
+        assert_eq!(stale_reply, vec![cursor.clone()]);
+        let current_settings = Settings {
+            show_grok: true,
+            ..old_settings
+        };
+        let mut first_emitted = None;
+        super::publish_late_cursor_result(
+            super::CursorCollectionResult {
+                attempted: true,
+                statuses: stale_reply,
+            },
+            || Ok(current_settings.clone()),
+            || latest.clone(),
+            &cache,
+            |snapshot| first_emitted = Some(snapshot),
+        )
+        .unwrap();
+        let reply = super::consume_current_collection_snapshot(
+            || Ok(current_settings.clone()),
+            || latest.clone(),
+            &cache,
+            |snapshot| snapshot,
+        )
+        .unwrap();
+        let followup = super::consume_current_collection_snapshot(
+            || Ok(current_settings),
+            || latest.clone(),
+            &cache,
+            |snapshot| {
+                assert!(matches!(
+                    super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                snapshot
+            },
+        )
+        .unwrap();
+        assert_eq!(first_emitted.unwrap(), latest);
+        assert_eq!(reply, latest);
+        assert_eq!(followup, latest);
+    }
+
+    #[test]
+    fn final_collection_boundary_filters_disabled_tools_and_retires_failed_reads() {
+        let mut grok = status_for_signature("disabled-grok");
+        grok.tool = Tool::Grok;
+        let cache = std::sync::Mutex::new(None);
+        let snapshot = super::consume_current_collection_snapshot(
+            || {
+                Ok(Settings {
+                    show_grok: false,
+                    ..Settings::default()
+                })
+            },
+            || vec![grok],
+            &cache,
+            |snapshot| snapshot,
+        )
+        .unwrap();
+        assert!(snapshot.is_empty());
+        let error = super::consume_current_collection_snapshot(
+            || anyhow::bail!("synthetic settings read failure"),
+            || panic!("unreadable settings must not read collection"),
+            &cache,
+            |_| panic!("unreadable settings must not publish"),
+        );
+        assert!(error.is_err());
+        let error = super::consume_current_collection_snapshot(
+            || Ok(Settings::default()),
+            || {
+                super::mark_taskbar_settings_changed();
+                Vec::new()
+            },
+            &cache,
+            |_| panic!("changed generation must not publish"),
+        );
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn late_cursor_callback_skips_disabled_unattempted_or_unreadable_settings() {
+        for (attempted, enabled, load_fails) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+            drop(receiver);
+            let mut settings_reads = 0;
+            let mut outcome = None;
+            super::deliver_cursor_result(
+                sender,
+                super::CursorCollectionResult {
+                    statuses: vec![status_for_signature("late")],
+                    attempted,
+                },
+                |result| {
+                    outcome = Some(super::publish_late_cursor_result(
+                        result,
+                        || {
+                            settings_reads += 1;
+                            if load_fails {
+                                anyhow::bail!("synthetic settings read failure");
+                            }
+                            Ok(Settings {
+                                show_cursor: enabled,
+                                ..Settings::default()
+                            })
+                        },
+                        || panic!("retired callbacks must not read coordinator state"),
+                        &std::sync::Mutex::new(None),
+                        |_| panic!("retired callbacks must not publish a snapshot"),
+                    ));
+                },
+            );
+            assert_eq!(settings_reads, usize::from(attempted));
+            assert_eq!(outcome.unwrap().is_err(), load_fails);
+        }
+    }
+
+    #[test]
+    fn late_cursor_callback_rechecks_settings_generation_before_publishing() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+        drop(receiver);
+        super::deliver_cursor_result(
+            sender,
+            super::CursorCollectionResult {
+                statuses: Vec::new(),
+                attempted: true,
+            },
+            |result| {
+                super::publish_late_cursor_result(
+                    result,
+                    || {
+                        Ok(Settings {
+                            show_cursor: true,
+                            ..Settings::default()
+                        })
+                    },
+                    || {
+                        super::mark_taskbar_settings_changed();
+                        Vec::new()
+                    },
+                    &std::sync::Mutex::new(None),
+                    |_| panic!("a changed settings generation must retire the snapshot"),
+                )
+                .unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn late_cursor_callback_keeps_provider_current_filter_after_recovery_or_invalidation() {
+        for invalidated in [false, true] {
+            let settings = Settings {
+                show_grok: true,
+                show_cursor: true,
+                ..Settings::default()
+            };
+            let cache = std::sync::Mutex::new(None);
+            let mut old = status_for_signature("old-cursor");
+            old.tool = Tool::Cursor;
+            let mut fresh = old.clone();
+            fresh.session_id = "current-cursor".into();
+            // A retired result must not displace the provider's current sample,
+            // even if its timestamp sorts after the recovered account's sample.
+            old.captured_at = "2026-07-08T00:00:00Z".into();
+            super::cache_cursor_status(
+                &cache,
+                chrono::Utc::now(),
+                Some(fresh.clone()),
+                Some(super::CursorStatusSource::Agent(None)),
+                None,
+                &settings,
+            );
+            if invalidated {
+                super::cache_cursor_status(
+                    &cache,
+                    chrono::Utc::now(),
+                    None,
+                    None,
+                    Some(super::CollectionErrorKind::SourceChanged),
+                    &settings,
+                );
+            }
+            let mut grok = status_for_signature("current-grok");
+            grok.tool = Tool::Grok;
+            let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+            drop(receiver);
+            let mut published = None;
+            super::deliver_cursor_result(
+                sender,
+                super::CursorCollectionResult {
+                    statuses: vec![old],
+                    attempted: true,
+                },
+                |result| {
+                    super::publish_late_cursor_result(
+                        result,
+                        || Ok(settings),
+                        || vec![grok.clone(), fresh.clone()],
+                        &cache,
+                        |snapshot| published = Some(snapshot),
+                    )
+                    .unwrap();
+                },
+            );
+            let expected = if invalidated {
+                vec![grok]
+            } else {
+                vec![grok, fresh]
+            };
+            assert_eq!(published.unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cursor_invalidated_provider_cannot_resurrect_inflight_timeout_or_late_values() {
+        use std::sync::{mpsc, Arc, Barrier};
+        let coordinator = Arc::new(super::CollectionCoordinator::default());
+        let cache = Arc::new(std::sync::Mutex::new(None));
+        let settings = Settings::default();
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let mut old = status_for_signature("old-account");
+        old.tool = Tool::Cursor;
+        super::cache_cursor_status(
+            &cache,
+            chrono::Utc::now(),
+            Some(old.clone()),
+            Some(super::CursorStatusSource::Dashboard(scope)),
+            None,
+            &settings,
+        );
+        coordinator.run_if_idle_with_flag(|| vec![old.clone()]);
+        let release = Arc::new(Barrier::new(2));
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker_coordinator = coordinator.clone();
+        let worker_cache = cache.clone();
+        let worker_release = release.clone();
+        let worker = std::thread::spawn(move || {
+            worker_coordinator.run_if_idle_with_flag(|| {
+                super::cache_cursor_status(
+                    &worker_cache,
+                    chrono::Utc::now(),
+                    None,
+                    None,
+                    Some(super::CollectionErrorKind::SourceChanged),
+                    &settings,
+                );
+                started_tx.send(()).unwrap();
+                worker_release.wait();
+                Vec::new()
+            })
+        });
+        started_rx.recv().unwrap();
+        let (stale, attempted) =
+            coordinator.run_if_idle_with_flag(|| panic!("must reuse in-flight lane"));
+        assert!(!attempted && !stale.is_empty());
+        assert!(super::filter_current_cursor_samples(stale, &cache).is_empty());
+        assert!(super::filter_current_cursor_samples(coordinator.last_result(), &cache).is_empty());
+        let (sender, receiver) = mpsc::sync_channel(0);
+        drop(receiver);
+        let mut late = None;
+        super::deliver_cursor_result(sender, vec![old.clone()], |values| {
+            late = Some(super::filter_current_cursor_samples(values, &cache));
+        });
+        assert!(late.unwrap().is_empty());
+        let other = status_for_signature("other-tool");
+        assert_eq!(
+            super::filter_current_cursor_samples(vec![old, other.clone()], &cache),
+            vec![other]
+        );
+        release.wait();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn cursor_current_samples_preserve_age_and_drop_previous_account_after_recovery() {
+        let cache = std::sync::Mutex::new(None);
+        let settings = Settings::default();
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let mut old = status_for_signature("old-account");
+        old.tool = Tool::Cursor;
+        super::cache_cursor_status(
+            &cache,
+            chrono::Utc::now(),
+            Some(old.clone()),
+            Some(super::CursorStatusSource::Dashboard(scope)),
+            Some(super::CollectionErrorKind::Transport),
+            &settings,
+        );
+        let mut aged = old.clone();
+        aged.session.active = false;
+        assert_eq!(
+            super::filter_current_cursor_samples(vec![aged.clone()], &cache),
+            vec![aged]
+        );
+        let mut fresh = old.clone();
+        fresh.session_id = "new-account".into();
+        let new_scope = crate::cursor_dashboard::AccountScope {
+            user_id: 8,
+            ..scope
+        };
+        super::cache_cursor_status(
+            &cache,
+            chrono::Utc::now(),
+            Some(fresh.clone()),
+            Some(super::CursorStatusSource::Dashboard(new_scope)),
+            None,
+            &settings,
+        );
+        assert_eq!(
+            super::filter_current_cursor_samples(vec![old, fresh.clone()], &cache),
+            vec![fresh]
+        );
     }
 
     #[test]

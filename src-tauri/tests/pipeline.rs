@@ -329,6 +329,327 @@ fn future_captured_at_is_not_active() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn nsis_preinstall_checks_running_app_before_quarantining_statusline() {
+    let hooks = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks.nsh"),
+    )
+    .unwrap();
+    let preinstall = hooks
+        .split("!macro NSIS_HOOK_PREINSTALL")
+        .nth(1)
+        .unwrap()
+        .split("!macroend")
+        .next()
+        .unwrap();
+    let check = preinstall
+        .find("!insertmacro CheckIfAppIsRunning")
+        .expect("use Tauri's running-app check before touching the bridge");
+    assert!(check < preinstall.find("Delete ").unwrap());
+    assert!(check < preinstall.find("Rename ").unwrap());
+
+    let failure = hooks
+        .split("Function .onInstFailed")
+        .nth(1)
+        .unwrap()
+        .split("FunctionEnd")
+        .next()
+        .unwrap();
+    let restore = failure.find("kernel32::MoveFileExW").unwrap();
+    assert!(
+        failure
+            .find("StrCmp $JuiceStatuslineQuarantined 1")
+            .unwrap()
+            < restore
+    );
+    assert!(
+        failure
+            .find("Call JuiceStatuslineMatchesUpdatePayload")
+            .unwrap()
+            < restore
+    );
+    assert!(failure
+        .find("IfFileExists \"$INSTDIR\\agentjuice-statusline.juice-update-old.exe\" 0 juice_statusline_restore_done")
+        .unwrap()
+        < restore);
+    assert!(!failure.contains("Delete "));
+    assert!(
+        preinstall
+            .find("juice-statusline-update-reference.exe")
+            .unwrap()
+            < preinstall.find("Rename ").unwrap()
+    );
+}
+
+#[cfg(windows)]
+fn compile_nsis_fixture(
+    compiler: &std::path::Path,
+    script: &str,
+    directory: &std::path::Path,
+    trace: bool,
+) -> std::process::Output {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut command = Command::new(compiler);
+    command.args(["/INPUTCHARSET", "UTF8", "/NOCD", "/V2"]);
+    if trace {
+        command.arg("/V4");
+    }
+    let mut child = command
+        .arg("-")
+        .current_dir(directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "NSIS compile failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[cfg(windows)]
+fn nsis_fixture_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .replace('$', "$$")
+        .replace('"', "$\\\"")
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires JUICE_NSIS_COMPILER; executes only isolated file-operation fixtures"]
+fn nsis_cancel_fixture_preserves_canonical_statusline() {
+    use std::os::windows::process::CommandExt;
+
+    let compiler = std::path::PathBuf::from(std::env::var_os("JUICE_NSIS_COMPILER").unwrap());
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).unwrap();
+    let hooks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("windows/hooks.nsh");
+    let payload_dir = root.join("payload");
+    fs::create_dir_all(&payload_dir).unwrap();
+    let mut new_payload = vec![0x5a; 65536 + 129];
+    new_payload[..2].copy_from_slice(b"MZ");
+    new_payload[65536] = 0x7f;
+    let mut corrupt_payload = new_payload.clone();
+    *corrupt_payload.last_mut().unwrap() ^= 1;
+    let payload = payload_dir.join("agentjuice-statusline.exe");
+    fs::write(&payload, &new_payload).unwrap();
+    for (name, cancel_on, replacement, remove_backup, succeed, remove_reference) in [
+        ("cancel-before-quarantine", 1, None, false, false, false),
+        ("cancel-after-quarantine", 2, None, false, false, false),
+        (
+            "failure-after-new-bridge",
+            0,
+            Some(new_payload.as_slice()),
+            false,
+            false,
+            false,
+        ),
+        (
+            "successful-install",
+            0,
+            Some(new_payload.as_slice()),
+            false,
+            true,
+            false,
+        ),
+        (
+            "failure-after-zero-byte-bridge",
+            0,
+            Some(&[][..]),
+            false,
+            false,
+            false,
+        ),
+        (
+            "failure-after-truncated-mz-bridge",
+            0,
+            Some(&new_payload[..128]),
+            false,
+            false,
+            false,
+        ),
+        (
+            "failure-after-same-size-corrupt-bridge",
+            0,
+            Some(corrupt_payload.as_slice()),
+            false,
+            false,
+            false,
+        ),
+        (
+            "missing-backup-zero-byte-bridge",
+            0,
+            Some(&[][..]),
+            true,
+            false,
+            false,
+        ),
+        (
+            "missing-backup-valid-new-bridge",
+            0,
+            Some(new_payload.as_slice()),
+            true,
+            false,
+            false,
+        ),
+        ("missing-backup-missing-bridge", 0, None, true, false, false),
+        (
+            "unreadable-reference-zero-byte-bridge",
+            0,
+            Some(&[][..]),
+            false,
+            false,
+            true,
+        ),
+    ] {
+        let directory = root.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = directory.join("agentjuice-statusline.exe");
+        let quarantine = directory.join("agentjuice-statusline.juice-update-old.exe");
+        let executable = directory.join("fixture.exe");
+        fs::write(&canonical, b"old-bridge-fixture").unwrap();
+        let mut finish = String::new();
+        if let Some(bytes) = replacement {
+            let extracted = directory.join("extracted-fixture.bin");
+            fs::write(&extracted, bytes).unwrap();
+            finish.push_str(&format!(
+                "File \"/oname=agentjuice-statusline.exe\" \"{}\"\n",
+                nsis_fixture_path(&extracted)
+            ));
+        }
+        if remove_backup {
+            finish.push_str("Delete \"$INSTDIR\\agentjuice-statusline.juice-update-old.exe\"\n");
+        }
+        if remove_reference {
+            finish.push_str("Delete \"$PLUGINSDIR\\juice-statusline-update-reference.exe\"\n");
+        }
+        if succeed {
+            finish.push_str("!insertmacro NSIS_HOOK_POSTINSTALL");
+        } else if cancel_on == 0 {
+            finish.push_str("Abort \"fixture extraction failure\"");
+        }
+        // The real hook runs unchanged; the app check never finds or kills any process.
+        let script = format!(
+            r#"Unicode true
+Name "Juice cancellation fixture"
+OutFile "{}"
+InstallDir "{}"
+RequestExecutionLevel user
+SilentInstall silent
+AutoCloseWindow true
+!define MAINBINARYNAME "fixture-not-an-app"
+!define MAINBINARYSRCPATH "{}"
+!define PRODUCTNAME "Juice cancellation fixture"
+Var FixtureCheckCount
+!macro CheckIfAppIsRunning executableName productName
+  Call FixtureCheckRunningApp
+!macroend
+!include "{}"
+Function FixtureCheckRunningApp
+  IntOp $FixtureCheckCount $FixtureCheckCount + 1
+  IntCmp $FixtureCheckCount {cancel_on} fixture_cancel fixture_check_done fixture_check_done
+  fixture_cancel:
+    Abort "fixture cancellation"
+  fixture_check_done:
+FunctionEnd
+Section
+  SetOutPath $INSTDIR
+  !insertmacro NSIS_HOOK_PREINSTALL
+  !insertmacro CheckIfAppIsRunning "${{MAINBINARYNAME}}.exe" "${{PRODUCTNAME}}"
+  {finish}
+SectionEnd
+"#,
+            nsis_fixture_path(&executable),
+            nsis_fixture_path(&directory),
+            nsis_fixture_path(&payload_dir.join("fixture-not-an-app.exe")),
+            nsis_fixture_path(&hooks)
+        );
+        compile_nsis_fixture(&compiler, &script, &directory, false);
+        let status = std::process::Command::new(&executable)
+            .arg("/S")
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap();
+        assert_eq!(status.success(), succeed, "{name}");
+        let valid_new = replacement == Some(new_payload.as_slice());
+        let expected = if valid_new || remove_backup || remove_reference || succeed {
+            replacement
+        } else {
+            Some(b"old-bridge-fixture".as_slice())
+        };
+        assert_eq!(fs::read(&canonical).ok().as_deref(), expected, "{name}");
+        let expected_backup = !remove_backup && !succeed && (valid_new || remove_reference);
+        assert_eq!(quarantine.exists(), expected_backup, "{name}");
+        if expected_backup {
+            assert_eq!(
+                fs::read(&quarantine).unwrap(),
+                b"old-bridge-fixture",
+                "{name}"
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires JUICE_NSIS_COMPILER and JUICE_NSIS_GENERATED_SCRIPT; build only, no install"]
+fn nsis_generated_installer_checks_before_quarantine_and_compiles() {
+    let compiler = std::path::PathBuf::from(std::env::var_os("JUICE_NSIS_COMPILER").unwrap());
+    let generated =
+        std::path::PathBuf::from(std::env::var_os("JUICE_NSIS_GENERATED_SCRIPT").unwrap());
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).unwrap();
+    let script = fs::read_to_string(&generated).unwrap();
+    assert!(script.contains("!define OUTFILE \"nsis-output.exe\""));
+    let script = script.replace(
+        "!define OUTFILE \"nsis-output.exe\"",
+        &format!(
+            "!define OUTFILE \"{}\"",
+            nsis_fixture_path(&root.join("bundle.exe"))
+        ),
+    );
+    let output = compile_nsis_fixture(&compiler, &script, generated.parent().unwrap(), true);
+    let expanded = String::from_utf8(output.stdout).unwrap();
+    let install = expanded
+        .split("Section: \"Install\"")
+        .nth(1)
+        .unwrap()
+        .split("SectionEnd")
+        .next()
+        .unwrap();
+    let checks: Vec<_> = install
+        .match_indices("Plugin command: FindProcessCurrentUser agent-juice.exe")
+        .collect();
+    assert_eq!(
+        checks.len(),
+        2,
+        "the hook and Tauri each check the running app"
+    );
+    let quarantine = install
+        .find("Rename: $INSTDIR\\agentjuice-statusline.exe")
+        .unwrap();
+    assert!(checks[0].0 < quarantine && quarantine < checks[1].0);
+    assert!(root.join("bundle.exe").is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn status(tool: Tool, session_id: &str, captured_at: &str) -> AgentStatus {
     AgentStatus {
         schema_version: "agent_status.v1".into(),

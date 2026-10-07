@@ -4,6 +4,7 @@ import { applyFont } from "./font.js";
 import { createTextScaleState, fittedRingNumberSize, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations } from "./i18n.js";
 import { applyTheme } from "./theme.js";
+import { createSettingsAuthority } from "./settings-revision.js";
 
 let settings = { ...DEFAULT_SETTINGS };
 let statuses = [];
@@ -12,6 +13,7 @@ let startupStatusLoading = true;
 let statusEventGeneration = 0;
 let collectionHealthEventGeneration = 0;
 let settingsEventGeneration = 0;
+const settingsAuthority = createSettingsAuthority();
 let snapshotFallbackTimer = null;
 let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
@@ -100,6 +102,10 @@ async function invoke(command, args) {
   const fn = tauriApi().core?.invoke;
   if (!fn) return null;
   return fn(command, args);
+}
+
+function acceptSettingsSnapshot(snapshot) {
+  return settingsAuthority.accept(snapshot);
 }
 
 function withTimeout(promise, timeoutMs) {
@@ -626,14 +632,14 @@ async function loadSettings() {
   try {
     const loaded = await invoke("get_settings");
     if (settingsEventGeneration !== requestGeneration) return;
-    if (loaded && typeof loaded === "object") {
+    if (acceptSettingsSnapshot(loaded)) {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
       applyFont(settings);
       applyTranslations(settings);
     }
   } catch {
-    if (settingsEventGeneration !== requestGeneration) return;
+    if (settingsEventGeneration !== requestGeneration || settingsAuthority.current !== null) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
@@ -785,7 +791,7 @@ function bindEvents() {
       renderBar();
     });
     void listenWithRetry(listen, "settings-updated", (event) => {
-      if (event.payload && typeof event.payload === "object") {
+      if (acceptSettingsSnapshot(event.payload)) {
         settingsEventGeneration += 1;
         settings = { ...DEFAULT_SETTINGS, ...event.payload };
         applyTheme(settings);

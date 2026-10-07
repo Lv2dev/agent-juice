@@ -1,7 +1,9 @@
 use crate::http_transport::{self, HttpErrorKind, HttpMethod};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fmt,
@@ -10,6 +12,7 @@ use std::{
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 const DASHBOARD_BASE_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService";
 const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
@@ -60,6 +63,35 @@ pub struct DashboardCredentials {
 impl DashboardCredentials {
     fn access_token(&self) -> &str {
         &self.access_token
+    }
+}
+
+// Local token/config binding; this does not independently verify a JWT signature.
+pub struct CliIdentityProof {
+    pub scope: AccountScope,
+    auth_root: PathBuf,
+    config_path: PathBuf,
+    auth_digest: [u8; 32],
+    config_digest: [u8; 32],
+    auth_id: String,
+}
+
+impl CliIdentityProof {
+    pub(crate) fn auth_root(&self) -> &Path {
+        &self.auth_root
+    }
+
+    pub(crate) fn isolated_config(&self) -> Value {
+        let mut config = serde_json::json!({
+            "authInfo": {
+                "authId": self.auth_id,
+                "userId": self.scope.user_id,
+            }
+        });
+        if let Some(team_id) = self.scope.team_id {
+            config["authInfo"]["teamId"] = serde_json::json!(team_id);
+        }
+        config
     }
 }
 
@@ -187,9 +219,19 @@ pub fn state_db_path() -> Result<PathBuf, DashboardError> {
 }
 
 fn cli_auth_path() -> Result<PathBuf, DashboardError> {
-    dirs::config_dir()
-        .map(|root| root.join("Cursor").join("auth.json"))
-        .ok_or_else(|| DashboardError::unavailable("Cursor CLI auth path unavailable"))
+    cli_auth_root().map(|root| root.join("Cursor").join("auth.json"))
+}
+
+fn cli_auth_root() -> Result<PathBuf, DashboardError> {
+    #[cfg(windows)]
+    let root = std::env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::config_dir);
+    #[cfg(not(windows))]
+    let root = dirs::config_dir();
+    root.filter(|root| root.is_absolute())
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI auth root unavailable"))
 }
 
 fn cli_config_path() -> Result<PathBuf, DashboardError> {
@@ -433,13 +475,16 @@ fn positive_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
-fn validate_access_token(value: String) -> Result<String, DashboardError> {
-    if value.is_empty()
-        || value.len() > MAX_TOKEN_BYTES
-        || !value
+fn valid_access_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TOKEN_BYTES
+        && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~'))
-    {
+}
+
+fn validate_access_token(value: String) -> Result<String, DashboardError> {
+    if !valid_access_token(&value) {
         return Err(DashboardError::login("Cursor login required"));
     }
     Ok(value)
@@ -496,6 +541,192 @@ struct CursorCliConfig {
 struct CursorCliAuthInfo {
     #[serde(rename = "userId")]
     user_id: Value,
+    #[serde(rename = "authId")]
+    auth_id: Option<String>,
+    #[serde(rename = "teamId")]
+    team_id: Option<Value>,
+}
+
+fn cli_team_id(value: Option<&Value>) -> Result<Option<u64>, DashboardError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) if value == &serde_json::json!(0) || value == &serde_json::json!("0") => {
+            Ok(None)
+        }
+        Some(value) => positive_u64(Some(value))
+            .map(Some)
+            .ok_or_else(|| DashboardError::unavailable("Cursor CLI team identity unavailable")),
+    }
+}
+
+pub fn read_cli_identity(deadline: Instant) -> Result<CliIdentityProof, DashboardError> {
+    let auth_root = cli_auth_root()?;
+    read_cli_identity_from(&auth_root, &cli_config_path()?, deadline)
+}
+
+pub(crate) fn read_cli_identity_from(
+    auth_root: &Path,
+    config_path: &Path,
+    deadline: Instant,
+) -> Result<CliIdentityProof, DashboardError> {
+    let auth_path = auth_root.join("Cursor").join("auth.json");
+    let snapshot = read_cli_credential_snapshot_from(&auth_path, config_path, deadline)?;
+    Ok(CliIdentityProof {
+        scope: snapshot.scope,
+        auth_root: auth_root.to_path_buf(),
+        config_path: config_path.to_path_buf(),
+        auth_digest: snapshot.auth_digest,
+        config_digest: snapshot.config_digest,
+        auth_id: snapshot.auth_id,
+    })
+}
+
+struct CliCredentialSnapshot {
+    access_token: Zeroizing<String>,
+    scope: AccountScope,
+    auth_digest: [u8; 32],
+    config_digest: [u8; 32],
+    auth_id: String,
+}
+
+fn read_cli_credential_snapshot_from(
+    auth_path: &Path,
+    config_path: &Path,
+    deadline: Instant,
+) -> Result<CliCredentialSnapshot, DashboardError> {
+    let auth_bytes = Zeroizing::new(read_bounded_credential_file(
+        auth_path,
+        MAX_CLI_AUTH_FILE_BYTES,
+        deadline,
+    )?);
+    let config_bytes = Zeroizing::new(read_bounded_credential_file(
+        config_path,
+        MAX_CLI_CONFIG_FILE_BYTES,
+        deadline,
+    )?);
+    let mut auth: CursorCliAuth = serde_json::from_slice(&auth_bytes)
+        .map_err(|_| DashboardError::parse("Cursor CLI auth was not recognized"))?;
+    let token = Zeroizing::new(std::mem::take(&mut auth.access_token));
+    if !valid_access_token(&token) {
+        return Err(DashboardError::login("Cursor CLI login required"));
+    }
+    let config: CursorCliConfig = serde_json::from_slice(&config_bytes)
+        .map_err(|_| DashboardError::parse("Cursor CLI config was not recognized"))?;
+    let identity = config
+        .auth_info
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI identity unavailable"))?;
+    let user_id = positive_u64(Some(&identity.user_id))
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI user identity unavailable"))?;
+    let auth_id = identity
+        .auth_id
+        .filter(|id| !id.is_empty() && id.len() <= MAX_TOKEN_BYTES)
+        .ok_or_else(|| DashboardError::unavailable("Cursor CLI token identity unavailable"))?;
+    if cli_token_subject(&token)? != auth_id {
+        return Err(DashboardError::new(
+            DashboardErrorKind::ScopeChanged,
+            "Cursor CLI token and account metadata disagree",
+        ));
+    }
+    let team_id = cli_team_id(identity.team_id.as_ref())?;
+    let snapshot = CliCredentialSnapshot {
+        access_token: token,
+        scope: AccountScope { user_id, team_id },
+        auth_digest: Sha256::digest(auth_bytes.as_slice()).into(),
+        config_digest: Sha256::digest(config_bytes.as_slice()).into(),
+        auth_id,
+    };
+    verify_cli_credential_binding(
+        auth_path,
+        config_path,
+        &snapshot.auth_digest,
+        &snapshot.config_digest,
+        &snapshot.auth_id,
+        deadline,
+    )?;
+    Ok(snapshot)
+}
+
+fn cli_token_subject(token: &str) -> Result<String, DashboardError> {
+    let parts = token.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(DashboardError::unavailable(
+            "Cursor CLI token identity unavailable",
+        ));
+    }
+    let body = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .map_err(|_| DashboardError::unavailable("Cursor CLI token identity unavailable"))?,
+    );
+    #[derive(Deserialize)]
+    struct Claims {
+        sub: String,
+        exp: Option<u64>,
+    }
+    let claims: Claims = serde_json::from_slice(&body)
+        .map_err(|_| DashboardError::unavailable("Cursor CLI token identity unavailable"))?;
+    if claims.sub.is_empty()
+        || claims
+            .exp
+            .is_some_and(|exp| exp <= chrono::Utc::now().timestamp().max(0) as u64)
+    {
+        return Err(DashboardError::login(
+            "Cursor CLI token identity expired or unavailable",
+        ));
+    }
+    Ok(claims.sub)
+}
+
+pub fn verify_cli_identity(
+    proof: &CliIdentityProof,
+    deadline: Instant,
+) -> Result<(), DashboardError> {
+    verify_cli_credential_binding(
+        &proof.auth_root.join("Cursor").join("auth.json"),
+        &proof.config_path,
+        &proof.auth_digest,
+        &proof.config_digest,
+        &proof.auth_id,
+        deadline,
+    )
+}
+
+fn verify_cli_credential_binding(
+    auth_path: &Path,
+    config_path: &Path,
+    auth_digest: &[u8; 32],
+    config_digest: &[u8; 32],
+    auth_id: &str,
+    deadline: Instant,
+) -> Result<(), DashboardError> {
+    let auth = Zeroizing::new(read_bounded_credential_file(
+        auth_path,
+        MAX_CLI_AUTH_FILE_BYTES,
+        deadline,
+    )?);
+    let config = Zeroizing::new(read_bounded_credential_file(
+        config_path,
+        MAX_CLI_CONFIG_FILE_BYTES,
+        deadline,
+    )?);
+    if <[u8; 32]>::from(Sha256::digest(auth.as_slice())) != *auth_digest
+        || <[u8; 32]>::from(Sha256::digest(config.as_slice())) != *config_digest
+    {
+        return Err(DashboardError::new(
+            DashboardErrorKind::ScopeChanged,
+            "Cursor CLI authentication changed during collection",
+        ));
+    }
+    let mut auth: CursorCliAuth = serde_json::from_slice(&auth)
+        .map_err(|_| DashboardError::parse("Cursor CLI auth was not recognized"))?;
+    let token = Zeroizing::new(std::mem::take(&mut auth.access_token));
+    if cli_token_subject(&token)? != auth_id {
+        return Err(DashboardError::new(
+            DashboardErrorKind::ScopeChanged,
+            "Cursor CLI token identity changed during collection",
+        ));
+    }
+    Ok(())
 }
 
 pub fn read_credentials(deadline: Instant) -> Result<DashboardCredentials, DashboardError> {
@@ -544,24 +775,10 @@ fn read_cli_credentials_from(
     config_path: &Path,
     deadline: Instant,
 ) -> Result<DashboardCredentials, DashboardError> {
-    let auth = read_bounded_credential_file(auth_path, MAX_CLI_AUTH_FILE_BYTES, deadline)?;
-    let auth: CursorCliAuth = serde_json::from_slice(&auth)
-        .map_err(|_| DashboardError::parse("Cursor CLI auth was not recognized"))?;
-    let access_token = validate_access_token(auth.access_token)?;
-    let config = read_bounded_credential_file(config_path, MAX_CLI_CONFIG_FILE_BYTES, deadline)?;
-    let config: CursorCliConfig = serde_json::from_slice(&config)
-        .map_err(|_| DashboardError::parse("Cursor CLI config was not recognized"))?;
-    let user_id = config
-        .auth_info
-        .as_ref()
-        .and_then(|auth| positive_u64(Some(&auth.user_id)))
-        .ok_or_else(|| DashboardError::login("Cursor account identity unavailable"))?;
+    let mut snapshot = read_cli_credential_snapshot_from(auth_path, config_path, deadline)?;
     Ok(DashboardCredentials {
-        access_token,
-        scope: AccountScope {
-            user_id,
-            team_id: None,
-        },
+        access_token: std::mem::take(&mut *snapshot.access_token),
+        scope: snapshot.scope,
     })
 }
 
@@ -932,6 +1149,7 @@ mod tests {
             serde_json::json!({
                 "authInfo": {
                     "userId": user_id,
+                    "authId": "fixture-account-a",
                     "email": "fixture@example.invalid"
                 }
             })
@@ -939,6 +1157,358 @@ mod tests {
         )
         .unwrap();
         (root, auth, config)
+    }
+
+    fn identity_token(subject: &str, expires: u64) -> String {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "sub": subject,
+            "exp": expires,
+        }))
+        .unwrap();
+        format!("e30.{}.fixture-signature", URL_SAFE_NO_PAD.encode(body))
+    }
+
+    fn create_cli_identity_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let (root, auth, config) = create_cli_credentials_fixture(
+            name,
+            &identity_token("fixture-account-a", u64::MAX),
+            77,
+        );
+        std::fs::write(
+            &config,
+            serde_json::json!({
+                "authInfo": { "userId": 77, "authId": "fixture-account-a", "teamId": 7 },
+                "email": "fixture-private@example.invalid",
+                "unrelated": "fixture-private-config",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (root, auth, config)
+    }
+
+    #[test]
+    fn cli_identity_binds_token_subject_to_user_team_and_auth_root() {
+        let (root, _, config) = create_cli_identity_fixture("identity-binding");
+        let gui_path = root.join("Cursor/User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(gui_path.parent().unwrap()).unwrap();
+        drop(create_credentials_fixture(&gui_path, false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        assert_eq!(
+            read_credentials_from(&gui_path, deadline)
+                .unwrap()
+                .scope
+                .user_id,
+            42
+        );
+        let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+        assert_eq!(
+            proof.scope,
+            AccountScope {
+                user_id: 77,
+                team_id: Some(7)
+            }
+        );
+        assert_eq!(proof.auth_root(), root);
+        verify_cli_identity(&proof, deadline).unwrap();
+        let isolated = proof.isolated_config().to_string();
+        assert!(isolated.contains("fixture-account-a"));
+        assert!(!isolated.contains("accessToken"));
+        assert!(!isolated.contains("refreshToken"));
+        assert!(!isolated.contains("fixture-private"));
+        assert!(!isolated.contains("fixture-signature"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_identity_rejects_stale_metadata_opaque_tokens_and_expiry() {
+        let (root, auth, config) = create_cli_identity_fixture("identity-rejected");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for (token, expected) in [
+            (
+                identity_token("fixture-account-b", u64::MAX),
+                DashboardErrorKind::ScopeChanged,
+            ),
+            (
+                "opaque-fixture-token".into(),
+                DashboardErrorKind::Unavailable,
+            ),
+            (
+                "header.invalid.signature".into(),
+                DashboardErrorKind::Unavailable,
+            ),
+            (
+                identity_token("fixture-account-a", 1),
+                DashboardErrorKind::LoginRequired,
+            ),
+            (
+                identity_token("", u64::MAX),
+                DashboardErrorKind::LoginRequired,
+            ),
+            (
+                "invalid fixture token".into(),
+                DashboardErrorKind::LoginRequired,
+            ),
+        ] {
+            std::fs::write(&auth, serde_json::json!({"accessToken":token}).to_string()).unwrap();
+            let error = read_cli_identity_from(&root, &config, deadline)
+                .err()
+                .unwrap();
+            assert_eq!(error.kind, expected);
+            let credentials_error = read_cli_credentials_from(&auth, &config, deadline)
+                .err()
+                .unwrap();
+            assert_eq!(credentials_error, error);
+            assert!(!error.to_string().contains("fixture-account"));
+            assert!(!format!("{error:?}").contains("signature"));
+        }
+        std::fs::write(
+            &auth,
+            serde_json::json!({
+                "accessToken": identity_token("fixture-account-a", u64::MAX)
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for value in [
+            serde_json::json!({"authInfo":{"userId":77}}),
+            serde_json::json!({"authInfo":{"userId":77,"authId":""}}),
+            serde_json::json!({"authInfo":{"userId":77,"authId":"fixture-account-b"}}),
+        ] {
+            std::fs::write(&config, value.to_string()).unwrap();
+            let proof_error = read_cli_identity_from(&root, &config, deadline)
+                .err()
+                .unwrap();
+            let credentials_error = read_cli_credentials_from(&auth, &config, deadline)
+                .err()
+                .unwrap();
+            assert_eq!(credentials_error, proof_error);
+            assert!(matches!(
+                credentials_error.kind,
+                DashboardErrorKind::Unavailable | DashboardErrorKind::ScopeChanged
+            ));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_credential_snapshot_revalidation_rejects_file_changes() {
+        let (root, auth, config) = create_cli_identity_fixture("snapshot-changes");
+        let original_auth = std::fs::read(&auth).unwrap();
+        let original_config = std::fs::read(&config).unwrap();
+        for change_auth in [true, false] {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let snapshot = read_cli_credential_snapshot_from(&auth, &config, deadline).unwrap();
+            if change_auth {
+                std::fs::write(
+                    &auth,
+                    serde_json::json!({
+                        "accessToken": identity_token("fixture-account-b", u64::MAX)
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            } else {
+                std::fs::write(
+                    &config,
+                    serde_json::json!({"authInfo": {
+                        "userId": 88, "authId": "fixture-account-a", "teamId": 8
+                    }})
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            let error = verify_cli_credential_binding(
+                &auth,
+                &config,
+                &snapshot.auth_digest,
+                &snapshot.config_digest,
+                &snapshot.auth_id,
+                deadline,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+            assert!(!error.to_string().contains("fixture-account"));
+            std::fs::write(&auth, &original_auth).unwrap();
+            std::fs::write(&config, &original_config).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_credentials_and_identity_accept_subject_without_optional_expiry() {
+        let (root, auth, config) = create_cli_identity_fixture("optional-expiry");
+        let body = URL_SAFE_NO_PAD.encode(br#"{"sub":"fixture-account-a"}"#);
+        let token = format!("e30.{body}.fixture-signature");
+        std::fs::write(&auth, serde_json::json!({"accessToken": token}).to_string()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let credentials = read_cli_credentials_from(&auth, &config, deadline).unwrap();
+        let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+        assert_eq!(credentials.scope, proof.scope);
+        assert!(credentials.access_token() == token);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_identity_detects_token_rotation_config_changes_and_logout() {
+        let (root, auth, config) = create_cli_identity_fixture("identity-changes");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let original_auth = std::fs::read(&auth).unwrap();
+        let original_config = std::fs::read(&config).unwrap();
+        for path in [&auth, &config] {
+            let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+            std::fs::write(path, b"changed-fixture").unwrap();
+            assert_eq!(
+                verify_cli_identity(&proof, deadline).unwrap_err().kind,
+                DashboardErrorKind::ScopeChanged
+            );
+            std::fs::write(&auth, &original_auth).unwrap();
+            std::fs::write(&config, &original_config).unwrap();
+        }
+        let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+        std::fs::remove_file(&auth).unwrap();
+        assert!(verify_cli_identity(&proof, deadline).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_identity_without_team_accepts_proto_zero() {
+        let (root, _, config) = create_cli_identity_fixture("identity-no-team");
+        for team in [
+            serde_json::Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("0"),
+        ] {
+            std::fs::write(
+                &config,
+                serde_json::json!({"authInfo":{
+                    "userId":77,"authId":"fixture-account-a","teamId":team
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let proof =
+                read_cli_identity_from(&root, &config, Instant::now() + Duration::from_secs(2))
+                    .unwrap();
+            assert_eq!(proof.scope.team_id, None);
+            assert!(proof.isolated_config()["authInfo"].get("teamId").is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_credentials_and_identity_share_personal_and_team_scopes() {
+        let (root, auth, config) = create_cli_identity_fixture("shared-team-scope");
+        for (team, expected) in [
+            (None, None),
+            (Some(Value::Null), None),
+            (Some(serde_json::json!(0)), None),
+            (Some(serde_json::json!("0")), None),
+            (Some(serde_json::json!(7)), Some(7)),
+            (Some(serde_json::json!("7")), Some(7)),
+            (Some(serde_json::json!(u64::MAX)), Some(u64::MAX)),
+            (
+                Some(serde_json::json!(u64::MAX.to_string())),
+                Some(u64::MAX),
+            ),
+        ] {
+            let mut value = serde_json::json!({"authInfo": {
+                "userId": 77, "authId": "fixture-account-a"
+            }});
+            if let Some(team) = team {
+                value["authInfo"]["teamId"] = team;
+            }
+            std::fs::write(&config, value.to_string()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let credentials = read_cli_credentials_from(&auth, &config, deadline).unwrap();
+            let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+            assert_eq!(
+                credentials.scope,
+                AccountScope {
+                    user_id: 77,
+                    team_id: expected
+                }
+            );
+            assert_eq!(credentials.scope, proof.scope);
+            assert_eq!(
+                credentials.access_token(),
+                identity_token("fixture-account-a", u64::MAX)
+            );
+            if let Some(team_id) = expected {
+                assert_eq!(proof.isolated_config()["authInfo"]["teamId"], team_id);
+            } else {
+                assert!(proof.isolated_config()["authInfo"].get("teamId").is_none());
+            }
+            verify_cli_identity(&proof, deadline).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_credentials_and_identity_reject_invalid_team_scopes() {
+        let (root, auth, config) = create_cli_identity_fixture("invalid-team-scope");
+        for team in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(7.0),
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(""),
+            serde_json::json!("-1"),
+            serde_json::json!("1.5"),
+            serde_json::json!("fixture-private-invalid-team"),
+            serde_json::json!("18446744073709551616"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            std::fs::write(
+                &config,
+                serde_json::json!({"authInfo": {
+                    "userId": 77, "authId": "fixture-account-a", "teamId": team
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let credentials_error = read_cli_credentials_from(&auth, &config, deadline)
+                .err()
+                .unwrap();
+            let proof_error = read_cli_identity_from(&root, &config, deadline)
+                .err()
+                .unwrap();
+            assert_eq!(credentials_error.kind, DashboardErrorKind::Unavailable);
+            assert_eq!(credentials_error, proof_error);
+            assert!(!credentials_error.to_string().contains("fixture"));
+            assert!(!format!("{credentials_error:?}").contains("signature"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_shared_scope_still_detects_team_changes() {
+        let (root, auth, config) = create_cli_identity_fixture("team-scope-change");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let credentials = read_cli_credentials_from(&auth, &config, deadline).unwrap();
+        let proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+        assert_eq!(credentials.scope, proof.scope);
+        std::fs::write(
+            &config,
+            serde_json::json!({"authInfo": {
+                "userId": 77, "authId": "fixture-account-a", "teamId": 8
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_cli_identity(&proof, deadline).unwrap_err().kind,
+            DashboardErrorKind::ScopeChanged
+        );
+        let changed_credentials = read_cli_credentials_from(&auth, &config, deadline).unwrap();
+        let changed_proof = read_cli_identity_from(&root, &config, deadline).unwrap();
+        assert_eq!(changed_credentials.scope, changed_proof.scope);
+        assert_eq!(changed_proof.scope.team_id, Some(8));
+        assert_ne!(credentials.scope, changed_proof.scope);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1043,14 +1613,14 @@ mod tests {
 
     #[test]
     fn credential_sources_fall_back_to_cli_access_token_and_user_id() {
-        let (root, auth, config) =
-            create_cli_credentials_fixture("fallback", "header.payload.signature", 77);
+        let token = identity_token("fixture-account-a", u64::MAX);
+        let (root, auth, config) = create_cli_credentials_fixture("fallback", &token, 77);
         let credentials = resolve_credential_sources(
             Err(DashboardError::login("Cursor GUI login unavailable")),
             || read_cli_credentials_from(&auth, &config, Instant::now() + Duration::from_secs(2)),
         )
         .unwrap();
-        assert_eq!(credentials.access_token(), "header.payload.signature");
+        assert!(credentials.access_token() == token);
         assert_eq!(credentials.scope.user_id, 77);
         assert_eq!(credentials.scope.team_id, None);
         std::fs::remove_dir_all(root).unwrap();
@@ -1136,8 +1706,8 @@ mod tests {
 
     #[test]
     fn cli_credentials_reject_oversized_files_and_invalid_identity() {
-        let (root, auth, config) =
-            create_cli_credentials_fixture("oversized", "header.payload.signature", 77);
+        let token = identity_token("fixture-account-a", u64::MAX);
+        let (root, auth, config) = create_cli_credentials_fixture("oversized", &token, 77);
         std::fs::write(&auth, vec![b'x'; MAX_CLI_AUTH_FILE_BYTES as usize + 1]).unwrap();
         assert_eq!(
             read_cli_credentials_from(&auth, &config, Instant::now() + Duration::from_secs(2))
@@ -1149,7 +1719,7 @@ mod tests {
 
         std::fs::write(
             &auth,
-            r#"{"accessToken":"header.payload.signature","refreshToken":"ignored"}"#,
+            serde_json::json!({"accessToken": token, "refreshToken": "ignored"}).to_string(),
         )
         .unwrap();
         std::fs::write(&config, r#"{"authInfo":{"userId":0}}"#).unwrap();
@@ -1158,7 +1728,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .kind,
-            DashboardErrorKind::LoginRequired
+            DashboardErrorKind::Unavailable
         );
         std::fs::remove_dir_all(root).unwrap();
     }

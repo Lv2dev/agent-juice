@@ -1,9 +1,10 @@
 use crate::{config, paths};
 use anyhow::Context;
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Local, Offset, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, Local, Offset, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
@@ -118,12 +119,33 @@ struct GrokResponseContribution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PrefixValidation {
+    offset: u64,
+    digest: [u8; 32],
+    target_offset: u64,
+    source_modified_nanos: u64,
+    legacy_prefix_matches: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileCheckpoint {
     tool: ActivityTool,
     offset: u64,
     observed_len: u64,
     modified_millis: u64,
+    #[serde(default)]
+    source_modified_nanos: u64,
     tail_fingerprint: u64,
+    #[serde(default)]
+    anonymous_source_verified: bool,
+    #[serde(default)]
+    ambiguous_stable_ids: BTreeSet<String>,
+    #[serde(default)]
+    prefix_digest: Option<[u8; 32]>,
+    #[serde(default)]
+    prefix_needs_validation: bool,
+    #[serde(default)]
+    prefix_validation: Option<PrefixValidation>,
     #[serde(default)]
     lossy: bool,
     #[serde(default)]
@@ -145,7 +167,13 @@ impl FileCheckpoint {
             offset: 0,
             observed_len: 0,
             modified_millis: 0,
+            source_modified_nanos: 0,
             tail_fingerprint: 0,
+            anonymous_source_verified: false,
+            ambiguous_stable_ids: BTreeSet::new(),
+            prefix_digest: Some([0; 32]),
+            prefix_needs_validation: false,
+            prefix_validation: None,
             lossy: false,
             days: BTreeMap::new(),
             claude_messages: BTreeMap::new(),
@@ -161,7 +189,62 @@ impl FileCheckpoint {
             .retain(|_, contribution| contribution.date.as_str() >= cutoff);
         self.grok_responses
             .retain(|_, contribution| contribution.date.as_str() >= cutoff);
+        self.ambiguous_stable_ids.retain(|id| {
+            self.claude_messages.contains_key(id) || self.grok_responses.contains_key(id)
+        });
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ActivityTimezoneIdentity {
+    Fixed {
+        offset_seconds: i32,
+    },
+    Local {
+        key: String,
+        dynamic_daylight_disabled: bool,
+    },
+}
+
+#[cfg(windows)]
+fn local_timezone_identity() -> anyhow::Result<ActivityTimezoneIdentity> {
+    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+
+    let timezone = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation")
+        .context("read activity timezone identity")?;
+    let key = timezone
+        .get_value::<String, _>("TimeZoneKeyName")
+        .or_else(|_| timezone.get_value::<String, _>("StandardName"))
+        .context("read activity timezone key")?;
+    let key = key.trim_matches('\0').trim().to_owned();
+    anyhow::ensure!(!key.is_empty(), "activity timezone key unavailable");
+    let dynamic_daylight_disabled = timezone
+        .get_value::<u32, _>("DynamicDaylightTimeDisabled")
+        .unwrap_or(0)
+        != 0;
+    Ok(ActivityTimezoneIdentity::Local {
+        key,
+        dynamic_daylight_disabled,
+    })
+}
+
+#[cfg(not(windows))]
+fn local_timezone_identity() -> anyhow::Result<ActivityTimezoneIdentity> {
+    let key = match std::env::var("TZ") {
+        Ok(value) => format!("TZ:{value}"),
+        Err(_) => {
+            let rules = fs::read("/etc/localtime").context("read activity timezone rules")?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            rules.hash(&mut hasher);
+            format!("localtime:{:016x}", hasher.finish())
+        }
+    };
+    Ok(ActivityTimezoneIdentity::Local {
+        key,
+        dynamic_daylight_disabled: false,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,17 +252,36 @@ struct ActivityIndex {
     schema_version: String,
     timezone_offset_minutes: i32,
     #[serde(default)]
+    timezone_identity: Option<ActivityTimezoneIdentity>,
+    #[serde(default)]
     files: BTreeMap<String, FileCheckpoint>,
+    #[serde(default)]
+    legacy_files: BTreeMap<String, FileCheckpoint>,
     #[serde(default)]
     enumeration: EnumerationCheckpoint,
 }
 
 impl ActivityIndex {
+    #[cfg(test)]
     fn new(timezone_offset_minutes: i32) -> Self {
+        Self::with_timezone(
+            timezone_offset_minutes,
+            ActivityTimezoneIdentity::Fixed {
+                offset_seconds: timezone_offset_minutes * 60,
+            },
+        )
+    }
+
+    fn with_timezone(
+        timezone_offset_minutes: i32,
+        timezone_identity: ActivityTimezoneIdentity,
+    ) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.into(),
             timezone_offset_minutes,
+            timezone_identity: Some(timezone_identity),
             files: BTreeMap::new(),
+            legacy_files: BTreeMap::new(),
             enumeration: EnumerationCheckpoint::default(),
         }
     }
@@ -246,16 +348,17 @@ pub fn local_roots() -> ActivityRoots {
 pub fn refresh(show_claude: bool, show_grok: bool) -> anyhow::Result<ActivitySnapshot> {
     let _guard = SCAN_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let path = index_path().ok_or_else(|| anyhow::anyhow!("activity data path unavailable"))?;
-    let timezone = Local::now().offset().fix();
-    let mut snapshot = refresh_at(
+    let mut snapshot = refresh_in_timezone_checked(
         &path,
         &local_roots(),
         show_claude,
         false,
         show_grok,
         Utc::now(),
-        timezone,
+        Local,
+        local_timezone_identity()?,
         ScanOptions::default(),
+        local_timezone_identity,
     )?;
     for day in &mut snapshot.days {
         day.codex_tokens = 0;
@@ -274,14 +377,92 @@ pub fn refresh_at(
     timezone: FixedOffset,
     options: ScanOptions,
 ) -> anyhow::Result<ActivitySnapshot> {
-    let offset_minutes = timezone.local_minus_utc() / 60;
-    let (mut index, rebuilt) = load_index(index_path, offset_minutes);
-    let original = index.clone();
-    let deadline = Instant::now() + options.max_duration;
+    refresh_in_timezone(
+        index_path,
+        roots,
+        show_claude,
+        show_codex,
+        show_grok,
+        now,
+        timezone,
+        ActivityTimezoneIdentity::Fixed {
+            offset_seconds: timezone.local_minus_utc(),
+        },
+        options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_in_timezone<Tz: TimeZone + Copy>(
+    index_path: &Path,
+    roots: &ActivityRoots,
+    show_claude: bool,
+    show_codex: bool,
+    show_grok: bool,
+    now: DateTime<Utc>,
+    timezone: Tz,
+    timezone_identity: ActivityTimezoneIdentity,
+    options: ScanOptions,
+) -> anyhow::Result<ActivitySnapshot> {
+    refresh_in_timezone_checked(
+        index_path,
+        roots,
+        show_claude,
+        show_codex,
+        show_grok,
+        now,
+        timezone,
+        timezone_identity.clone(),
+        options,
+        || Ok(timezone_identity.clone()),
+    )
+}
+
+fn validate_timezone_identity(
+    expected: &ActivityTimezoneIdentity,
+    current: &mut impl FnMut() -> anyhow::Result<ActivityTimezoneIdentity>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        current()? == *expected,
+        "activity timezone changed during scan"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
+    index_path: &Path,
+    roots: &ActivityRoots,
+    show_claude: bool,
+    show_codex: bool,
+    show_grok: bool,
+    now: DateTime<Utc>,
+    timezone: Tz,
+    timezone_identity: ActivityTimezoneIdentity,
+    options: ScanOptions,
+    mut current_timezone: impl FnMut() -> anyhow::Result<ActivityTimezoneIdentity>,
+) -> anyhow::Result<ActivitySnapshot> {
+    validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
+    let offset_minutes = now
+        .with_timezone(&timezone)
+        .offset()
+        .fix()
+        .local_minus_utc()
+        / 60;
     let cutoff = (now.with_timezone(&timezone).date_naive()
         - ChronoDuration::days(RETENTION_DAYS - 1))
     .format("%Y-%m-%d")
     .to_string();
+    let (mut index, rebuilt) = load_index_for_timezone_since(
+        index_path,
+        offset_minutes,
+        timezone_identity.clone(),
+        &cutoff,
+    );
+    let original = index.clone();
+    // Seasonal offset changes affect display metadata, not historical date rules.
+    index.timezone_offset_minutes = offset_minutes;
+    let deadline = Instant::now() + options.max_duration;
 
     let enabled_tools = [show_claude, show_codex, show_grok];
     let current_roots = [&roots.claude, &roots.codex, &roots.grok];
@@ -327,6 +508,7 @@ pub fn refresh_at(
     } else {
         true
     };
+    validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
 
     let mut progress = ScanProgress {
         incomplete: enumeration_partial,
@@ -352,6 +534,10 @@ pub fn refresh_at(
         }
         let candidate = index.enumeration.pending.pop_front().unwrap();
         files_scanned += 1;
+        let file_key = candidate.key.clone();
+        if let Some(legacy) = index.legacy_files.get_mut(&file_key) {
+            legacy.anonymous_source_verified = false;
+        }
         let checkpoint = index
             .files
             .entry(candidate.key)
@@ -359,7 +545,7 @@ pub fn refresh_at(
         if checkpoint.tool != candidate.tool {
             *checkpoint = FileCheckpoint::new(candidate.tool);
         }
-        match scan_file(
+        let file_progress = scan_file(
             &candidate.path,
             checkpoint,
             &cutoff,
@@ -369,8 +555,17 @@ pub fn refresh_at(
                 .max_bytes
                 .saturating_sub(progress.bytes_read)
                 .min(MAX_FILE_BYTES_PER_PASS),
-        ) {
+            index
+                .legacy_files
+                .get(&file_key)
+                .and_then(|legacy| legacy.prefix_digest.map(|digest| (legacy.offset, digest))),
+        );
+        validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
+        match file_progress {
             Ok(file_progress) => {
+                if let Some(legacy) = index.legacy_files.get_mut(&file_key) {
+                    legacy.anonymous_source_verified = checkpoint.anonymous_source_verified;
+                }
                 progress.bytes_read = progress.bytes_read.saturating_add(file_progress.bytes_read);
                 progress.incomplete |= file_progress.incomplete;
                 progress.lossy |= file_progress.lossy;
@@ -393,28 +588,42 @@ pub fn refresh_at(
         index
             .files
             .retain(|_, checkpoint| checkpoint.tool != ActivityTool::Codex);
+        index
+            .legacy_files
+            .retain(|_, checkpoint| checkpoint.tool != ActivityTool::Codex);
     }
+    reconcile_legacy_history(&mut index, &cutoff);
+    // Retained proofs stay uncertain when their source is no longer enumerable.
     progress.lossy |= index.files.values().any(|checkpoint| {
-        checkpoint.lossy
+        (checkpoint.lossy || checkpoint.prefix_needs_validation)
             && match checkpoint.tool {
                 ActivityTool::Claude => show_claude,
                 ActivityTool::Codex => show_codex,
                 ActivityTool::Grok => show_grok,
             }
     });
+    progress.lossy |= index
+        .legacy_files
+        .values()
+        .any(|checkpoint| match checkpoint.tool {
+            ActivityTool::Claude => show_claude,
+            ActivityTool::Codex => show_codex,
+            ActivityTool::Grok => show_grok,
+        });
 
-    if rebuilt || index != original {
-        save_index(index_path, &index)?;
-    }
-
-    Ok(snapshot_from_index(
+    let snapshot = snapshot_from_index(
         &index,
         now,
         offset_minutes,
         progress.incomplete,
         progress.lossy,
         &cutoff,
-    ))
+    );
+    validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
+    if rebuilt || index != original {
+        save_index(index_path, &index)?;
+    }
+    Ok(snapshot)
 }
 
 fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
@@ -452,18 +661,297 @@ fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
     ordered
 }
 
+#[cfg(test)]
 fn load_index(path: &Path, offset_minutes: i32) -> (ActivityIndex, bool) {
+    load_index_for_timezone(
+        path,
+        offset_minutes,
+        ActivityTimezoneIdentity::Fixed {
+            offset_seconds: offset_minutes * 60,
+        },
+    )
+}
+
+#[cfg(test)]
+fn load_index_for_timezone(
+    path: &Path,
+    offset_minutes: i32,
+    timezone_identity: ActivityTimezoneIdentity,
+) -> (ActivityIndex, bool) {
+    load_index_for_timezone_since(path, offset_minutes, timezone_identity, "")
+}
+
+fn load_index_for_timezone_since(
+    path: &Path,
+    offset_minutes: i32,
+    timezone_identity: ActivityTimezoneIdentity,
+    cutoff: &str,
+) -> (ActivityIndex, bool) {
     let loaded = fs::read(path)
         .ok()
         .and_then(|contents| serde_json::from_slice::<ActivityIndex>(&contents).ok())
-        .filter(|index| {
-            index.schema_version == SCHEMA_VERSION
-                && index.timezone_offset_minutes == offset_minutes
-        });
+        .filter(|index| index.schema_version == SCHEMA_VERSION);
     match loaded {
-        Some(index) => (index, false),
-        None => (ActivityIndex::new(offset_minutes), path.exists()),
+        Some(mut index) => {
+            if index.timezone_identity.as_ref() == Some(&timezone_identity) {
+                return (index, false);
+            }
+            // Unknown historical dates remain available until their source can be reread.
+            for (key, mut checkpoint) in std::mem::take(&mut index.files) {
+                checkpoint.anonymous_source_verified = false;
+                match index.legacy_files.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(checkpoint);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let retained = entry.get_mut();
+                        // Offset IDs from separate rereads are not independent events.
+                        // Reset checkpoints have no observed revision, even with offset == len.
+                        let replace_anonymous = checkpoint.offset == checkpoint.observed_len
+                            && checkpoint.source_modified_nanos > 0
+                            && !checkpoint.lossy
+                            && !checkpoint.prefix_needs_validation;
+                        if has_aggregate_only_history(retained)
+                            || has_aggregate_only_history(&checkpoint)
+                        {
+                            // Unknown overlap makes these alternative histories, not a union.
+                            // Keep one whole date map so timezone shifts cannot double it.
+                            let retained_days = checkpoint_history_days(retained, cutoff);
+                            let candidate_days = checkpoint_history_days(&checkpoint, cutoff);
+                            let total = |days: &BTreeMap<String, u64>| {
+                                days.values()
+                                    .map(|tokens| u128::from(*tokens))
+                                    .sum::<u128>()
+                            };
+                            let retained_total = total(&retained_days);
+                            let candidate_total = total(&candidate_days);
+                            if (replace_anonymous || has_aggregate_only_history(&checkpoint))
+                                && (candidate_total > retained_total
+                                    || (candidate_total == retained_total
+                                        && has_aggregate_only_history(retained)
+                                        && !has_aggregate_only_history(&checkpoint)))
+                            {
+                                *retained = checkpoint;
+                            }
+                            retained.prune(cutoff);
+                            retained.anonymous_source_verified = false;
+                            continue;
+                        }
+                        if replace_anonymous {
+                            if has_anonymous_contributions(&checkpoint) {
+                                // Stable IDs in the old epoch may be the new anonymous events.
+                                retained.ambiguous_stable_ids.extend(
+                                    retained
+                                        .claude_messages
+                                        .keys()
+                                        .chain(retained.grok_responses.keys())
+                                        .filter(|id| !id.starts_with("offset:"))
+                                        .cloned(),
+                                );
+                            }
+                            retained.claude_messages.retain(|id, contribution| {
+                                if id.starts_with("offset:") {
+                                    subtract_day(
+                                        &mut retained.days,
+                                        &contribution.date,
+                                        contribution.tokens,
+                                    );
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                            retained
+                                .grok_responses
+                                .retain(|id, _| !id.starts_with("offset:"));
+                            retained.offset = checkpoint.offset;
+                            retained.tail_fingerprint = checkpoint.tail_fingerprint;
+                            retained.observed_len = checkpoint.observed_len;
+                            retained.prefix_digest = checkpoint.prefix_digest;
+                        }
+                        retained.anonymous_source_verified = false;
+                        // New stable IDs may describe the retained anonymous events.
+                        let merge_new_ids = replace_anonymous
+                            || !(retained
+                                .claude_messages
+                                .keys()
+                                .any(|id| id.starts_with("offset:"))
+                                || retained
+                                    .grok_responses
+                                    .keys()
+                                    .any(|id| id.starts_with("offset:")));
+                        if checkpoint.claude_messages.is_empty() {
+                            for (date, tokens) in checkpoint.days {
+                                let previous = retained.days.entry(date).or_default();
+                                *previous = (*previous).max(tokens);
+                            }
+                        }
+                        for (id, mut contribution) in checkpoint.claude_messages {
+                            if (id.starts_with("offset:") && !replace_anonymous)
+                                || (!merge_new_ids && !retained.claude_messages.contains_key(&id))
+                            {
+                                continue;
+                            }
+                            if let Some(previous) = retained.claude_messages.get(&id) {
+                                contribution.tokens = contribution.tokens.max(previous.tokens);
+                                subtract_day(&mut retained.days, &previous.date, previous.tokens);
+                            }
+                            add_day(&mut retained.days, &contribution.date, contribution.tokens);
+                            retained.ambiguous_stable_ids.remove(&id);
+                            retained.claude_messages.insert(id, contribution);
+                        }
+                        for (id, contribution) in checkpoint.grok_responses {
+                            if (id.starts_with("offset:") && !replace_anonymous)
+                                || (!merge_new_ids && !retained.grok_responses.contains_key(&id))
+                            {
+                                continue;
+                            }
+                            retained.ambiguous_stable_ids.remove(&id);
+                            retained.grok_responses.insert(id, contribution);
+                        }
+                    }
+                }
+            }
+            index.timezone_identity = Some(timezone_identity);
+            index.timezone_offset_minutes = offset_minutes;
+            index.enumeration = EnumerationCheckpoint::default();
+            (index, true)
+        }
+        None => (
+            ActivityIndex::with_timezone(offset_minutes, timezone_identity),
+            path.exists(),
+        ),
     }
+}
+
+fn contribution_key(file_key: &str, id: &str) -> String {
+    if id.starts_with("offset:") {
+        format!("{file_key}\0{id}")
+    } else {
+        id.to_owned()
+    }
+}
+
+fn has_anonymous_contributions(checkpoint: &FileCheckpoint) -> bool {
+    checkpoint
+        .claude_messages
+        .keys()
+        .chain(checkpoint.grok_responses.keys())
+        .any(|id| id.starts_with("offset:"))
+}
+
+fn has_aggregate_only_history(checkpoint: &FileCheckpoint) -> bool {
+    checkpoint.tool != ActivityTool::Codex
+        && !checkpoint.days.is_empty()
+        && checkpoint.claude_messages.is_empty()
+        && checkpoint.grok_responses.is_empty()
+}
+
+fn checkpoint_history_days(checkpoint: &FileCheckpoint, cutoff: &str) -> BTreeMap<String, u64> {
+    if has_aggregate_only_history(checkpoint) {
+        return checkpoint
+            .days
+            .iter()
+            .filter(|(date, _)| date.as_str() >= cutoff)
+            .map(|(date, tokens)| (date.clone(), *tokens))
+            .collect();
+    }
+    let mut days = BTreeMap::new();
+    match checkpoint.tool {
+        ActivityTool::Claude => {
+            for contribution in checkpoint.claude_messages.values() {
+                if contribution.date.as_str() >= cutoff {
+                    add_day(&mut days, &contribution.date, contribution.tokens);
+                }
+            }
+        }
+        ActivityTool::Grok => {
+            for contribution in checkpoint.grok_responses.values() {
+                if contribution.date.as_str() >= cutoff {
+                    add_day(&mut days, &contribution.date, contribution.tokens);
+                }
+            }
+        }
+        ActivityTool::Codex => return checkpoint.days.clone(),
+    }
+    days
+}
+
+fn suppress_legacy_contribution(
+    checkpoint: &FileCheckpoint,
+    id: &str,
+    current_consumed: bool,
+    current_anonymous: bool,
+) -> bool {
+    if id.starts_with("offset:") {
+        !checkpoint.anonymous_source_verified && current_consumed
+    } else {
+        checkpoint.ambiguous_stable_ids.contains(id)
+            || (!checkpoint.anonymous_source_verified && current_anonymous)
+    }
+}
+
+fn reconcile_legacy_history(index: &mut ActivityIndex, cutoff: &str) {
+    let mut claude_ids: BTreeMap<String, (String, String, u64, String)> = BTreeMap::new();
+    let mut grok_ids = BTreeSet::new();
+    for (file_key, checkpoint) in &index.files {
+        for (id, contribution) in &checkpoint.claude_messages {
+            let key = contribution_key(file_key, id);
+            if claude_ids.get(&key).is_none_or(|(_, _, tokens, date)| {
+                contribution.tokens > *tokens
+                    || (contribution.tokens == *tokens && contribution.date < *date)
+            }) {
+                claude_ids.insert(
+                    key,
+                    (
+                        file_key.clone(),
+                        id.clone(),
+                        contribution.tokens,
+                        contribution.date.clone(),
+                    ),
+                );
+            }
+        }
+        grok_ids.extend(
+            checkpoint
+                .grok_responses
+                .keys()
+                .map(|id| contribution_key(file_key, id)),
+        );
+    }
+    let files = &mut index.files;
+    index.legacy_files.retain(|file_key, checkpoint| {
+        checkpoint.prune(cutoff);
+        let anonymous_source_verified = checkpoint.anonymous_source_verified;
+        let days = &mut checkpoint.days;
+        checkpoint.claude_messages.retain(|id, contribution| {
+            if id.starts_with("offset:") && !anonymous_source_verified {
+                return true;
+            }
+            if let Some((current_file, current_id, _, _)) =
+                claude_ids.get(&contribution_key(file_key, id))
+            {
+                let current = files.get_mut(current_file).unwrap();
+                let confirmed = current.claude_messages.get_mut(current_id).unwrap();
+                if contribution.tokens > confirmed.tokens {
+                    subtract_day(&mut current.days, &confirmed.date, confirmed.tokens);
+                    confirmed.tokens = contribution.tokens;
+                    add_day(&mut current.days, &confirmed.date, confirmed.tokens);
+                }
+                subtract_day(days, &contribution.date, contribution.tokens);
+                false
+            } else {
+                true
+            }
+        });
+        checkpoint.grok_responses.retain(|id, _| {
+            (id.starts_with("offset:") && !anonymous_source_verified)
+                || !grok_ids.contains(&contribution_key(file_key, id))
+        });
+        !checkpoint.days.is_empty()
+            || !checkpoint.claude_messages.is_empty()
+            || !checkpoint.grok_responses.is_empty()
+    });
 }
 
 fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
@@ -475,11 +963,11 @@ fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect_candidates(
+fn collect_candidates<Tz: TimeZone>(
     roots: &ActivityRoots,
     enabled_tools: [bool; 3],
     cutoff: &str,
-    timezone: FixedOffset,
+    timezone: Tz,
     deadline: Instant,
     options: ScanOptions,
     checkpoint: &mut EnumerationCheckpoint,
@@ -637,6 +1125,7 @@ fn collect_candidates(
         let modified_date =
             DateTime::<Utc>::from(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH))
                 .with_timezone(&timezone)
+                .date_naive()
                 .format("%Y-%m-%d")
                 .to_string();
         if modified_date.as_str() >= cutoff {
@@ -656,36 +1145,47 @@ fn collect_candidates(
     (candidates, partial)
 }
 
-fn scan_file(
+fn scan_file<Tz: TimeZone + Copy>(
     path: &Path,
     checkpoint: &mut FileCheckpoint,
     cutoff: &str,
-    timezone: FixedOffset,
+    timezone: Tz,
     deadline: Instant,
     byte_budget: u64,
+    prefix_proof: Option<(u64, [u8; 32])>,
 ) -> anyhow::Result<ScanProgress> {
     let metadata = fs::metadata(path)?;
     let current_len = metadata.len();
     let current_modified = modified_millis(&metadata);
+    let current_revision = modified_nanos(&metadata);
+    anyhow::ensure!(current_revision > 0, "activity source revision unavailable");
 
-    if checkpoint.offset > current_len
+    let revision_changed =
+        checkpoint.offset > 0 && checkpoint.source_modified_nanos != current_revision;
+    if (checkpoint.offset > 0 && checkpoint.source_modified_nanos == 0)
+        || (revision_changed && checkpoint.prefix_digest.is_none())
+        || (revision_changed && current_len <= checkpoint.observed_len)
+        || checkpoint.offset > current_len
         || (checkpoint.offset > 0
             && checkpoint.tail_fingerprint != fingerprint_before(path, checkpoint.offset)?)
     {
         *checkpoint = FileCheckpoint::new(checkpoint.tool);
+    } else if revision_changed {
+        invalidate_prefix_proof(checkpoint);
     }
 
     if checkpoint.offset == current_len {
         checkpoint.observed_len = current_len;
         checkpoint.modified_millis = current_modified;
+        checkpoint.source_modified_nanos = current_revision;
         checkpoint.tail_fingerprint = fingerprint_before(path, checkpoint.offset)?;
         checkpoint.prune(cutoff);
-        return Ok(ScanProgress::default());
+        return validate_scanned_prefix(path, checkpoint, prefix_proof, deadline, byte_budget);
     }
 
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(checkpoint.offset))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(current_len - checkpoint.offset));
     let mut bytes_read = 0u64;
     let mut incomplete = false;
     let mut lossy = false;
@@ -705,6 +1205,8 @@ fn scan_file(
 
         if line.overflow {
             checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
+            checkpoint.prefix_digest = None;
+            checkpoint.anonymous_source_verified = false;
             checkpoint.lossy = true;
             lossy = true;
             continue;
@@ -735,16 +1237,172 @@ fn scan_file(
                 break;
             }
         }
+        // A chained digest covers every consumed byte without rereading large logs.
+        checkpoint.prefix_digest = checkpoint.prefix_digest.map(|previous| {
+            let mut hasher = Sha256::new();
+            hasher.update(previous);
+            hasher.update(&buffer);
+            hasher.finalize().into()
+        });
+        if let Some((offset, digest)) = prefix_proof {
+            if !checkpoint.prefix_needs_validation && checkpoint.offset == offset {
+                checkpoint.anonymous_source_verified = checkpoint.prefix_digest == Some(digest);
+            }
+        }
     }
 
-    checkpoint.observed_len = current_len;
-    checkpoint.modified_millis = current_modified;
+    let observed_metadata = {
+        let after = fs::metadata(path)?;
+        if after.len() < current_len
+            || (after.len() == current_len && modified_nanos(&after) != current_revision)
+        {
+            *checkpoint = FileCheckpoint::new(checkpoint.tool);
+            return Ok(ScanProgress {
+                incomplete: true,
+                lossy,
+                bytes_read,
+            });
+        }
+        if after.len() > current_len {
+            invalidate_prefix_proof(checkpoint);
+            incomplete = true;
+        }
+        after
+    };
+    checkpoint.observed_len = observed_metadata.len();
+    checkpoint.modified_millis = modified_millis(&observed_metadata);
+    checkpoint.source_modified_nanos = modified_nanos(&observed_metadata);
     checkpoint.tail_fingerprint = fingerprint_before(path, checkpoint.offset)?;
     checkpoint.prune(cutoff);
+    let validation = validate_scanned_prefix(
+        path,
+        checkpoint,
+        prefix_proof,
+        deadline,
+        byte_budget.saturating_sub(bytes_read),
+    )?;
+    incomplete |= validation.incomplete;
+    bytes_read = bytes_read.saturating_add(validation.bytes_read);
     Ok(ScanProgress {
         incomplete,
         lossy,
         bytes_read,
+    })
+}
+
+fn invalidate_prefix_proof(checkpoint: &mut FileCheckpoint) {
+    checkpoint.anonymous_source_verified = false;
+    checkpoint.prefix_needs_validation = checkpoint.prefix_digest.is_some();
+    checkpoint.prefix_validation = None;
+}
+
+fn validate_scanned_prefix(
+    path: &Path,
+    checkpoint: &mut FileCheckpoint,
+    prefix_proof: Option<(u64, [u8; 32])>,
+    deadline: Instant,
+    byte_budget: u64,
+) -> anyhow::Result<ScanProgress> {
+    if !checkpoint.prefix_needs_validation {
+        return Ok(ScanProgress::default());
+    }
+    if Instant::now() >= deadline || byte_budget == 0 {
+        return Ok(ScanProgress {
+            incomplete: true,
+            ..ScanProgress::default()
+        });
+    }
+    // Collection keeps advancing on append; only this bounded proof restarts.
+    if checkpoint.offset < checkpoint.observed_len {
+        return Ok(ScanProgress {
+            incomplete: true,
+            ..ScanProgress::default()
+        });
+    }
+    let before = fs::metadata(path)?;
+    let revision = modified_nanos(&before);
+    if before.len() != checkpoint.offset || revision == 0 {
+        checkpoint.prefix_validation = None;
+        return Ok(ScanProgress {
+            incomplete: true,
+            ..ScanProgress::default()
+        });
+    }
+    let mut validation = checkpoint
+        .prefix_validation
+        .take()
+        .filter(|validation| {
+            validation.target_offset == checkpoint.offset
+                && validation.source_modified_nanos == revision
+                && validation.offset <= validation.target_offset
+        })
+        .unwrap_or(PrefixValidation {
+            offset: 0,
+            digest: [0; 32],
+            target_offset: checkpoint.offset,
+            source_modified_nanos: revision,
+            legacy_prefix_matches: false,
+        });
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(validation.offset))?;
+    let mut reader = BufReader::new(file.take(validation.target_offset - validation.offset));
+    let mut buffer = Vec::new();
+    let mut bytes_read = 0u64;
+    while validation.offset < validation.target_offset {
+        if Instant::now() >= deadline || bytes_read >= byte_budget {
+            break;
+        }
+        let line = read_bounded_line(&mut reader, &mut buffer, MAX_LINE_BYTES)?;
+        bytes_read = bytes_read.saturating_add(line.consumed as u64);
+        if line.overflow || line.consumed == 0 {
+            *checkpoint = FileCheckpoint::new(checkpoint.tool);
+            return Ok(ScanProgress {
+                incomplete: true,
+                bytes_read,
+                ..ScanProgress::default()
+            });
+        }
+        validation.offset = validation.offset.saturating_add(line.consumed as u64);
+        let mut hasher = Sha256::new();
+        hasher.update(validation.digest);
+        hasher.update(&buffer);
+        validation.digest = hasher.finalize().into();
+        if let Some((offset, digest)) = prefix_proof {
+            if validation.offset == offset {
+                validation.legacy_prefix_matches = validation.digest == digest;
+            }
+        }
+    }
+    let after = fs::metadata(path)?;
+    if after.len() != before.len() || modified_nanos(&after) != revision {
+        checkpoint.prefix_validation = None;
+        return Ok(ScanProgress {
+            incomplete: true,
+            bytes_read,
+            ..ScanProgress::default()
+        });
+    }
+    if validation.offset < validation.target_offset {
+        checkpoint.prefix_validation = Some(validation);
+        return Ok(ScanProgress {
+            incomplete: true,
+            bytes_read,
+            ..ScanProgress::default()
+        });
+    }
+    if checkpoint.prefix_digest != Some(validation.digest) {
+        *checkpoint = FileCheckpoint::new(checkpoint.tool);
+        return Ok(ScanProgress {
+            incomplete: true,
+            bytes_read,
+            ..ScanProgress::default()
+        });
+    }
+    checkpoint.prefix_needs_validation = false;
+    checkpoint.anonymous_source_verified = validation.legacy_prefix_matches;
+    Ok(ScanProgress {
+        bytes_read,
+        ..ScanProgress::default()
     })
 }
 
@@ -801,11 +1459,11 @@ fn trim_line_ending(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn apply_claude_line(
+fn apply_claude_line<Tz: TimeZone>(
     checkpoint: &mut FileCheckpoint,
     root: &Value,
     cutoff: &str,
-    timezone: FixedOffset,
+    timezone: Tz,
     line_start: u64,
 ) {
     let Some(usage) = root.pointer("/message/usage") else {
@@ -868,11 +1526,11 @@ fn usage_token_fields(usage: &Value) -> u64 {
     .fold(0u64, u64::saturating_add)
 }
 
-fn apply_codex_line(
+fn apply_codex_line<Tz: TimeZone>(
     checkpoint: &mut FileCheckpoint,
     root: &Value,
     cutoff: &str,
-    timezone: FixedOffset,
+    timezone: Tz,
 ) {
     if root.get("type").and_then(Value::as_str) != Some("event_msg")
         || root.pointer("/payload/type").and_then(Value::as_str) != Some("token_count")
@@ -914,11 +1572,11 @@ fn apply_codex_line(
     }
 }
 
-fn apply_grok_line(
+fn apply_grok_line<Tz: TimeZone>(
     checkpoint: &mut FileCheckpoint,
     root: &Value,
     cutoff: &str,
-    timezone: FixedOffset,
+    timezone: Tz,
     line_start: u64,
 ) {
     if !matches!(
@@ -959,7 +1617,7 @@ fn apply_grok_line(
         .insert(response_id, GrokResponseContribution { date, tokens });
 }
 
-fn local_date(timestamp: Option<&Value>, timezone: FixedOffset) -> Option<String> {
+fn local_date<Tz: TimeZone>(timestamp: Option<&Value>, timezone: Tz) -> Option<String> {
     let timestamp = timestamp?;
     let value = match timestamp {
         Value::String(timestamp) => DateTime::parse_from_rfc3339(timestamp)
@@ -979,6 +1637,7 @@ fn local_date(timestamp: Option<&Value>, timezone: FixedOffset) -> Option<String
     Some(
         value
             .with_timezone(&timezone)
+            .date_naive()
             .format("%Y-%m-%d")
             .to_string(),
     )
@@ -1009,17 +1668,42 @@ fn snapshot_from_index(
     let mut days: BTreeMap<String, ActivityDay> = BTreeMap::new();
     let mut claude_messages: BTreeMap<String, &ClaudeMessageContribution> = BTreeMap::new();
     let mut grok_responses: BTreeMap<String, &GrokResponseContribution> = BTreeMap::new();
-    for (file_key, checkpoint) in &index.files {
-        if checkpoint.tool == ActivityTool::Claude {
+    for (file_key, checkpoint, legacy) in index
+        .files
+        .iter()
+        .map(|(key, checkpoint)| (key, checkpoint, false))
+        .chain(
+            index
+                .legacy_files
+                .iter()
+                .map(|(key, checkpoint)| (key, checkpoint, true)),
+        )
+    {
+        let aggregate_only =
+            legacy && checkpoint.claude_messages.is_empty() && checkpoint.grok_responses.is_empty();
+        if aggregate_only && index.files.contains_key(file_key) {
+            // Without IDs, keep the old totals as a lossy backup rather than add them twice.
+            continue;
+        }
+        let current = index.files.get(file_key).filter(|_| legacy);
+        let current_consumed = current.is_some_and(|current| current.offset > 0);
+        let current_anonymous = current.is_some_and(has_anonymous_contributions);
+        if checkpoint.tool == ActivityTool::Claude && !aggregate_only {
             for (message_id, contribution) in &checkpoint.claude_messages {
+                if legacy
+                    && suppress_legacy_contribution(
+                        checkpoint,
+                        message_id,
+                        current_consumed,
+                        current_anonymous,
+                    )
+                {
+                    continue;
+                }
                 if contribution.date.as_str() < cutoff {
                     continue;
                 }
-                let dedupe_key = if message_id.starts_with("offset:") {
-                    format!("{file_key}\0{message_id}")
-                } else {
-                    message_id.clone()
-                };
+                let dedupe_key = contribution_key(file_key, message_id);
                 let should_replace = claude_messages.get(&dedupe_key).is_none_or(|previous| {
                     contribution.tokens > previous.tokens
                         || (contribution.tokens == previous.tokens
@@ -1031,16 +1715,22 @@ fn snapshot_from_index(
             }
             continue;
         }
-        if checkpoint.tool == ActivityTool::Grok {
+        if checkpoint.tool == ActivityTool::Grok && !aggregate_only {
             for (response_id, contribution) in &checkpoint.grok_responses {
+                if legacy
+                    && suppress_legacy_contribution(
+                        checkpoint,
+                        response_id,
+                        current_consumed,
+                        current_anonymous,
+                    )
+                {
+                    continue;
+                }
                 if contribution.date.as_str() < cutoff {
                     continue;
                 }
-                let dedupe_key = if response_id.starts_with("offset:") {
-                    format!("{file_key}\0{response_id}")
-                } else {
-                    response_id.clone()
-                };
+                let dedupe_key = contribution_key(file_key, response_id);
                 grok_responses.entry(dedupe_key).or_insert(contribution);
             }
             continue;
@@ -1055,9 +1745,10 @@ fn snapshot_from_index(
             });
             match checkpoint.tool {
                 ActivityTool::Codex => day.codex_tokens = day.codex_tokens.saturating_add(*tokens),
-                ActivityTool::Claude | ActivityTool::Grok => {
-                    unreachable!("message contributions are handled above")
+                ActivityTool::Claude => {
+                    day.claude_tokens = day.claude_tokens.saturating_add(*tokens)
                 }
+                ActivityTool::Grok => day.grok_tokens = day.grok_tokens.saturating_add(*tokens),
             }
         }
     }
@@ -1183,6 +1874,15 @@ fn fingerprint_before(path: &Path, offset: u64) -> std::io::Result<u64> {
     Ok(hasher.finish())
 }
 
+fn modified_nanos(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
 fn modified_millis(metadata: &fs::Metadata) -> u64 {
     metadata
         .modified()
@@ -1270,6 +1970,1507 @@ mod tests {
             event["params"]["_meta"] = serde_json::json!({ "eventId": event_id });
         }
         event.to_string()
+    }
+
+    fn test_local_identity(key: &str) -> ActivityTimezoneIdentity {
+        ActivityTimezoneIdentity::Local {
+            key: key.into(),
+            dynamic_daylight_disabled: false,
+        }
+    }
+
+    fn write_dst_logs(root: &Path) {
+        fs::create_dir_all(root.join("claude")).unwrap();
+        fs::create_dir_all(root.join("grok")).unwrap();
+        let timestamps = ["2026-01-15T04:30:00Z", "2026-07-19T04:30:00Z"];
+        let claude = timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "message": {
+                        "id": format!("dst-message-{index}"),
+                        "usage": { "input_tokens": 10, "output_tokens": 20 }
+                    }
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("claude").join("session.jsonl"), claude + "\n").unwrap();
+        let grok = timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                grok_event_with_id(
+                    serde_json::json!(timestamp),
+                    "session/update",
+                    serde_json::json!({ "input_tokens": 4, "output_tokens": 6 }),
+                    Some(&format!("dst-response-{index}")),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("grok").join("updates.jsonl"), grok + "\n").unwrap();
+    }
+
+    #[test]
+    fn historical_dates_use_winter_and_summer_offsets_at_each_event() {
+        use chrono_tz::America::New_York;
+
+        for (timestamp, expected) in [
+            ("2026-01-15T04:30:00Z", "2026-01-14"),
+            ("2026-01-15T05:00:00Z", "2026-01-15"),
+            ("2026-07-19T03:59:59Z", "2026-07-18"),
+            ("2026-07-19T04:00:00Z", "2026-07-19"),
+            ("2026-07-19T04:30:00Z", "2026-07-19"),
+            ("2026-03-08T06:59:59Z", "2026-03-08"),
+            ("2026-03-08T07:00:00Z", "2026-03-08"),
+            ("2026-11-01T05:59:59Z", "2026-11-01"),
+            ("2026-11-01T06:00:00Z", "2026-11-01"),
+        ] {
+            let utc = DateTime::parse_from_rfc3339(timestamp).unwrap();
+            for value in [
+                serde_json::json!(timestamp),
+                serde_json::json!(utc.timestamp()),
+                serde_json::json!(utc.timestamp_millis()),
+            ] {
+                assert_eq!(
+                    local_date(Some(&value), New_York).as_deref(),
+                    Some(expected)
+                );
+            }
+        }
+        assert_eq!(
+            local_date(
+                Some(&serde_json::json!("2026-01-15T04:30:00Z")),
+                FixedOffset::west_opt(4 * 3600).unwrap(),
+            )
+            .as_deref(),
+            Some("2026-01-15")
+        );
+    }
+
+    #[test]
+    fn local_dates_apply_the_system_timezone_at_each_event() {
+        for timestamp in ["2026-01-15T04:30:00Z", "2026-07-19T04:30:00Z"] {
+            let utc = DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc);
+            let expected = Local
+                .from_utc_datetime(&utc.naive_utc())
+                .format("%Y-%m-%d")
+                .to_string();
+            assert_eq!(
+                local_date(Some(&serde_json::json!(timestamp)), Local),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn dst_scanner_keeps_correct_days_and_reuses_cache_across_seasons() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("dst-scanner");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let identity = test_local_identity("Eastern Standard Time");
+        let summer = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            identity.clone(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(summer.timezone_offset_minutes, -240);
+        assert_eq!(summer.days.len(), 2);
+        assert_eq!(summer.days[0].date, "2026-01-14");
+        assert_eq!(summer.days[1].date, "2026-07-19");
+        for day in &summer.days {
+            assert_eq!(day.claude_tokens, 30);
+            assert_eq!(day.grok_tokens, 10);
+        }
+        let (cached, rebuilt) = load_index_for_timezone(&path, -300, identity.clone());
+        assert!(!rebuilt);
+        assert_eq!(cached.files.len(), 2);
+        let mut paused_options = options();
+        paused_options.max_entries = 0;
+        let winter = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            Utc.with_ymd_and_hms(2026, 11, 19, 12, 0, 0).unwrap(),
+            New_York,
+            identity.clone(),
+            paused_options,
+        )
+        .unwrap();
+        assert_eq!(winter.timezone_offset_minutes, -300);
+        assert_eq!(winter.days, summer.days);
+        let (updated, rebuilt) = load_index_for_timezone(&path, -300, identity);
+        assert!(!rebuilt);
+        assert_eq!(updated.timezone_offset_minutes, -300);
+        assert_eq!(updated.files, cached.files);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_fixed_offset_cache_is_rebuilt_with_historical_dates() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("dst-cache-migration");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let source = root.join("claude").join("session.jsonl");
+        let original = fs::read(&source).unwrap();
+        let legacy = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            FixedOffset::west_opt(4 * 3600).unwrap(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(legacy.days[0].date, "2026-01-15");
+        let identity = test_local_identity("Eastern Standard Time");
+        let (empty, rebuilt) = load_index_for_timezone(&path, -240, identity.clone());
+        assert!(rebuilt && empty.files.is_empty());
+        assert_eq!(empty.legacy_files.len(), 2);
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("timezone_identity");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let (empty, rebuilt) = load_index_for_timezone(&path, -240, identity.clone());
+        assert!(rebuilt && empty.files.is_empty());
+        assert_eq!(empty.legacy_files.len(), 2);
+        let corrected = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            identity.clone(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(corrected.days[0].date, "2026-01-14");
+        assert_eq!(corrected.days[0].claude_tokens, 30);
+        assert_eq!(corrected.days[0].grok_tokens, 10);
+        assert_eq!(corrected.days.len(), 2);
+        assert_eq!(fs::read(source).unwrap(), original);
+        let (saved, rebuilt) = load_index_for_timezone(&path, -240, identity);
+        assert!(!rebuilt);
+        assert!(saved.timezone_identity.is_some());
+        assert!(saved.legacy_files.is_empty());
+        assert!(!corrected.partial);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn make_cache_legacy(path: &Path) {
+        let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("timezone_identity");
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn anonymous_event(tool: ActivityTool, tokens: u64) -> String {
+        let timestamp = "2026-07-19T04:30:00Z";
+        (match tool {
+            ActivityTool::Claude => serde_json::json!({
+                "timestamp": timestamp,
+                "message": { "usage": { "input_tokens": tokens } }
+            })
+            .to_string(),
+            ActivityTool::Grok => grok_event(
+                serde_json::json!(timestamp),
+                "session/update",
+                serde_json::json!({ "input_tokens": tokens }),
+            ),
+            ActivityTool::Codex => unreachable!(),
+        }) + "\n"
+    }
+
+    #[test]
+    fn anonymous_migration_rewrites_do_not_add_or_reconcile_unverified_offsets() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            for shifted in [true, false] {
+                let root = temp_root("anonymous-rewrite");
+                let folder = root.join(if tool == ActivityTool::Claude {
+                    "claude"
+                } else {
+                    "grok"
+                });
+                fs::create_dir_all(&folder).unwrap();
+                let source = folder.join(if tool == ActivityTool::Claude {
+                    "session.jsonl"
+                } else {
+                    "updates.jsonl"
+                });
+                let path = root.join("index.json");
+                let event = anonymous_event(tool, 10);
+                fs::write(&source, &event).unwrap();
+                let refresh = || {
+                    refresh_at(
+                        &path,
+                        &roots(&root),
+                        true,
+                        false,
+                        true,
+                        now(),
+                        kst(),
+                        options(),
+                    )
+                    .unwrap()
+                };
+                refresh();
+                make_cache_legacy(&path);
+                fs::write(
+                    &source,
+                    if shifted {
+                        format!("{{}}\n{event}")
+                    } else {
+                        anonymous_event(tool, 5)
+                    },
+                )
+                .unwrap();
+                for _ in 0..3 {
+                    let snapshot = refresh();
+                    let total = snapshot
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>();
+                    assert_eq!(total, if shifted { 10 } else { 5 });
+                    assert!(snapshot.local_partial && !snapshot.local_backfill_pending);
+                    let index = load_index(&path, 540).0;
+                    let legacy = index.legacy_files.values().next().unwrap();
+                    assert!(!legacy.anonymous_source_verified);
+                    assert!(
+                        legacy
+                            .claude_messages
+                            .values()
+                            .any(|value| value.tokens == 10)
+                            || legacy
+                                .grok_responses
+                                .values()
+                                .any(|value| value.tokens == 10)
+                    );
+                }
+                // Another migration keeps the latest backup, not both overlapping epochs.
+                make_cache_legacy(&path);
+                assert_eq!(
+                    refresh()
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>(),
+                    if shifted { 10 } else { 5 }
+                );
+                fs::remove_file(&source).unwrap();
+                make_cache_legacy(&path);
+                let missing = refresh();
+                assert_eq!(
+                    missing
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>(),
+                    if shifted { 10 } else { 5 }
+                );
+                assert!(missing.local_partial);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn anonymous_migration_verified_append_reconciles_without_double_counting() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("anonymous-append");
+            let folder = root.join(if tool == ActivityTool::Claude {
+                "claude"
+            } else {
+                "grok"
+            });
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join(if tool == ActivityTool::Claude {
+                "session.jsonl"
+            } else {
+                "updates.jsonl"
+            });
+            let path = root.join("index.json");
+            let first = anonymous_event(tool, 10);
+            fs::write(&source, &first).unwrap();
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            fs::write(&source, first + &anonymous_event(tool, 5)).unwrap();
+            for _ in 0..3 {
+                let snapshot = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    options(),
+                )
+                .unwrap();
+                assert_eq!(
+                    snapshot
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>(),
+                    15
+                );
+                assert!(!snapshot.local_partial && !snapshot.local_backfill_pending);
+                assert!(load_index(&path, 540).0.legacy_files.is_empty());
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn anonymous_migration_rejects_prefix_rewrites_with_identical_tail_and_length() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            for shifted in [true, false] {
+                let root = temp_root("anonymous-prefix-rewrite");
+                let folder = root.join(if tool == ActivityTool::Claude {
+                    "claude"
+                } else {
+                    "grok"
+                });
+                fs::create_dir_all(&folder).unwrap();
+                let source = folder.join(if tool == ActivityTool::Claude {
+                    "session.jsonl"
+                } else {
+                    "updates.jsonl"
+                });
+                let path = root.join("index.json");
+                let filler = "{}\n".repeat(2500);
+                let original = anonymous_event(tool, 10) + &filler;
+                fs::write(&source, &original).unwrap();
+                refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    options(),
+                )
+                .unwrap();
+                let saved = load_index(&path, 540).0;
+                let old = saved.files.values().next().unwrap();
+                make_cache_legacy(&path);
+                let rewritten = if shifted {
+                    "{}\n".to_owned() + &anonymous_event(tool, 10) + &filler[3..]
+                } else {
+                    anonymous_event(tool, 20) + &filler
+                };
+                assert_eq!(rewritten.len(), original.len());
+                fs::write(&source, rewritten).unwrap();
+                assert_eq!(
+                    fingerprint_before(&source, old.offset).unwrap(),
+                    old.tail_fingerprint
+                );
+                let snapshot = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    options(),
+                )
+                .unwrap();
+                assert_eq!(
+                    snapshot
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>(),
+                    if shifted { 10 } else { 20 }
+                );
+                assert!(snapshot.local_partial);
+                assert!(
+                    !load_index(&path, 540)
+                        .0
+                        .legacy_files
+                        .values()
+                        .next()
+                        .unwrap()
+                        .anonymous_source_verified
+                );
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn anonymous_partial_reread_and_repeated_migration_preserve_unread_history() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("anonymous-partial-remigration");
+            let folder = root.join(if tool == ActivityTool::Claude {
+                "claude"
+            } else {
+                "grok"
+            });
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join(if tool == ActivityTool::Claude {
+                "session.jsonl"
+            } else {
+                "updates.jsonl"
+            });
+            let path = root.join("index.json");
+            fs::write(
+                &source,
+                anonymous_event(tool, 10) + &anonymous_event(tool, 20),
+            )
+            .unwrap();
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            let mut bounded = options();
+            bounded.max_bytes = 1;
+            let partial = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                bounded,
+            )
+            .unwrap();
+            assert!(partial.local_partial && partial.local_backfill_pending);
+            fs::remove_file(source).unwrap();
+            for _ in 0..3 {
+                make_cache_legacy(&path);
+                let snapshot = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    options(),
+                )
+                .unwrap();
+                assert_eq!(
+                    snapshot
+                        .days
+                        .iter()
+                        .map(|day| day.claude_tokens + day.grok_tokens)
+                        .sum::<u64>(),
+                    30
+                );
+                assert!(snapshot.local_partial && !snapshot.local_backfill_pending);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn anonymous_prefix_proof_restarts_when_source_changes_between_scan_passes() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("anonymous-between-passes");
+            let folder = root.join(if tool == ActivityTool::Claude {
+                "claude"
+            } else {
+                "grok"
+            });
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join(if tool == ActivityTool::Claude {
+                "session.jsonl"
+            } else {
+                "updates.jsonl"
+            });
+            let path = root.join("index.json");
+            let filler = "{}\n".repeat(2500);
+            let original = anonymous_event(tool, 10) + &filler + &anonymous_event(tool, 20);
+            fs::write(&source, &original).unwrap();
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            let mut bounded = options();
+            bounded.max_bytes = 5500;
+            let partial = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                bounded,
+            )
+            .unwrap();
+            assert!(partial.local_backfill_pending);
+            let checkpoint = load_index(&path, 540)
+                .0
+                .files
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            assert!(
+                checkpoint.offset > TAIL_FINGERPRINT_BYTES
+                    && checkpoint.offset < checkpoint.observed_len
+            );
+            let changed = anonymous_event(tool, 90) + &filler + &anonymous_event(tool, 20);
+            assert_eq!(changed.len(), original.len());
+            fs::write(&source, changed).unwrap();
+            File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_modified(SystemTime::now() + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(
+                fingerprint_before(&source, checkpoint.offset).unwrap(),
+                checkpoint.tail_fingerprint
+            );
+            let result = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(
+                result
+                    .days
+                    .iter()
+                    .map(|day| day.claude_tokens + day.grok_tokens)
+                    .sum::<u64>(),
+                110
+            );
+            assert!(result.local_partial && !result.local_backfill_pending);
+            assert!(
+                !load_index(&path, 540)
+                    .0
+                    .legacy_files
+                    .values()
+                    .next()
+                    .unwrap()
+                    .anonymous_source_verified
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn append_during_bounded_migration_keeps_collecting_and_finishes_prefix_validation() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("bounded-append-migration");
+            let folder = root.join(if tool == ActivityTool::Claude {
+                "claude"
+            } else {
+                "grok"
+            });
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join(if tool == ActivityTool::Claude {
+                "session.jsonl"
+            } else {
+                "updates.jsonl"
+            });
+            let path = root.join("index.json");
+            fs::write(
+                &source,
+                anonymous_event(tool, 10) + &anonymous_event(tool, 20),
+            )
+            .unwrap();
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            let mut bounded = options();
+            bounded.max_bytes = 1;
+            let mut previous_offset = 0;
+            for step in 0..5 {
+                if step > 0 {
+                    OpenOptions::new()
+                        .append(true)
+                        .open(&source)
+                        .unwrap()
+                        .write_all(anonymous_event(tool, 30 + step * 10).as_bytes())
+                        .unwrap();
+                    File::options()
+                        .write(true)
+                        .open(&source)
+                        .unwrap()
+                        .set_modified(SystemTime::now() + Duration::from_secs(step))
+                        .unwrap();
+                }
+                let result = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    bounded,
+                )
+                .unwrap();
+                let saved = load_index(&path, 540).0;
+                let checkpoint = saved.files.values().next().unwrap();
+                assert!(checkpoint.offset > previous_offset);
+                previous_offset = checkpoint.offset;
+                assert!(result.local_backfill_pending);
+                assert!(!checkpoint.anonymous_source_verified);
+            }
+            let mut completed = None;
+            for _ in 0..12 {
+                let result = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    bounded,
+                )
+                .unwrap();
+                if !result.local_backfill_pending {
+                    completed = Some(result);
+                    break;
+                }
+            }
+            let result = completed.expect("quiet source finishes bounded validation");
+            assert_eq!(
+                result
+                    .days
+                    .iter()
+                    .map(|day| day.claude_tokens + day.grok_tokens)
+                    .sum::<u64>(),
+                250
+            );
+            assert!(!result.local_partial);
+            assert!(load_index(&path, 540).0.legacy_files.is_empty());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn append_with_changed_prefix_does_not_certify_old_digest() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("changed-prefix-append");
+            let folder = root.join(if tool == ActivityTool::Claude {
+                "claude"
+            } else {
+                "grok"
+            });
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join(if tool == ActivityTool::Claude {
+                "session.jsonl"
+            } else {
+                "updates.jsonl"
+            });
+            let path = root.join("index.json");
+            let filler = "{}\n".repeat(2500);
+            fs::write(
+                &source,
+                anonymous_event(tool, 10) + &filler + &anonymous_event(tool, 20),
+            )
+            .unwrap();
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            let mut bounded = options();
+            bounded.max_bytes = 5500;
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                bounded,
+            )
+            .unwrap();
+            fs::write(
+                &source,
+                anonymous_event(tool, 90)
+                    + &filler
+                    + &anonymous_event(tool, 20)
+                    + &anonymous_event(tool, 40),
+            )
+            .unwrap();
+            File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_modified(SystemTime::now() + Duration::from_secs(1))
+                .unwrap();
+            let mut final_result = None;
+            for _ in 0..12 {
+                let result = refresh_at(
+                    &path,
+                    &roots(&root),
+                    true,
+                    false,
+                    true,
+                    now(),
+                    kst(),
+                    bounded,
+                )
+                .unwrap();
+                assert!(load_index(&path, 540)
+                    .0
+                    .legacy_files
+                    .values()
+                    .all(|legacy| !legacy.anonymous_source_verified));
+                if !result.local_backfill_pending {
+                    final_result = Some(result);
+                    break;
+                }
+            }
+            let result = final_result.expect("changed prefix is reread after validation");
+            assert_eq!(
+                result
+                    .days
+                    .iter()
+                    .map(|day| day.claude_tokens + day.grok_tokens)
+                    .sum::<u64>(),
+                150
+            );
+            assert!(result.local_partial);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_saved_prefix_validation_restarts_proof_without_losing_collection() {
+        let root = temp_root("invalid-prefix-validation");
+        let source = root.join("updates.jsonl");
+        fs::write(&source, anonymous_event(ActivityTool::Grok, 10)).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Grok);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        let proof = Some((checkpoint.offset, checkpoint.prefix_digest.unwrap()));
+        invalidate_prefix_proof(&mut checkpoint);
+        checkpoint.prefix_validation = Some(PrefixValidation {
+            offset: checkpoint.offset + 1,
+            digest: [0; 32],
+            target_offset: checkpoint.offset,
+            source_modified_nanos: modified_nanos(&fs::metadata(&source).unwrap()),
+            legacy_prefix_matches: false,
+        });
+        let progress = validate_scanned_prefix(
+            &source,
+            &mut checkpoint,
+            proof,
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+        )
+        .unwrap();
+        assert!(!progress.incomplete);
+        assert!(!checkpoint.prefix_needs_validation);
+        assert!(checkpoint.anonymous_source_verified);
+        assert_eq!(
+            checkpoint
+                .grok_responses
+                .values()
+                .map(|value| value.tokens)
+                .sum::<u64>(),
+            10
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disabled_legacy_history_is_preserved_without_affecting_enabled_quality() {
+        for disabled in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("disabled-legacy-quality");
+            write_dst_logs(&root);
+            let path = root.join("index.json");
+            refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            make_cache_legacy(&path);
+            let source = if disabled == ActivityTool::Claude {
+                root.join("claude/session.jsonl")
+            } else {
+                root.join("grok/updates.jsonl")
+            };
+            fs::remove_file(source).unwrap();
+            let filtered = refresh_at(
+                &path,
+                &roots(&root),
+                disabled != ActivityTool::Claude,
+                false,
+                disabled != ActivityTool::Grok,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert!(!filtered.local_partial && !filtered.local_backfill_pending);
+            assert!(load_index(&path, 540)
+                .0
+                .legacy_files
+                .values()
+                .any(|checkpoint| checkpoint.tool == disabled));
+            let restored = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert!(restored.local_partial && !restored.local_backfill_pending);
+            assert!(restored
+                .days
+                .iter()
+                .any(|day| if disabled == ActivityTool::Claude {
+                    day.claude_tokens > 0
+                } else {
+                    day.grok_tokens > 0
+                }));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_cache_without_logs_keeps_history_and_reports_uncertain_dates() {
+        let root = temp_root("legacy-missing-logs");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let first = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        make_cache_legacy(&path);
+        fs::remove_file(root.join("claude").join("session.jsonl")).unwrap();
+        fs::remove_file(root.join("grok").join("updates.jsonl")).unwrap();
+        for _ in 0..3 {
+            let retained = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(retained.days, first.days);
+            assert!(retained.partial && retained.local_partial);
+            assert!(!retained.backfill_pending);
+            let (cache, rebuilt) = load_index(&path, 540);
+            assert!(!rebuilt);
+            assert!(cache.files.is_empty());
+            assert_eq!(cache.legacy_files.len(), 2);
+        }
+        let expired = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now() + ChronoDuration::days(RETENTION_DAYS),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert!(expired.days.is_empty());
+        assert!(!expired.partial);
+        assert!(load_index(&path, 540).0.legacy_files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_reconciles_known_ids_without_losing_unrecoverable_or_forked_history() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("legacy-partial-rebuild");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let fixed = FixedOffset::west_opt(4 * 3600).unwrap();
+        refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            fixed,
+            options(),
+        )
+        .unwrap();
+        let mut cache = load_index(&path, -240).0;
+        let claude_key = root
+            .join("claude")
+            .join("session.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let grok_key = root
+            .join("grok")
+            .join("updates.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let claude = cache.files.get_mut(&claude_key).unwrap();
+        claude.claude_messages.insert(
+            "lost-message".into(),
+            ClaudeMessageContribution {
+                date: "2026-01-16".into(),
+                tokens: 7,
+            },
+        );
+        add_day(&mut claude.days, "2026-01-16", 7);
+        let fork = claude.clone();
+        cache.files.insert("deleted-fork.jsonl".into(), fork);
+        cache
+            .files
+            .get_mut(&grok_key)
+            .unwrap()
+            .grok_responses
+            .insert(
+                "lost-response".into(),
+                GrokResponseContribution {
+                    date: "2026-01-16".into(),
+                    tokens: 17,
+                },
+            );
+        cache.timezone_identity = None;
+        save_index(&path, &cache).unwrap();
+        let identity = test_local_identity("Eastern Standard Time");
+        let mut bounded = options();
+        bounded.max_bytes = 1;
+        let partial = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            identity.clone(),
+            bounded,
+        )
+        .unwrap();
+        assert!(partial.partial && partial.backfill_pending);
+        assert_eq!(
+            partial
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            67
+        );
+        assert_eq!(
+            partial.days.iter().map(|day| day.grok_tokens).sum::<u64>(),
+            37
+        );
+        for _ in 0..3 {
+            let rebuilt = refresh_in_timezone(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                New_York,
+                identity.clone(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(
+                rebuilt
+                    .days
+                    .iter()
+                    .map(|day| day.claude_tokens)
+                    .sum::<u64>(),
+                67
+            );
+            assert_eq!(
+                rebuilt.days.iter().map(|day| day.grok_tokens).sum::<u64>(),
+                37
+            );
+            assert!(rebuilt.partial);
+            let january = rebuilt
+                .days
+                .iter()
+                .find(|day| day.date == "2026-01-14")
+                .unwrap();
+            assert_eq!(january.claude_tokens, 30);
+            assert_eq!(january.grok_tokens, 10);
+            assert!(!rebuilt.days.iter().any(|day| day.date == "2026-01-15"));
+        }
+        let (saved, _) = load_index_for_timezone(&path, -240, identity.clone());
+        assert!(saved.legacy_files.values().all(|file| {
+            file.claude_messages.keys().all(|id| id == "lost-message")
+                && file.grok_responses.keys().all(|id| id == "lost-response")
+        }));
+        let original = fs::read(root.join("claude").join("session.jsonl")).unwrap();
+        let recovered_claude = serde_json::json!({
+            "timestamp": "2026-01-16T12:00:00Z",
+            "message": { "id": "lost-message", "usage": { "input_tokens": 7 } }
+        });
+        let mut output = OpenOptions::new()
+            .append(true)
+            .open(root.join("claude").join("session.jsonl"))
+            .unwrap();
+        writeln!(output, "{recovered_claude}").unwrap();
+        let mut grok_output = OpenOptions::new()
+            .append(true)
+            .open(root.join("grok").join("updates.jsonl"))
+            .unwrap();
+        writeln!(
+            grok_output,
+            "{}",
+            grok_event_with_id(
+                serde_json::json!("2026-01-16T12:00:00Z"),
+                "session/update",
+                serde_json::json!({ "input_tokens": 17 }),
+                Some("lost-response"),
+            )
+        )
+        .unwrap();
+        drop((output, grok_output));
+        let recovered = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            identity.clone(),
+            options(),
+        )
+        .unwrap();
+        assert!(!recovered.partial && !recovered.backfill_pending);
+        assert_eq!(
+            recovered
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            67
+        );
+        assert_eq!(
+            recovered
+                .days
+                .iter()
+                .map(|day| day.grok_tokens)
+                .sum::<u64>(),
+            37
+        );
+        assert!(load_index_for_timezone(&path, -240, identity)
+            .0
+            .legacy_files
+            .is_empty());
+        assert!(fs::read(root.join("claude").join("session.jsonl"))
+            .unwrap()
+            .starts_with(&original));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_keeps_larger_cached_claude_total_on_the_confirmed_source_date() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("legacy-larger-total");
+        let source = root.join("claude").join("session.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let write_message = |tokens: u64| {
+            fs::write(
+                &source,
+                serde_json::json!({
+                    "timestamp": "2026-01-15T04:30:00Z",
+                    "message": { "id": "same-message", "usage": { "input_tokens": tokens } }
+                })
+                .to_string()
+                    + "\n",
+            )
+            .unwrap();
+        };
+        write_message(30);
+        let path = root.join("index.json");
+        let before = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            FixedOffset::west_opt(4 * 3600).unwrap(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(before.days[0].date, "2026-01-15");
+        assert_eq!(before.days[0].claude_tokens, 30);
+        make_cache_legacy(&path);
+        write_message(20);
+        let identity = test_local_identity("Eastern Standard Time");
+        for _ in 0..3 {
+            let rebuilt = refresh_in_timezone(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                false,
+                now(),
+                New_York,
+                identity.clone(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(rebuilt.days.len(), 1);
+            assert_eq!(rebuilt.days[0].date, "2026-01-14");
+            assert_eq!(rebuilt.days[0].claude_tokens, 30);
+            assert!(!rebuilt.partial);
+            let (saved, _) = load_index_for_timezone(&path, -240, identity.clone());
+            assert!(saved.legacy_files.is_empty());
+            assert_eq!(saved.files.values().next().unwrap().days["2026-01-14"], 30);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_aggregate_only_history_is_preserved_as_lossy_backup_without_double_counting() {
+        let root = temp_root("legacy-aggregate-only");
+        let path = root.join("index.json");
+        let source = root.join("claude").join("session.jsonl");
+        let key = source.to_string_lossy().into_owned();
+        let mut cache = ActivityIndex::new(540);
+        cache.timezone_identity = None;
+        let mut legacy = FileCheckpoint::new(ActivityTool::Claude);
+        legacy.days.insert("2026-07-19".into(), 30);
+        cache.files.insert(key.clone(), legacy);
+        save_index(&path, &cache).unwrap();
+        let retained = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(retained.days[0].claude_tokens, 30);
+        assert!(retained.partial && !retained.backfill_pending);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, concat!(
+            r#"{"timestamp":"2026-07-19T01:00:00Z","message":{"id":"restored","usage":{"input_tokens":30}}}"#,
+            "\n"
+        )).unwrap();
+        for _ in 0..3 {
+            let rebuilt = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                false,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(rebuilt.days[0].claude_tokens, 30);
+            assert!(rebuilt.partial);
+            assert_eq!(
+                load_index(&path, 540).0.legacy_files[&key].days["2026-07-19"],
+                30
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn timezone_change_during_scan_never_creates_an_index_or_returns_a_snapshot() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("timezone-scan-abort");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let expected = test_local_identity("Eastern Standard Time");
+        let mut checks = 0;
+        let result = refresh_in_timezone_checked(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            expected.clone(),
+            options(),
+            || {
+                checks += 1;
+                Ok(if checks >= 3 {
+                    test_local_identity("SA Western Standard Time")
+                } else {
+                    expected.clone()
+                })
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("timezone changed"));
+        assert_eq!(checks, 3);
+        assert!(!path.exists());
+        let recovered = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            expected,
+            options(),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            60
+        );
+        assert_eq!(
+            recovered
+                .days
+                .iter()
+                .map(|day| day.grok_tokens)
+                .sum::<u64>(),
+            20
+        );
+        assert!(!recovered.partial);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn final_timezone_validation_preserves_existing_legacy_cache_on_change_or_failure() {
+        use chrono_tz::America::New_York;
+
+        let root = temp_root("timezone-migration-abort");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        make_cache_legacy(&path);
+        fs::remove_file(root.join("claude").join("session.jsonl")).unwrap();
+        fs::remove_file(root.join("grok").join("updates.jsonl")).unwrap();
+        let original = fs::read(&path).unwrap();
+        let identity = test_local_identity("Eastern Standard Time");
+        for unreadable in [false, true] {
+            let mut checks = 0;
+            let result = refresh_in_timezone_checked(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                true,
+                now(),
+                New_York,
+                identity.clone(),
+                options(),
+                || {
+                    checks += 1;
+                    if checks == 3 {
+                        if unreadable {
+                            anyhow::bail!("fixture timezone unavailable");
+                        }
+                        return Ok(test_local_identity("SA Western Standard Time"));
+                    }
+                    Ok(identity.clone())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(checks, 3);
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+        let retained = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            identity,
+            options(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            60
+        );
+        assert_eq!(
+            retained.days.iter().map(|day| day.grok_tokens).sum::<u64>(),
+            20
+        );
+        assert!(retained.partial && !retained.backfill_pending);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_current_offset_timezone_switch_rebuilds_and_daylight_setting_invalidates() {
+        use chrono_tz::America::{New_York, Puerto_Rico};
+
+        let root = temp_root("dst-timezone-switch");
+        write_dst_logs(&root);
+        let path = root.join("index.json");
+        let eastern = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            New_York,
+            test_local_identity("Eastern Standard Time"),
+            options(),
+        )
+        .unwrap();
+        let identity = test_local_identity("SA Western Standard Time");
+        let (empty, rebuilt) = load_index_for_timezone(&path, -240, identity.clone());
+        assert!(rebuilt && empty.files.is_empty());
+        let switched = refresh_in_timezone(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            true,
+            now(),
+            Puerto_Rico,
+            identity,
+            options(),
+        )
+        .unwrap();
+        assert_eq!(
+            switched.timezone_offset_minutes,
+            eastern.timezone_offset_minutes
+        );
+        assert_eq!(eastern.days[0].date, "2026-01-14");
+        assert_eq!(switched.days[0].date, "2026-01-15");
+        assert_eq!(switched.days[0].claude_tokens, 30);
+        assert_eq!(switched.days[0].grok_tokens, 10);
+        let (empty, rebuilt) = load_index_for_timezone(
+            &path,
+            -240,
+            ActivityTimezoneIdentity::Local {
+                key: "SA Western Standard Time".into(),
+                dynamic_daylight_disabled: true,
+            },
+        );
+        assert!(rebuilt && empty.files.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -89,13 +89,13 @@ impl std::fmt::Display for ClaudeUsageRateLimited {
 impl std::error::Error for ClaudeUsageRateLimited {}
 
 #[cfg(windows)]
-struct ProcessTree {
+pub(crate) struct ProcessTree {
     job: windows::Win32::Foundation::HANDLE,
 }
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn create() -> anyhow::Result<Self> {
+    pub(crate) fn create() -> anyhow::Result<Self> {
         use windows::{
             core::PCWSTR,
             Win32::System::JobObjects::{
@@ -119,7 +119,7 @@ impl ProcessTree {
         Ok(tree)
     }
 
-    fn assign(&self, child: &Child) -> anyhow::Result<()> {
+    pub(crate) fn assign(&self, child: &Child) -> anyhow::Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::{Foundation::HANDLE, System::JobObjects::AssignProcessToJobObject};
 
@@ -127,7 +127,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    fn resume(child: &Child) -> anyhow::Result<()> {
+    pub(crate) fn resume(child: &Child) -> anyhow::Result<()> {
         use std::os::windows::io::AsRawHandle;
 
         #[link(name = "ntdll")]
@@ -142,7 +142,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    fn terminate(&self) -> bool {
+    pub(crate) fn terminate(&self) -> bool {
         use windows::Win32::System::JobObjects::TerminateJobObject;
         unsafe { TerminateJobObject(self.job, 1) }.is_ok()
     }

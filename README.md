@@ -33,9 +33,9 @@ Juice는 이미 로그인해 둔 AI 코딩 도구의 한도를 읽어 **작업�
 | Codex | 계정이 현재 제공하는 **5시간·주간 한도** | 켜짐 |
 | Grok Build | **현재 주간 또는 월간 한도** 하나 | 꺼짐 |
 | Cursor | **Cursor Models/Other Models 월간 풀** | 꺼짐 |
-| Antigravity | 실행 중인 데스크톱 앱을 통한 **Gemini의 5시간·주간 한도** | 꺼짐 |
+| Antigravity | Desktop 또는 CLI statusline을 통한 **Gemini의 5시간·주간 한도** | 꺼짐 |
 
-Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있습니다. Antigravity는 앱이 닫힌 상태의 독립 계정 조회와 토큰 활동을 아직 지원하지 않습니다.
+Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 실제 한도만 표시합니다. 잔여량과 사용량 중 원하는 표시 기준을 고를 수 있습니다. Antigravity는 Desktop 우선이며, Desktop이 꺼져 있을 때만 CLI 이벤트를 읽습니다. 독립 계정 조회와 토큰 활동은 지원하지 않습니다.
 
 ### 주요 기능
 
@@ -43,12 +43,12 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 | --- | --- |
 | 잔여량·사용량 선택 | 게이지, 숫자, 임계값을 모두 잔여량 또는 사용량 중 하나의 기준으로 표시합니다. |
 | 로컬 로그인 기반 수집 | Claude Code 또는 Claude 데스크톱 로그인, Codex Desktop/CLI의 persistent app-server와 rollout, Grok Build 공식 ACP, Cursor GUI/Agent 로그인을 사용합니다. |
-| Antigravity GUI 수집 | 실행 중인 Antigravity 데스크톱의 상태를 읽습니다. 별도 CLI나 모델 프롬프트를 실행하지 않습니다. |
+| Antigravity Desktop/CLI 수집 | 실행 중인 Desktop 우선, 미실행 시 공식 CLI statusline 이벤트를 읽습니다. CLI나 모델 프롬프트를 대신 실행하지 않습니다. |
 | 로그인 상태 안내 | 명시적인 인증 실패가 확인되면 오래된 값을 현재값처럼 표시하지 않고 해당 카드와 바에 `로그인 필요`를 표시합니다. 네트워크·timeout·형식 오류와는 구분합니다. |
 | 토큰 활동 | Claude·Grok의 현재 PC 로컬 기록과 Codex·Cursor 계정의 공식 token activity를 일별로 집계해 최근 4~52주 히트맵과 요약으로 표시합니다. |
 | 세 가지 패널 스킨 | 밝게 보일 때는 Fluent 또는 Paper, 어둡게 보일 때는 Midnight 스타일을 사용합니다. |
 | 실시간 설정 | 저장 버튼 없이 변경 사항이 즉시 저장되고 작업표시줄에 반영됩니다. |
-| 도구별 색상 | Claude·Codex의 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀, Antigravity의 두 모델 풀에 기본색과 경고·위험색을 지정합니다. |
+| 도구별 색상 | Claude·Codex의 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀, Antigravity의 5h/주간에 기본색과 경고·위험색을 지정합니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
 | 도구별 독립 바 | 다섯 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok, Cursor, Antigravity는 기본 OFF입니다. |
@@ -178,6 +178,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 5. 이 PC의 Codex Desktop 또는 Codex CLI에 로그인합니다. Juice가 공식 runtime을 자동 탐색하고 하나의 persistent app-server connection으로 정확한 계정 한도와 활동량을 조회하며, rollout 기록은 장애 시 근사 fallback으로 사용합니다.
 6. Grok Build를 사용한다면 로컬 로그인을 확인한 뒤 Juice의 표시줄 탭에서 Grok을 활성화합니다.
 7. Cursor를 사용한다면 Cursor GUI 또는 Cursor Agent CLI에 로그인한 뒤 Juice의 표시줄 탭에서 Cursor를 활성화합니다.
+8. Antigravity를 사용한다면 표시줄 탭에서 활성화합니다. Desktop만으로도 사용할 수 있습니다. CLI를 사용하는 경우 기존 CLI 설정에 자동 연결되며, 연결 변경 전에 켜 둔 CLI는 재실행한 뒤 `/usage`로 최신 한도를 확인합니다.
 
 ### 수집 방식과 세부 동작
 
@@ -191,7 +192,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 | Codex | 자동 탐색한 Codex Desktop 또는 CLI의 공식 app-server `account/rateLimits/read` | `~/.codex/sessions`의 최신 rollout JSONL | 한 번 연결한 app-server를 재사용해 현재 한도를 정확값으로 표시하며, rollout fallback은 근사치입니다. |
 | Grok Build | 공식 ACP `_x.ai/billing` | 없음 | ACP가 반환한 현재 단일 주간/월간 크레딧 period를 정확값으로 표시합니다. 세션·프롬프트·모델 호출은 만들지 않습니다. |
 | Cursor | Cursor GUI 또는 Agent CLI 로컬 credential로 Dashboard usage 조회 | credential이 없는 구버전 Agent의 bounded `/usage` | 같은 계정의 Auto/API 월간 풀을 정확값으로 표시하며 어느 경로도 모델 프롬프트를 보내지 않습니다. |
-| Antigravity | 실행 중인 Antigravity 데스크톱을 통한 기간별 한도 갱신 | 없음 | Gemini의 5시간·주간 잔여량과 리셋 시각을 표시합니다. Claude/GPT 모델 한도는 포함하지 않습니다. |
+| Antigravity | 실행 중인 Desktop을 통한 기간별 한도 갱신 | Desktop 미실행 시 공식 CLI statusline의 로컬 snapshot | Gemini의 5시간·주간 잔여량과 리셋 시각을 표시합니다. Claude/GPT 등 3p 한도는 제외하며 두 수집원을 섞지 않습니다. |
 
 Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다. Codex의 한도와 활동 조회는 하나의 persistent stdio connection을 공유합니다.
 
@@ -224,17 +225,22 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 - 토큰 활동은 현재 PC의 `~/.grok/sessions/**/updates.jsonl`에서 완료된 응답 usage를 읽습니다. 캐시 토큰은 포함하고 output에 포함된 reasoning token은 중복 가산하지 않습니다.
 - Juice는 Grok `auth.json`을 직접 읽거나 저장하지 않습니다. 공식 실행 파일을 찾을 수 없거나 미로그인·구버전·timeout인 경우 Grok만 마지막 정상값 또는 빈 상태로 남고 Claude/Codex 수집은 계속됩니다.
 
-#### Antigravity GUI 한도
+#### Antigravity Desktop/CLI 한도
 
-`표시줄` 탭의 **Antigravity 활성화**를 켜면 **Gemini의 5시간·주간** 잔여량과 각 리셋 시각을 표시합니다. Antigravity의 Claude/GPT 모델 한도는 표시하지 않으며, 기존 Claude Code나 Codex의 한도와도 합치지 않습니다.
+`표시줄` 탭의 **Antigravity 활성화**를 켜면 **Gemini의 5시간·주간** 잔여량과 각 리셋 시각을 표시합니다. Antigravity의 Claude/GPT 등 서드파티(3p) 모델 한도는 표시하지 않으며, 기존 Claude Code나 Codex의 한도와도 합치지 않습니다.
 
-- 현재 Windows의 기본 사용자 설치 경로에 설치된 새 Antigravity 데스크톱을 지원합니다. Antigravity IDE와 CLI는 이 수집 경로의 대상이 아닙니다.
-- GUI가 실행 중이어야 합니다. 미실행이면 **Antigravity 실행 필요**, 인증이 없으면 **로그인 필요**로 표시합니다. Juice가 앱이나 CLI를 대신 실행하지 않습니다.
-- 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. 자동·수동 조회 모두 실행 중인 앱에 기간별 한도의 갱신을 요청합니다. 채팅이나 모델 요청은 보내지 않습니다.
-- 한도 응답에 없는 기간은 표시하지 않습니다. 구버전 앱이 기간별 조회를 지원하지 않거나 응답을 읽지 못하면, 오래된 모델별 캐시로 대체하지 않고 이전 숫자를 지웁니다.
+- Windows 기본 사용자 설치 경로의 새 Antigravity Desktop과 `agy` CLI를 지원합니다. 별도 Antigravity IDE는 대상이 아니며, CLI 설치는 필수가 아닙니다. 기존 Desktop 수집 동작은 유지합니다.
+- Desktop이 실행 중이면 GUI를 우선하고, GUI가 꺼져 있을 때만 CLI를 사용합니다. GUI 조회 실패를 CLI 값으로 덮거나 두 수집원을 합치지 않습니다. 유효한 실행 중 수집원이 없으면 **Antigravity Desktop/CLI 실행 필요**, 명시적인 인증 실패면 **로그인 필요**로 표시합니다. Juice가 앱이나 CLI를 대신 실행하지 않습니다.
+- Desktop 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. GUI의 자동·수동 조회는 실행 중인 앱에 기간별 한도의 갱신을 요청하며, 채팅이나 모델 요청은 보내지 않습니다.
+- CLI는 공식 statusline 이벤트 JSON을 native helper가 받아 정제된 로컬 snapshot만 남깁니다. Node나 PATH 탐색, CLI 실행·spawn polling, 메시지 전송 또는 독립 account API 조회는 하지 않습니다.
+- 표시를 켜거나 활성화된 상태로 Juice를 시작하면, CLI settings 파일이 존재할 때만 Juice 연동을 자동 등록합니다. 표시를 끄거나 Juice를 제거하면 자기 연동만 해제하고 기존 설정을 복원합니다. 기존 custom statusline의 stdout과 flags를 유지하며, custom이 없으면 builtin 표시를 유지합니다(`stack` 기본값 `true`).
+- Windows CLI의 명령 인용 문제를 피하도록 따옴표 없는 네이티브 런처를 사용하며 터미널 코드 페이지는 변경하지 않습니다. Juice 데이터 경로에 공백·한글·특수문자가 있거나 도우미 경로에 한글이 있으면 Windows의 짧은 경로(8.3) 지원이 필요합니다. 안전한 실행 경로를 만들 수 없으면 CLI 연결을 중단하며 기존 상태줄을 덮어쓰지 않습니다. 이 경우에도 Desktop 수집은 사용할 수 있습니다.
+- CLI는 런타임에 설정을 메모리에 유지하므로 연결을 등록·변경·해제하기 전에 이미 켜 둔 CLI는 재실행해야 합니다. CLI 최신 한도는 CLI에서 `/usage`로 확인합니다. Juice의 수집주기나 강제 새로고침만으로 CLI 서버 조회를 강제하지 않습니다.
+- CLI 갱신 시각은 statusline callback 입력을 받은 시각 그대로이며, snapshot을 다시 읽어도 갱신되지 않습니다. CLI가 대기 중이면 마지막 상태값을 유지하고 시간이 지나면 **오래됨**으로 표시합니다. 이 시각은 새로운 서버 조회를 보증하지 않습니다.
+- 한도 응답에 없는 기간은 표시하지 않습니다. GUI의 구버전 앱이 기간별 조회를 지원하지 않거나 응답을 읽지 못하면, 오래된 모델별 캐시나 CLI 값으로 대체하지 않고 이전 숫자를 지웁니다.
 - 컴팩트 모드에서도 `5h`와 `주간`을 구분하며, 두 기간의 색상을 각각 설정할 수 있습니다.
 - 링·막대, 네 표시 모드, 색상과 글자 설정, 독립 이동 및 화면 프로필을 지원합니다. Antigravity 토큰 활동 잔디는 아직 포함하지 않습니다.
-- Antigravity의 외부 개발자용 공식 API가 아니라 앱 내부 인터페이스를 사용하므로, 앱 업데이트로 형식이 바뀌면 조회가 중단될 수 있습니다. 응답 오류를 Google 계정의 로그아웃으로 취급하지 않습니다.
+- GUI는 외부 개발자용 공식 API가 아닌 앱 내부 인터페이스를, CLI는 공식 statusline 이벤트를 사용하므로 각 형식 변경 시 조회가 중단될 수 있습니다. 응답 오류를 Google 계정의 로그아웃으로 취급하지 않습니다.
 
 #### Cursor 사용량과 토큰 활동 자동 수집
 
@@ -319,13 +325,14 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 - **Codex가 비어 있음:** 현재 PC의 Codex Desktop 또는 CLI 설치·로그인을 확인하고 강제 새로고침하세요. Juice는 Desktop versioned runtime을 우선 탐색하고 CLI로 fallback합니다.
 - **Grok이 비어 있음:** 표시줄 탭에서 Grok을 활성화하고 현재 PC의 Grok Build 설치·로그인을 확인하세요. Grok은 기본 OFF이며 공식 ACP billing을 사용할 수 있을 때 표시됩니다.
 - **Cursor가 비어 있음:** 표시줄 탭에서 Cursor를 활성화하고 Cursor GUI 또는 Agent CLI 로그인을 확인한 뒤 강제 새로고침하세요. Juice는 GUI credential, CLI credential, bounded `/usage` 순서로 시도합니다.
+- **Antigravity가 비어 있거나 오래됨:** 표시줄 탭에서 활성화하고 Desktop 또는 CLI 로그인을 확인하세요. Desktop이 실행 중이면 GUI가 우선입니다. CLI 연결 변경 전에 켜 둔 CLI는 재실행하고 `/usage`로 최신 한도를 확인하세요. Juice 새로고침은 CLI 서버 조회를 대신하지 않습니다.
 - **값이 대시로 보임:** 해당 도구가 아직 한도 정보를 내보내지 않았거나 기록이 오래됐을 수 있습니다.
 - **패널을 최소화한 뒤 안 보임:** 트레이의 Juice 아이콘을 다시 클릭하세요.
 - **바가 안 보임:** 전체화면/최대화 숨김, 트레이 일시중지, 도구별 표시 설정과 저장된 대상 모니터를 확인하세요.
 
 #### 다른 PC에서 값이 안 보일 때
 
-Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude 앱/Code·Codex·Grok Build·Cursor의 로컬 로그인을 각각 확인해야 합니다. 단, Cursor 활동 필터는 Cursor 계정 자체가 제공하는 event라 같은 계정의 다른 PC·Cloud Agent 사용도 포함합니다.
+Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude 앱/Code·Codex·Grok Build·Cursor·Antigravity의 로컬 로그인을 각각 확인해야 합니다. 단, Cursor 활동 필터는 Cursor 계정 자체가 제공하는 event라 같은 계정의 다른 PC·Cloud Agent 사용도 포함합니다.
 
 1. Juice에서 Claude가 활성화되어 있는지 확인해 statusline 자동 연결과 수집을 시작합니다.
 2. Claude 계정 자동 수집을 켜고 Code 또는 Claude 앱의 로그인을 확인합니다. GUI 경로에서는 Code 사용이나 statusline 파일 생성이 필요하지 않습니다.
@@ -333,6 +340,7 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 4. exact 조회가 일시적으로 실패할 때 사용할 rollout JSONL은 해당 PC에서 Codex를 사용한 적이 있는 경우에만 생성됩니다.
 5. Grok을 사용한다면 Grok Build 로그인을 확인하고 Juice에서 Grok을 활성화합니다.
 6. Cursor를 사용한다면 Cursor GUI 또는 Cursor Agent CLI 로그인을 확인하고 Juice에서 Cursor를 활성화합니다.
+7. Antigravity를 사용한다면 Desktop 또는 CLI 로그인을 확인하고 Juice에서 활성화합니다. CLI 연결 변경 후에는 이미 켜 둔 CLI를 재실행하고 `/usage`로 최신 한도를 확인합니다.
 
 한 PC의 사용량을 다른 PC에서 보는 기능은 후속 다중 PC 버전 범위입니다.
 
@@ -344,6 +352,7 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 - Cursor 한도는 GUI 또는 Agent CLI의 local access token을 고정 Cursor Dashboard usage endpoint에만 전달합니다. refresh token은 사용·보관하지 않으며, credential 기반 조회가 불가능할 때만 Agent PTY `/usage`를 사용합니다.
 - Cursor 토큰 활동은 같은 account Dashboard의 event를 읽으며 계정 전체 범위입니다. Juice는 날짜별 네 token component 합계만 local cache에 남기고 email·model·conversation/request ID와 raw response를 저장하지 않습니다.
 - Codex 한도와 토큰 활동은 로그인된 공식 Desktop/CLI app-server의 persistent stdio connection으로 `account/rateLimits/read`와 `account/usage/read`를 직렬 조회합니다. 계정 token을 직접 읽지 않고 raw response도 저장하지 않습니다.
+- Antigravity CLI helper는 email·text·token이나 원본 이벤트 JSON을 저장하지 않습니다. 한도·callback 입력 시각과 검증용 account scope hash·producer lifetime만 현재 PC의 로컬 snapshot 파일에 남기며, CLI 계정 API나 메시지 전송을 호출하지 않습니다.
 - 업데이트 확인은 고정된 GitHub `latest.json` 주소로 표준 HTTPS 요청만 전송합니다. 사용자가 설치를 승인하면 해당 manifest가 지정한 서명된 설치 파일만 내려받으며, 계정 token, 사용량, PC 식별값은 보내지 않습니다.
 - LLM API 키나 Juice 전용 계정을 저장하지 않습니다.
 - Claude OAuth usage endpoint는 Claude Code 내부 계약이라 향후 CLI 변경의 영향을 받을 수 있습니다. 실패하면 statusline과 구버전 `/usage` fallback만 유지합니다.
@@ -370,9 +379,9 @@ Juice reads the limits of AI coding tools you are already signed in to and shows
 | Codex | Whichever **5-hour or weekly windows the Codex account currently provides** | On |
 | Grok Build | The single **current weekly or monthly limit** | Off |
 | Cursor | **Cursor Models/Other Models monthly pools** | Off |
-| Antigravity | **Gemini's five-hour and weekly quotas** through its running desktop app | Off |
+| Antigravity | **Gemini's five-hour and weekly quotas** through Desktop or CLI statusline | Off |
 
-When Codex exposes only one window, Juice renders that real limit without an empty placeholder. Choose either remaining or used percentages. Antigravity cannot yet be read while its app is closed, and its token activity is not collected yet.
+When Codex exposes only one window, Juice renders that real limit without an empty placeholder. Choose either remaining or used percentages. Antigravity prefers Desktop and reads CLI events only while Desktop is closed. Independent account queries and token activity are not supported.
 
 ### Features
 
@@ -380,12 +389,12 @@ When Codex exposes only one window, Juice renders that real limit without an emp
 | --- | --- |
 | Remaining or used values | Uses one selected basis across gauges, numbers, and thresholds. |
 | Local-login collection | Uses a Claude Code or desktop login, Codex Desktop/CLI persistent app-server and rollout data, official Grok Build ACP, and a Cursor GUI/Agent login. |
-| Antigravity GUI collection | Reads state from the running Antigravity desktop without starting a CLI or sending a model prompt. |
+| Antigravity Desktop/CLI collection | Prefers the running Desktop and otherwise reads official CLI statusline events, without starting a CLI or sending a model prompt. |
 | Sign-in status | When an explicit authentication failure is confirmed, Juice shows `Sign in required` on that card and bar instead of presenting stale values as current. Network, timeout, and format errors remain distinct. |
 | Token activity | Aggregates local Claude/Grok records and official Codex/Cursor account activity by date for a 4 to 52 week heatmap and summary. |
 | Three panel skins | Uses Fluent or Paper while the panel is light and Midnight while it is dark. |
 | Live settings | Changes are saved and applied without a Save button. |
-| Per-tool colors | Assign base colors to Claude/Codex 5-hour and weekly windows, Grok weekly/monthly, Cursor's two monthly pools, and Antigravity's two model pools, with customizable warning and danger colors. |
+| Per-tool colors | Assign base colors to Claude/Codex 5-hour and weekly windows, Grok weekly/monthly, Cursor's two monthly pools, and Antigravity's 5-hour and weekly windows, with customizable warning and danger colors. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
 | Independent tool bars | All five tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok, Cursor, and Antigravity default to off. |
@@ -515,6 +524,7 @@ Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar
 5. Sign in to Codex Desktop or the Codex CLI on this PC. Juice discovers the official runtime and uses one persistent app-server connection for exact account limits and activity; existing rollout records remain an approximate fallback.
 6. If you use Grok Build, confirm its local login and then enable Grok in Juice's Taskbar tab.
 7. If you use Cursor, sign in to Cursor GUI or Cursor Agent CLI and enable Cursor in Juice's Taskbar tab.
+8. If you use Antigravity, enable it in the Taskbar tab. Desktop alone is sufficient. CLI users are connected through existing CLI settings; restart any CLI opened before the connection changed, then use `/usage` for fresh quotas.
 
 ### Collection and detailed behavior
 
@@ -528,7 +538,7 @@ The sections below describe each tool's collection path and the detailed behavio
 | Codex | Official `account/rateLimits/read` through an auto-detected Codex Desktop or CLI app-server | Latest rollout JSONL under `~/.codex/sessions` | Reuses one app-server connection for exact current limits; rollout fallback is approximate. |
 | Grok Build | Official ACP `_x.ai/billing` | None | Shows the exact current single weekly/monthly credit period returned by ACP without creating a session, prompt, or model call. |
 | Cursor | Dashboard usage through local Cursor GUI or Agent CLI credentials | Bounded `/usage` for legacy Agents without usable credentials | Shows the same account Auto/API monthly pools without sending a model prompt. |
-| Antigravity | Period quota refresh through the running Antigravity desktop | None | Gemini's five-hour and weekly remaining quotas and reset times. Claude/GPT model quotas are not included. |
+| Antigravity | Period quota refresh through the running Desktop | Local official CLI statusline snapshot only while Desktop is closed | Gemini's five-hour and weekly remaining quotas and reset times. Excludes Claude/GPT and other 3p quotas; sources are never mixed. |
 
 Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok and Cursor start collecting after you first enable them in the Taskbar tab. Codex limit and activity requests share one persistent stdio connection.
 
@@ -561,17 +571,22 @@ Grok defaults to **off** so existing users do not suddenly receive an empty thir
 - Token activity comes from completed response usage under `~/.grok/sessions/**/updates.jsonl`. Cache tokens are included, while reasoning tokens already contained in output are not added twice.
 - Juice never reads or stores Grok `auth.json`. If the official executable is unavailable, logged out, too old, malformed, or times out, only Grok remains on its last known or empty state; Claude and Codex collection continue.
 
-#### Antigravity GUI quotas
+#### Antigravity Desktop/CLI quotas
 
-Enable **Antigravity** in the `Taskbar` tab to display **Gemini's five-hour and weekly** quotas with their separate reset times. Antigravity's Claude/GPT model quotas are not displayed or combined with your Claude Code or Codex account limits.
+Enable **Antigravity** in the `Taskbar` tab to display **Gemini's five-hour and weekly** quotas with their separate reset times. Antigravity's Claude/GPT and other third-party (3p) model quotas are not displayed or combined with your Claude Code or Codex account limits.
 
-- This initial integration supports the new Windows Antigravity desktop installed in its default per-user location, not the separate Antigravity IDE or CLI.
-- The app must be running. Juice shows **Open Antigravity** when it is absent and **Sign in required** when it explicitly reports no valid login. It never starts the app or CLI for you.
-- Automatic reads follow your collection interval, with a minimum of 60 seconds. Both automatic and manual reads request a period quota refresh through the running app, without sending a chat or model request.
-- Periods missing from the response stay hidden. Unsupported app versions or failed reads clear the displayed numbers instead of falling back to an older model-quota cache.
+- Supports the new Windows Antigravity Desktop and `agy` CLI in their default per-user installation locations, not the separate Antigravity IDE. Installing the CLI is optional; existing Desktop collection is unchanged.
+- A running Desktop takes priority; CLI is used only while the GUI is closed. GUI failures are not replaced with CLI values, and the two sources are never merged. Juice shows **Open Antigravity Desktop/CLI** when no valid running source is available and **Sign in required** for explicit authentication failures. It never starts the app or CLI for you.
+- Automatic Desktop reads follow your collection interval, with a minimum of 60 seconds. Automatic and manual GUI reads request a period quota refresh through the running app without sending a chat or model request.
+- Official CLI statusline event JSON goes to a native helper that writes only a sanitized local snapshot. No Node or PATH discovery, CLI execution or spawn polling, messages, or independent account API queries are involved.
+- Enabling Antigravity, or starting Juice while it is enabled, automatically registers Juice's connection only if the CLI settings file exists. Disabling it or uninstalling Juice removes only its own connection and restores the previous settings. Existing custom statusline stdout and flags are preserved; without a custom command, the builtin display remains (`stack` defaults to `true`).
+- To avoid Windows CLI command quoting issues, Juice uses an unquoted native launcher without changing the terminal code page. A Juice data path containing spaces, non-ASCII text, or shell metacharacters, or a helper path containing non-ASCII text, requires Windows short-path (8.3) support. If no safe command path is available, CLI connection stops without replacing your statusline; Desktop collection remains available.
+- The CLI keeps settings in memory at runtime. Restart any CLI already open before registering, changing, or removing the connection. Use `/usage` in the CLI for fresh quotas. Neither Juice's collection interval nor its force refresh forces a CLI server query.
+- The CLI update time remains the statusline callback input time; rereading the snapshot does not advance it. An idle CLI retains the last state values, marked **stale** as they age. This timestamp does not guarantee a new server query.
+- Periods missing from the response stay hidden. Unsupported GUI versions or failed GUI reads clear the displayed numbers instead of falling back to an older model-quota cache or CLI values.
 - Compact mode also labels the two periods as `5h` and `Weekly`. Their colors can be configured separately.
 - Rings, bars, all four modes, custom colors and text, independent dragging, and display profiles are supported. Antigravity token activity is not included yet.
-- This uses an internal app interface, not a public developer API. An Antigravity update may change that interface and interrupt collection. Response errors are not treated as a Google account sign-out.
+- GUI collection uses an internal app interface rather than a public developer API; CLI collection uses official statusline events. Changes to either format may interrupt collection. Response errors are not treated as a Google account sign-out.
 
 #### Automatic Cursor usage and token activity collection
 
@@ -656,13 +671,14 @@ The `About` tab is split into an `Updates` group at the top and an `About` group
 - **Codex is empty:** Confirm the local Codex Desktop or CLI installation and login, then force a refresh. Juice prefers the Desktop versioned runtime and falls back to the CLI.
 - **Grok is empty:** Enable Grok in the Taskbar tab and confirm the local Grok Build installation and login. Grok defaults to off and appears when official ACP billing is available.
 - **Cursor is empty:** Enable Cursor in the Taskbar tab, confirm a Cursor GUI or Agent CLI login, then force a refresh. Juice tries GUI credentials, CLI credentials, and bounded `/usage` in that order.
+- **Antigravity is empty or stale:** Enable it in the Taskbar tab and check the Desktop or CLI login. A running Desktop takes priority. Restart any CLI opened before its connection changed, then use `/usage` for fresh quotas. Juice refresh does not perform a CLI server query.
 - **Values are dashes:** The tool may not have emitted limit data yet, or the record may be stale.
 - **The minimized panel is missing:** Click the Juice tray icon again.
 - **The taskbar bar is missing:** Check fullscreen/maximized hiding, tray pause, per-tool visibility, and the remembered target monitor.
 
 #### If another PC shows no data
 
-Juice v1 has no Juice server and does not synchronize its cache between PCs. Install Juice and verify the local Claude app/Code, Codex, Grok Build, and Cursor logins on every PC. The Cursor activity filter is the exception in scope: Cursor account events include other PCs and Cloud Agents on the same account.
+Juice v1 has no Juice server and does not synchronize its cache between PCs. Install Juice and verify the local Claude app/Code, Codex, Grok Build, Cursor, and Antigravity logins on every PC. The Cursor activity filter is the exception in scope: Cursor account events include other PCs and Cloud Agents on the same account.
 
 1. Confirm that Claude is enabled in Juice so automatic statusline connection and collection can start.
 2. Enable Claude account auto-collection and check the Code or desktop login. The desktop path does not require Code usage or a statusline file.
@@ -670,6 +686,7 @@ Juice v1 has no Juice server and does not synchronize its cache between PCs. Ins
 4. Rollout JSONL fallback exists only after Codex has produced local records on that PC.
 5. If you use Grok, confirm the Grok Build login and enable Grok in Juice.
 6. If you use Cursor, sign in to Cursor GUI or Cursor Agent CLI, then enable Cursor in Juice.
+7. If you use Antigravity, check its Desktop or CLI login and enable it in Juice. After a CLI connection change, restart any already-open CLI and use `/usage` for fresh quotas.
 
 Viewing one PC's usage from another PC belongs to a later multi-PC version.
 
@@ -681,6 +698,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 - Cursor limits send the GUI or Agent CLI local access token only to the fixed Cursor Dashboard usage endpoint. Juice never uses or retains the refresh token and invokes Agent PTY `/usage` only when credential-based lookup is unavailable.
 - Cursor token activity is account-wide. Juice stores only daily totals of the four token components and discards email, model, conversation/request IDs, and raw responses.
 - Codex limits and token activity serialize `account/rateLimits/read` and `account/usage/read` over one persistent stdio connection to the logged-in official Desktop/CLI app-server. Juice never reads the account token directly and never stores raw responses.
+- The Antigravity CLI helper stores no email, text, token, or raw event JSON. Only quotas, callback input time, and validation metadata (account scope hash and producer lifetime) remain in a local snapshot file on this PC. It makes no CLI account API or messaging calls.
 - Update checks send only a standard HTTPS request to the fixed GitHub `latest.json` endpoint. After user approval, Juice downloads only the signed installer named by that manifest. It sends no account token, usage data, or PC identifier.
 - Juice stores no LLM API key and requires no Juice account.
 - The Claude OAuth usage endpoint is an internal Claude Code contract and may change with future CLI versions. Juice falls back to statusline and legacy `/usage` data.

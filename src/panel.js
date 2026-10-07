@@ -12,6 +12,7 @@ import { applyTranslations, resolveLanguage, t } from "./i18n.js";
 import { panelCollectionIssue } from "./collection-state.js";
 import { applyPanelSkin, applyTheme } from "./theme.js";
 import { createBarPreview } from "./bar-preview.js";
+import { createSettingsAuthority } from "./settings-revision.js";
 
 const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 const PANEL_VIEWS = ["overview", "activity", "settings", "about"];
@@ -34,6 +35,7 @@ let statusEventGeneration = 0;
 let collectionHealthEventGeneration = 0;
 let activityEventGeneration = 0;
 let settingsEventGeneration = 0;
+const settingsAuthority = createSettingsAuthority();
 let snapshotFallbackTimer = null;
 let activityRefreshTimer = null;
 let activityLoadPromise = null;
@@ -68,6 +70,10 @@ async function invoke(command) {
   const fn = tauriApi().core?.invoke;
   if (!fn) return null;
   return fn(command);
+}
+
+function acceptPanelSettings(snapshot) {
+  return settingsAuthority.accept(snapshot);
 }
 
 function selectPanelView(value, focus = false) {
@@ -536,7 +542,7 @@ window.addEventListener("settings-preview", (event) => {
 });
 
 window.addEventListener("settings-updated", (event) => {
-  if (event.detail && typeof event.detail === "object") {
+  if (acceptPanelSettings(event.detail)) {
     settingsEventGeneration += 1;
     settings = { ...DEFAULT_SETTINGS, ...event.detail };
     applyTheme(settings);
@@ -553,7 +559,7 @@ async function loadSettings() {
   try {
     const loaded = await invoke("get_settings");
     if (settingsEventGeneration !== requestGeneration) return;
-    if (loaded && typeof loaded === "object") {
+    if (acceptPanelSettings(loaded)) {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
       applyPanelSkin(settings);
@@ -563,7 +569,7 @@ async function loadSettings() {
       renderActivity();
     }
   } catch {
-    if (settingsEventGeneration !== requestGeneration) return;
+    if (settingsEventGeneration !== requestGeneration || settingsAuthority.current !== null) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyPanelSkin(settings);
@@ -736,7 +742,7 @@ function bindStatusUpdates() {
       renderStatuses(lastStatuses);
     });
     void listenWithRetry(listen, "settings-updated", (event) => {
-        if (event.payload && typeof event.payload === "object") {
+        if (acceptPanelSettings(event.payload)) {
           settingsEventGeneration += 1;
           settings = { ...DEFAULT_SETTINGS, ...event.payload };
           applyTheme(settings);
