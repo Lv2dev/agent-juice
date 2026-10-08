@@ -778,13 +778,17 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
+            Self::new_at(SystemTime::now())
+        }
+        fn new_at(time: SystemTime) -> Self {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "juice-desktop-test-{}-{}",
+                "juice-desktop-test-{}-{}-{}",
                 std::process::id(),
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
+                time.duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir(&root).unwrap();
             Self(root)
@@ -794,6 +798,13 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn temp_fixtures_remain_isolated_when_clock_readings_repeat() {
+        let first = Temp::new_at(SystemTime::UNIX_EPOCH);
+        let second = Temp::new_at(SystemTime::UNIX_EPOCH);
+        assert_ne!(first.0, second.0);
+        assert!(first.0.is_dir() && second.0.is_dir());
     }
     fn fixture_credentials(root: &Path) -> Credentials {
         std::fs::write(root.join("config.json"), b"config-fixture").unwrap();
