@@ -281,15 +281,16 @@ pub fn parse_status(body: &[u8], pc_id: &str, captured_at: &str) -> Result<Agent
 pub fn collect(pc_id: &str, captured_at: &str, deadline: Instant) -> Result<AgentStatus, Error> {
     #[cfg(windows)]
     {
-        resolve_collection_source(native::collect(pc_id, captured_at, deadline), || {
+        resolve_collection_source(
             crate::antigravity_cli::headless::collect(pc_id, captured_at, deadline).map_err(
                 |error| match error {
                     crate::antigravity_cli::CaptureError::AppRequired => Error::AppRequired,
                     crate::antigravity_cli::CaptureError::LoginRequired => Error::CliLoginRequired,
                     crate::antigravity_cli::CaptureError::Unavailable => Error::CliUnavailable,
                 },
-            )
-        })
+            ),
+            || native::collect(pc_id, captured_at, deadline),
+        )
     }
     #[cfg(not(windows))]
     {
@@ -300,11 +301,13 @@ pub fn collect(pc_id: &str, captured_at: &str, deadline: Instant) -> Result<Agen
 
 #[cfg(any(windows, test))]
 fn resolve_collection_source(
-    desktop: Result<AgentStatus, Error>,
-    cli: impl FnOnce() -> Result<AgentStatus, Error>,
+    cli: Result<AgentStatus, Error>,
+    desktop: impl FnOnce() -> Result<AgentStatus, Error>,
 ) -> Result<AgentStatus, Error> {
-    match desktop {
-        Err(Error::AppRequired) => cli(),
+    match cli {
+        // An installed CLI owns this read, including auth/transport failures.
+        // Switching on those errors could silently display a different account.
+        Err(Error::AppRequired) => desktop(),
         result => result,
     }
 }
@@ -317,41 +320,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_is_selected_only_without_desktop_and_keeps_input_timestamp() {
+    fn cli_takes_priority_without_querying_desktop_and_keeps_input_timestamp() {
         let mut cli = parse_status(
             &fixture(serde_json::json!([{"bucketId":"gemini-weekly","remainingFraction":0.5}])),
             "pc",
             "2026-10-06T00:00:00Z",
         )
         .unwrap();
-        cli.session_id = "antigravity-cli:1:2".into();
+        cli.session_id = crate::antigravity_cli::headless::SESSION_ID.into();
         cli.session.active = false;
-        let selected = resolve_collection_source(Err(Error::AppRequired), || Ok(cli)).unwrap();
+        let selected = resolve_collection_source(Ok(cli), || {
+            panic!("installed CLI must not depend on Desktop auth, transport or lifetime")
+        })
+        .unwrap();
+        assert_eq!(
+            selected.session_id,
+            crate::antigravity_cli::headless::SESSION_ID
+        );
         assert_eq!(selected.captured_at, "2026-10-06T00:00:00Z");
         assert!(!selected.session.active);
         assert!(selected.primary.is_none());
     }
 
     #[test]
-    fn desktop_results_and_failures_never_mix_with_cli_accounts() {
-        for error in [Error::LoginRequired, Error::Unavailable] {
+    fn cli_failures_never_switch_to_a_desktop_account() {
+        for error in [Error::CliLoginRequired, Error::CliUnavailable] {
             assert_eq!(
                 resolve_collection_source(Err(error), || panic!(
-                    "desktop source must remain exclusive"
+                    "CLI source must remain exclusive"
                 ))
                 .err(),
                 Some(error)
             );
         }
+    }
+
+    #[test]
+    fn desktop_is_collected_only_when_cli_is_not_installed() {
         let gui = parse_status(
             &fixture(serde_json::json!([{"bucketId":"gemini-5h","remainingFraction":1.0}])),
             "pc",
             "2026-10-06T00:00:00Z",
         )
         .unwrap();
-        let selected =
-            resolve_collection_source(Ok(gui), || panic!("GUI wins without invoking CLI")).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let selected = resolve_collection_source(Err(Error::AppRequired), || {
+            calls.set(calls.get() + 1);
+            Ok(gui)
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
         assert_eq!(selected.session_id, "antigravity-gui");
+        assert_eq!(selected.captured_at, "2026-10-06T00:00:00Z");
+        assert!(selected.secondary.is_none());
+        for error in [Error::AppRequired, Error::LoginRequired, Error::Unavailable] {
+            assert_eq!(
+                resolve_collection_source(Err(Error::AppRequired), || Err(error)).err(),
+                Some(error)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicit JUICE_TEST_ANTIGRAVITY_HEADLESS=1 and the existing CLI login"]
+    fn live_collection_prefers_cli_without_a_desktop_dependency() {
+        assert_eq!(
+            std::env::var("JUICE_TEST_ANTIGRAVITY_HEADLESS").as_deref(),
+            Ok("1")
+        );
+        let captured = chrono::Utc::now().to_rfc3339();
+        let status = collect(
+            "live-fixture",
+            &captured,
+            Instant::now() + COLLECTION_TIMEOUT,
+        )
+        .expect("CLI-first read-only quota through the actual collection entry point");
+        assert_eq!(
+            status.session_id,
+            crate::antigravity_cli::headless::SESSION_ID
+        );
+        assert_eq!(status.captured_at, captured);
+        assert!(!status.approx);
+        assert!(status.primary.is_some() || status.secondary.is_some());
+        assert!(status.session.context_used_percent.is_none());
     }
     use serde_json::json;
 
