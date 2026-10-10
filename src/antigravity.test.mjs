@@ -116,7 +116,7 @@ test('Antigravity period colors preserve user settings and labels stay synchroni
 test('missing Desktop and CLI sources and missing login have distinct localized messages', () => {
   for(const language of ['ko','en']) for(const health of ['app_required','login_required']) {
     const config={...settings,language};
-    const expected=health==='app_required' ? (language==='ko'?'Antigravity Desktop/CLI 실행 필요':'Open Antigravity Desktop/CLI') : (language==='ko'?'로그인 필요':'Sign in required');
+    const expected=health==='app_required' ? (language==='ko'?'Antigravity Desktop 실행 또는 CLI 설치 필요':'Open Antigravity Desktop or install the CLI') : (language==='ko'?'로그인 필요':'Sign in required');
     const bar=barToolViewModel([status], 'antigravity', config, now, {collectionHealth:{antigravity:health}});
     assert.equal(bar.loginText, expected);
     assert.doesNotMatch(bar.tooltip, /75%|90%/);
@@ -151,9 +151,11 @@ test('Desktop and CLI copy is localized and the existing activation help stays s
       assert.match(t(key, language), /CLI/);
     }
     const copy = t('help.showAntigravity', language);
-    assert.match(copy, language === 'ko' ? /Desktop 우선, 미실행 시 CLI 이벤트/ : /Desktop first, CLI events when closed/);
-    assert.match(copy, language === 'ko' ? /연결 변경 후 재실행/ : /Restart the CLI after connection changes/);
-    assert.match(copy, /\/usage/);
+    assert.match(copy, language === 'ko' ? /Desktop 우선, 미실행 시 로그인된 CLI/ : /Desktop first, automatic account reads/);
+    assert.match(copy, language === 'ko' ? /별도 명령 입력 불필요/ : /No command entry required/);
+    assert.match(copy, /1\.1\.11/);
+    assert.match(copy, /5분|5 minutes/);
+    assert.doesNotMatch(copy, /\/statusline|재실행|Restart the CLI/);
     assert.match(copy, language === 'ko' ? /토큰 활동 미지원/ : /No token activity/);
   }
 });
@@ -184,39 +186,28 @@ test('idle CLI snapshots retain quota values and the callback input timestamp in
   }
 });
 
-test('Korean and English documentation distinguish Desktop refresh from event-only CLI collection', () => {
+test('Korean and English documentation describe zero-token CLI reads without terminal steps', () => {
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
   const sections = [...readme.matchAll(/#### Antigravity Desktop\/CLI (?:한도|quotas)\r?\n([\s\S]*?)(?=\r?\n#### )/g)];
   assert.equal(sections.length, 2);
   for (const [, section] of sections) {
     assert.match(section, /agy/);
-    assert.match(section, /statusline.*JSON/);
-    assert.match(section, /native helper/);
-    assert.match(section, /snapshot/);
-    assert.match(section, /Node.*PATH/);
-    assert.match(section, /spawn polling/);
-    assert.match(section, /account API/);
-    assert.match(section, /custom statusline.*stdout.*flags/);
-    assert.match(section, /builtin.*`stack`.*`true`/);
-    assert.match(section, /callback.*(?:입력|input).*시각|callback input time/);
+    assert.match(section, /--print \/usage --output-format json/);
+    assert.match(section, /command.name=usage/);
+    assert.match(section, /1\.1\.11/);
+    assert.match(section, /5분|5 minutes/);
+    assert.match(section, /30초|30 seconds/);
     assert.match(section, /3p/);
     assert.match(section, /60초|60 seconds/);
     assert.match(section, /CLI 설치는 필수가 아닙니다|Installing the CLI is optional/);
     assert.match(section, /GUI가 꺼져 있을 때만 CLI|CLI is used only while the GUI is closed/);
-    assert.match(section, /활성화된 상태로 Juice를 시작|starting Juice while it is enabled/);
-    assert.match(section, /CLI settings 파일이 존재할 때만|only if the CLI settings file exists/);
-    assert.match(section, /표시를 끄거나 Juice를 제거|Disabling it or uninstalling Juice/);
-    assert.match(section, /자기 연동만 해제하고 기존 설정을 복원|removes only its own connection and restores the previous settings/);
-    assert.match(section, /CLI는 재실행해야|Restart any CLI already open/);
-    assert.match(section, /\/usage/);
-    assert.match(section, /CLI 서버 조회를 강제하지|nor its force refresh forces a CLI server query/);
-    assert.match(section, /마지막 상태값.*오래됨|last state values.*stale/);
-    assert.match(section, /새로운 서버 조회를 보증하지|does not guarantee a new server query/);
+    assert.match(section, /자기 연동만 해제하고 기존 설정을 복원|removes only its own statusline connection.*restores the previous settings/);
+    assert.match(section, /입력할 필요가 없으며|do not need to enter/);
+    assert.match(section, /CLI settings 파일의 사전 생성이나 statusline 설정도 필요하지|create a CLI settings file, or configure its statusline/);
+    assert.match(section, /구버전|Unsupported CLI releases/);
     assert.match(section, /토큰 활동 잔디는 아직 포함하지|token activity is not included yet/);
   }
-  assert.match(readme, /email·text·token.*원본 이벤트 JSON을 저장하지/);
-  assert.match(readme, /stores no email, text, token, or raw event JSON/);
-  assert.match(readme, /account scope hash·producer lifetime/);
-  assert.match(readme, /account scope hash and producer lifetime/);
+  assert.match(readme, /원문, email·text·token, 대화 본문을 저장하지/);
+  assert.match(readme, /store no raw responses, email, text, token, or conversation content/);
   assert.doesNotMatch(readme, /Antigravity IDE와 CLI는.*대상이 아닙니다|not the separate Antigravity IDE or CLI|Antigravity cannot yet be read while its app is closed|Antigravity's two model pools/);
 });

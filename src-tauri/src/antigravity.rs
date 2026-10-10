@@ -1,4 +1,4 @@
-//! Read-only access to a running Antigravity desktop. Never starts the provider.
+//! Read-only Desktop quotas and the CLI's built-in zero-token quota command.
 use crate::model::{AccountLimit, AgentStatus, SessionInfo, Tool};
 use serde::Deserialize;
 use std::sync::Mutex;
@@ -12,6 +12,7 @@ struct Cache {
     generation: u64,
     busy: bool,
     retry_at: Option<Instant>,
+    last_started_at: Option<Instant>,
     failures: u32,
     result: Option<Result<AgentStatus, Error>>,
 }
@@ -20,6 +21,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     generation: 0,
     busy: false,
     retry_at: None,
+    last_started_at: None,
     failures: 0,
     result: None,
 });
@@ -33,6 +35,7 @@ pub fn set_enabled(enabled: bool) {
     cache.generation = cache.generation.wrapping_add(1);
     cache.result = None;
     cache.retry_at = None;
+    cache.last_started_at = None;
     cache.failures = 0;
     crate::antigravity_cli::clear_cached_source();
 }
@@ -79,7 +82,18 @@ fn refresh_cache(
         if !cache.enabled {
             return None;
         }
-        if cache.busy || (!force && cache.retry_at.is_some_and(|at| Instant::now() < at)) {
+        let now = Instant::now();
+        let force_throttled = force
+            && cache.result.as_ref().is_some_and(|result| {
+                matches!(result, Err(Error::CliLoginRequired | Error::CliUnavailable))
+                    || result.as_ref().is_ok_and(|status| {
+                        status.session_id == crate::antigravity_cli::headless::SESSION_ID
+                    })
+            })
+            && cache.last_started_at.is_some_and(|at| {
+                now.saturating_duration_since(at) < std::time::Duration::from_secs(30)
+            });
+        if cache.busy || force_throttled || (!force && cache.retry_at.is_some_and(|at| now < at)) {
             return cache
                 .result
                 .as_ref()
@@ -88,6 +102,7 @@ fn refresh_cache(
                 .cloned();
         }
         cache.busy = true;
+        cache.last_started_at = Some(now);
         cache.generation
     };
     let result = fetch();
@@ -101,7 +116,16 @@ fn refresh_cache(
     } else {
         cache.failures.saturating_add(1)
     };
-    let delay = if matches!(result, Err(Error::Unavailable)) {
+    let delay = if result
+        .as_ref()
+        .is_ok_and(|status| status.session_id == crate::antigravity_cli::headless::SESSION_ID)
+    {
+        crate::antigravity_cli::headless::MIN_REFRESH_INTERVAL.as_secs()
+    } else if matches!(result, Err(Error::CliUnavailable)) {
+        300u64.saturating_mul(1 << cache.failures.saturating_sub(1).min(3))
+    } else if matches!(result, Err(Error::CliLoginRequired)) {
+        300
+    } else if matches!(result, Err(Error::Unavailable)) {
         60u64.saturating_mul(1 << cache.failures.saturating_sub(1).min(4))
     } else {
         60
@@ -122,6 +146,8 @@ pub enum Error {
     AppRequired,
     LoginRequired,
     Unavailable,
+    CliLoginRequired,
+    CliUnavailable,
 }
 
 fn authenticated(body: &[u8]) -> Result<bool, Error> {
@@ -256,17 +282,13 @@ pub fn collect(pc_id: &str, captured_at: &str, deadline: Instant) -> Result<Agen
     #[cfg(windows)]
     {
         resolve_collection_source(native::collect(pc_id, captured_at, deadline), || {
-            if crate::antigravity_cli::connection_failed() {
-                return Err(Error::Unavailable);
-            }
-            let stale = crate::config::Settings::try_load()
-                .map(|s| s.stale_after_secs)
-                .unwrap_or(90);
-            crate::antigravity_cli::collect(pc_id, stale).map_err(|error| match error {
-                crate::antigravity_cli::CaptureError::AppRequired => Error::AppRequired,
-                crate::antigravity_cli::CaptureError::LoginRequired => Error::LoginRequired,
-                crate::antigravity_cli::CaptureError::Unavailable => Error::Unavailable,
-            })
+            crate::antigravity_cli::headless::collect(pc_id, captured_at, deadline).map_err(
+                |error| match error {
+                    crate::antigravity_cli::CaptureError::AppRequired => Error::AppRequired,
+                    crate::antigravity_cli::CaptureError::LoginRequired => Error::CliLoginRequired,
+                    crate::antigravity_cli::CaptureError::Unavailable => Error::CliUnavailable,
+                },
+            )
         })
     }
     #[cfg(not(windows))]
@@ -510,6 +532,50 @@ mod tests {
             ..Default::default()
         });
         assert!(refresh_cache(&state, true, || Ok(closed)).is_none());
+    }
+
+    #[test]
+    fn headless_account_reads_use_five_minute_cache_and_throttle_repeat_force() {
+        let state = Mutex::new(Cache {
+            enabled: true,
+            ..Default::default()
+        });
+        let result = || {
+            let mut status = parse_status(
+                &fixture(json!([{"bucketId":"gemini-5h","remainingFraction":0.25}])),
+                "PC",
+                "fixed-capture",
+            )?;
+            status.session_id = crate::antigravity_cli::headless::SESSION_ID.into();
+            Ok(status)
+        };
+        assert!(refresh_cache(&state, false, result).is_some());
+        {
+            let cache = state.lock().unwrap();
+            assert!(
+                cache
+                    .retry_at
+                    .unwrap()
+                    .saturating_duration_since(Instant::now())
+                    .as_secs()
+                    >= 299
+            );
+        }
+        let cached = refresh_cache(&state, true, || {
+            panic!("rapid headless force must be throttled")
+        })
+        .unwrap();
+        assert_eq!(cached.captured_at, "fixed-capture");
+        {
+            let mut cache = state.lock().unwrap();
+            cache.last_started_at = Some(Instant::now() - std::time::Duration::from_secs(31));
+        }
+        assert!(refresh_cache(&state, true, || Err(Error::CliLoginRequired)).is_none());
+        assert!(state.lock().unwrap().result.as_ref().unwrap().is_err());
+        assert!(refresh_cache(&state, true, || panic!(
+            "failed headless force is also throttled"
+        ))
+        .is_none());
     }
 
     #[test]

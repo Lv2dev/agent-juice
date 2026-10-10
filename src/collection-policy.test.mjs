@@ -24,8 +24,12 @@ test('startup and deferred broker/Claude work load policy under the same setting
   assert.match(current, /with_taskbar_settings_read/);
   assert.match(current, /apply_collection_policy_from_settings\(tool, load_settings\(\), reconcile\)/);
   const apply = body('apply_collection_policy_from_settings');
-  assert.match(apply, /reconcile\(CollectionPolicy::from_settings\(&settings\).enabled\(tool\)\)/);
-  assert.match(apply, /Tool::Codex \| Tool::Grok[\s\S]*?reconcile\(false\)/);
+  assert.match(apply, /apply_collection_policy_from_settings_with_retirement\(tool, settings, reconcile/);
+  assert.match(apply, /antigravity::set_enabled\(false\)/);
+  const retirement = body('apply_collection_policy_from_settings_with_retirement');
+  assert.match(retirement, /reconcile\(CollectionPolicy::from_settings\(&settings\).enabled\(tool\)\)/);
+  assert.match(retirement, /Tool::Codex \| Tool::Grok[\s\S]*?reconcile\(false\)/);
+  assert.match(retirement, /Err\(error\) if \*tool == Tool::Antigravity[\s\S]*?retire_antigravity\(\)/);
   assert.match(body('reconcile_broker_policy_for'), /reconcile_current_collection_policy[\s\S]*?Settings::try_load/);
   assert.match(body('reconcile_claude_statusline_for_release'), /reconcile_current_collection_policy[\s\S]*?Settings::try_load/);
   assert.doesNotMatch(body('spawn_claude_statusline_reconcile'), /enabled: bool|settings.show_claude/);
@@ -65,7 +69,9 @@ test('CLI direct failures join recovery and no-op saves can repair pending polic
   assert.match(deferred, /if !due[\s\S]*?return Ok\(\(\)\);[\s\S]*?spawn_blocking\(recover_pending_collection_policies\)/);
   const apply=body('apply_antigravity_cli_policy_for_release');
   assert.match(apply, /antigravity::set_enabled\(enabled\)/);
-  assert.match(apply, /antigravity_cli::binding::reconcile\(enabled/);
+  assert.match(apply, /antigravity::set_enabled\(enabled\)/);
+  assert.match(apply, /antigravity_cli::binding::reconcile\(false/);
+  assert.doesNotMatch(apply, /antigravity_cli::binding::reconcile\(true|antigravity_cli::binding::reconcile\(enabled/);
 });
 
 test('CLI startup reconciliation remains scheduled when the initial settings read fails', () => {
