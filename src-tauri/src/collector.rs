@@ -1831,13 +1831,40 @@ pub(crate) fn command_output_with_input(
 }
 
 pub(crate) fn command_output_with_input_caps(
-    mut command: Command,
+    command: Command,
     input: Option<&[u8]>,
     timeout: Duration,
     label: &str,
     stdout_cap: usize,
     stderr_cap: usize,
 ) -> anyhow::Result<String> {
+    let output = captured_command_output_with_input_caps(
+        command, input, timeout, label, stdout_cap, stderr_cap,
+    )?;
+    if output.success {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let message = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("{label} command failed: {}", message.trim());
+}
+
+pub(crate) struct CapturedCommandOutput {
+    pub success: bool,
+    pub stdout: zeroize::Zeroizing<Vec<u8>>,
+    pub stderr: zeroize::Zeroizing<Vec<u8>>,
+}
+
+pub(crate) fn captured_command_output_with_input_caps(
+    mut command: Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    label: &str,
+    stdout_cap: usize,
+    stderr_cap: usize,
+) -> anyhow::Result<CapturedCommandOutput> {
+    if timeout.is_zero() {
+        anyhow::bail!("{label} command deadline expired before startup");
+    }
     if stdout_cap == 0 || stderr_cap == 0 {
         anyhow::bail!("{label} output cap unavailable");
     }
@@ -1928,12 +1955,11 @@ pub(crate) fn command_output_with_input_caps(
     let Some(status) = status else {
         anyhow::bail!("{label} command timed out");
     };
-    if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).into_owned());
-    }
-
-    let message = String::from_utf8_lossy(&stderr);
-    anyhow::bail!("{label} command failed: {}", message.trim());
+    Ok(CapturedCommandOutput {
+        success: status.success(),
+        stdout: zeroize::Zeroizing::new(stdout),
+        stderr: zeroize::Zeroizing::new(stderr),
+    })
 }
 
 #[cfg(windows)]
@@ -3384,6 +3410,25 @@ mod tests {
             .is_err());
             assert!(started.elapsed() < Duration::from_secs(3));
         }
+    }
+
+    #[test]
+    fn expired_command_budget_is_rejected_before_any_spawn_attempt() {
+        let command = Command::new("juice-command-that-does-not-exist-fixture");
+        let error = captured_command_output_with_input_caps(
+            command,
+            None,
+            Duration::ZERO,
+            "fixture",
+            1024,
+            1024,
+        )
+        .err()
+        .expect("expired budget");
+        assert_eq!(
+            error.to_string(),
+            "fixture command deadline expired before startup"
+        );
     }
 
     #[test]

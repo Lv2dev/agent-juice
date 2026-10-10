@@ -1972,8 +1972,12 @@ fn collection_health_snapshot() -> CollectionHealthSnapshot {
         cursor: cursor_collection_health(),
         antigravity: match antigravity::last_error() {
             Some(antigravity::Error::AppRequired) => CollectionHealth::AppRequired,
-            Some(antigravity::Error::LoginRequired) => CollectionHealth::LoginRequired,
-            Some(antigravity::Error::Unavailable) => CollectionHealth::TransientError,
+            Some(antigravity::Error::LoginRequired | antigravity::Error::CliLoginRequired) => {
+                CollectionHealth::LoginRequired
+            }
+            Some(antigravity::Error::Unavailable | antigravity::Error::CliUnavailable) => {
+                CollectionHealth::TransientError
+            }
             None if antigravity::cached().is_some() => CollectionHealth::Ready,
             None => CollectionHealth::Unavailable,
         },
@@ -7572,12 +7576,28 @@ fn apply_collection_policy_from_settings(
     settings: anyhow::Result<Settings>,
     reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    apply_collection_policy_from_settings_with_retirement(tool, settings, reconcile, || {
+        antigravity::set_enabled(false);
+    })
+}
+
+fn apply_collection_policy_from_settings_with_retirement(
+    tool: &Tool,
+    settings: anyhow::Result<Settings>,
+    reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
+    retire_antigravity: impl FnOnce(),
+) -> anyhow::Result<()> {
     match settings {
         Ok(settings) => reconcile(CollectionPolicy::from_settings(&settings).enabled(tool)),
         Err(error) if matches!(tool, Tool::Codex | Tool::Grok) => match reconcile(false) {
             Ok(()) => Err(error),
             Err(disable_error) => Err(disable_error.context("could not disable collection policy")),
         },
+        Err(error) if *tool == Tool::Antigravity => {
+            // Retire memory admission without invoking a settings/binding writer.
+            retire_antigravity();
+            Err(error)
+        }
         Err(error) => Err(error),
     }
 }
@@ -7706,7 +7726,9 @@ fn apply_antigravity_cli_policy_for_release(enabled: bool) -> anyhow::Result<()>
     }
     let bridge = statusline_bridge_path()
         .map_err(|_| anyhow::anyhow!("Antigravity CLI bridge path unavailable"))?;
-    antigravity_cli::binding::reconcile(enabled, std::path::Path::new(&bridge))
+    // Account reads do not depend on a user's statusline or its in-memory TUI state.
+    // Retire only our old connection; stale CLI callbacks can still forward custom output.
+    antigravity_cli::binding::reconcile(false, std::path::Path::new(&bridge))
 }
 
 fn reconcile_antigravity_cli_for_release() -> Result<(), String> {
@@ -13095,6 +13117,143 @@ mod tests {
                 } else {
                     None
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_policy_read_failure_blocks_old_on_snapshot_without_writer() {
+        use std::cell::Cell;
+
+        let old_settings = collection_test_settings(&Tool::Antigravity, true);
+        let admitted = Cell::new(true);
+        let retire_calls = Cell::new(0);
+        let headless_calls = Cell::new(0);
+        let result = super::apply_collection_policy_from_settings_with_retirement(
+            &Tool::Antigravity,
+            Err(anyhow::anyhow!("synthetic settings read failed")),
+            |_| panic!("read failure must not invoke a binding/settings writer"),
+            || {
+                admitted.set(false);
+                retire_calls.set(retire_calls.get() + 1);
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(retire_calls.get(), 1);
+        assert!(!admitted.get());
+        for _force in [false, true] {
+            if old_settings.show_antigravity && admitted.get() {
+                headless_calls.set(headless_calls.get() + 1);
+            }
+        }
+        assert_eq!(headless_calls.get(), 0);
+    }
+
+    #[test]
+    fn antigravity_policy_latest_success_recovers_only_its_current_admission() {
+        use std::cell::Cell;
+
+        for latest in [false, true] {
+            let admitted = Cell::new(true);
+            let writes = Cell::new(0);
+            let headless_calls = Cell::new(0);
+            assert!(
+                super::apply_collection_policy_from_settings_with_retirement(
+                    &Tool::Antigravity,
+                    Err(anyhow::anyhow!("synthetic settings read failed")),
+                    |_| panic!("read failure must leave original statusline unchanged"),
+                    || admitted.set(false),
+                )
+                .is_err()
+            );
+            super::apply_collection_policy_from_settings_with_retirement(
+                &Tool::Antigravity,
+                Ok(collection_test_settings(&Tool::Antigravity, latest)),
+                |enabled| {
+                    admitted.set(enabled);
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                },
+                || panic!("a valid current policy must use normal apply"),
+            )
+            .unwrap();
+            assert_eq!(writes.get(), 1);
+            assert_eq!(admitted.get(), latest);
+            if admitted.get() {
+                headless_calls.set(headless_calls.get() + 1);
+            }
+            assert_eq!(headless_calls.get(), usize::from(latest));
+        }
+    }
+
+    #[test]
+    fn antigravity_policy_valid_read_restore_failure_does_not_retire_admission() {
+        use std::cell::Cell;
+
+        for latest in [false, true] {
+            let admitted = Cell::new(!latest);
+            let writes = Cell::new(0);
+            let result = super::apply_collection_policy_from_settings_with_retirement(
+                &Tool::Antigravity,
+                Ok(collection_test_settings(&Tool::Antigravity, latest)),
+                |enabled| {
+                    admitted.set(enabled);
+                    writes.set(writes.get() + 1);
+                    anyhow::bail!("synthetic original statusline restore failed")
+                },
+                || panic!("binding failure is not a current-policy read failure"),
+            );
+            assert!(result.is_err());
+            assert_eq!(writes.get(), 1);
+            assert_eq!(admitted.get(), latest);
+        }
+    }
+
+    #[test]
+    fn antigravity_policy_read_retirement_preserves_other_tool_error_contracts() {
+        use std::cell::Cell;
+
+        for tool in [Tool::Claude, Tool::Codex, Tool::Grok, Tool::Cursor] {
+            let applied = Cell::new(None);
+            let result = super::apply_collection_policy_from_settings_with_retirement(
+                &tool,
+                Err(anyhow::anyhow!("synthetic settings read failed")),
+                |enabled| {
+                    applied.set(Some(enabled));
+                    Ok(())
+                },
+                || panic!("other tools must not retire Antigravity admission"),
+            );
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "synthetic settings read failed"
+            );
+            let broker = matches!(tool, Tool::Codex | Tool::Grok);
+            assert_eq!(applied.get(), broker.then_some(false));
+            super::apply_collection_policy_from_settings_with_retirement(
+                &tool,
+                Ok(collection_test_settings(&tool, true)),
+                |enabled| {
+                    applied.set(Some(enabled));
+                    Ok(())
+                },
+                || panic!("successful other-tool apply must not retire Antigravity"),
+            )
+            .unwrap();
+            assert_eq!(applied.get(), Some(true));
+        }
+        for tool in [Tool::Codex, Tool::Grok] {
+            let error = super::apply_collection_policy_from_settings_with_retirement(
+                &tool,
+                Err(anyhow::anyhow!("synthetic settings read failed")),
+                |_| anyhow::bail!("synthetic broker disable failed"),
+                || panic!("broker errors must not retire Antigravity admission"),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "could not disable collection policy");
+            assert_eq!(
+                error.root_cause().to_string(),
+                "synthetic broker disable failed"
             );
         }
     }
