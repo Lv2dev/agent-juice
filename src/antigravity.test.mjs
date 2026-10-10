@@ -14,6 +14,13 @@ const status = {
 };
 const settings = { show_antigravity: true, show_claude: false, show_codex: false, language: 'en', display_basis: 'remaining' };
 
+test('Antigravity collects CLI before Desktop and only evaluates Desktop on fallback', () => {
+  const source = readFileSync(new URL('../src-tauri/src/antigravity.rs', import.meta.url), 'utf8');
+  const collection = source.match(/pub fn collect\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
+  assert.match(collection, /resolve_collection_source\(\s*crate::antigravity_cli::headless::collect/);
+  assert.match(collection, /\|\| native::collect\(pc_id, captured_at, deadline\)/);
+});
+
 test('Gemini period quota uses five-hour and weekly labels in compact and panel', () => {
   const period = {...status, primary:{label:'5h',used_percent:58}, secondary:{label:'week',used_percent:10}};
   const bar = barToolViewModel([period], 'antigravity', {...settings,bar_mode:'compact'}, now);
@@ -151,7 +158,8 @@ test('Desktop and CLI copy is localized and the existing activation help stays s
       assert.match(t(key, language), /CLI/);
     }
     const copy = t('help.showAntigravity', language);
-    assert.match(copy, language === 'ko' ? /Desktop 우선, 미실행 시 로그인된 CLI/ : /Desktop first, automatic account reads/);
+    assert.match(copy, language === 'ko' ? /로그인된 CLI 우선/ : /Signed-in CLI first/);
+    assert.match(copy, language === 'ko' ? /CLI 미설치 시 Desktop/ : /Desktop only when CLI is not installed/);
     assert.match(copy, language === 'ko' ? /별도 명령 입력 불필요/ : /No command entry required/);
     assert.match(copy, /1\.1\.11/);
     assert.match(copy, /5분|5 minutes/);
@@ -200,7 +208,9 @@ test('Korean and English documentation describe zero-token CLI reads without ter
     assert.match(section, /3p/);
     assert.match(section, /60초|60 seconds/);
     assert.match(section, /CLI 설치는 필수가 아닙니다|Installing the CLI is optional/);
-    assert.match(section, /GUI가 꺼져 있을 때만 CLI|CLI is used only while the GUI is closed/);
+    assert.match(section, /CLI를 우선 조회|CLI takes priority/);
+    assert.match(section, /CLI가 설치되지 않았을 때만 실행 중인 Desktop|Desktop is used only when CLI is not installed/);
+    assert.match(section, /로그인·조회 실패를 다른 Desktop 계정 값으로 덮거나|authentication or request failure is not replaced with a different Desktop account/);
     assert.match(section, /자기 연동만 해제하고 기존 설정을 복원|removes only its own statusline connection.*restores the previous settings/);
     assert.match(section, /입력할 필요가 없으며|do not need to enter/);
     assert.match(section, /CLI settings 파일의 사전 생성이나 statusline 설정도 필요하지|create a CLI settings file, or configure its statusline/);
