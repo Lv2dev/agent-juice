@@ -262,7 +262,7 @@ test("language selection is wired through settings and renderer translations", (
   assert.match(settingsJs, /applyTranslations/);
   assert.match(panelJs, /applyTranslations/);
   assert.match(i18nJs, /resolveLanguage/);
-  assert.match(i18nJs, /Run Juice, then use Claude once on this PC/);
+  assert.match(i18nJs, /Collecting Claude account usage\. No chat message is required\./);
   assert.doesNotMatch(i18nJs, /Connect Claude, then use Claude once on this PC/);
 });
 
@@ -1179,7 +1179,7 @@ test("settings form groups controls into logical sections without changing field
   assert.match(settingsJs, /event\.key === "ArrowRight"[\s\S]*event\.key === "ArrowLeft"[\s\S]*event\.key === "Home"[\s\S]*event\.key === "End"/);
 
   assert.match(markupSection("general"), /name="theme"[\s\S]*name="font_mode"[\s\S]*name="autostart_on"/);
-  assert.match(markupSection("collection"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"[\s\S]*name="claude_account_auto_collect_on"/);
+  assert.match(markupSection("collection"), /name="display_basis"[\s\S]*name="warn_threshold"[\s\S]*name="danger_threshold"[\s\S]*name="poll_interval_secs"[\s\S]*name="stale_after_secs"/);
   assert.doesNotMatch(markupSection("collection"), /restore-statusline|restoreStatusline/);
   assert.match(markupSection("collection"), /data-display-basis-copy="warning"[\s\S]*data-display-basis-copy="danger"[\s\S]*data-display-basis-copy="help"/);
   assert.match(markupSection("taskbar"), /name="bar_mode"[\s\S]*name="full_reset_time_on"[\s\S]*name="limit_order"[\s\S]*name="indicator_style"[\s\S]*name="show_claude"[\s\S]*name="show_codex"/);
@@ -1197,7 +1197,7 @@ test("settings form groups controls into logical sections without changing field
   assert.doesNotMatch(panelBlock(".settings-save-state"), /position:\s*fixed/);
   assert.match(panelBlock(".settings-save-state"), /background: var\(--pn-surface\)/);
   assert.equal(sections.at(-1), "about");
-  assert.match(markupSection("collection"), /name="claude_account_auto_collect_on"[\s\S]*class="toggle-copy"[\s\S]*class="toggle-title" data-i18n="field\.claudeUsageAutoRefresh"/);
+  assert.doesNotMatch(panelMarkup, /claude_account_auto_collect_on/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
   assert.doesNotMatch(panelMarkup, /claude_usage_auto_refresh_lab_on/);
 
@@ -1212,7 +1212,7 @@ test("settings form groups controls into logical sections without changing field
 
   assert.match(panelMarkup, /name="claude_taskbar_offset_ratio"/);
   assert.match(panelMarkup, /name="codex_taskbar_offset_ratio"/);
-  assert.match(settingsJs, /setField\("claude_account_auto_collect_on", state\.claudeAccountAutoCollectOn\)/);
+  assert.doesNotMatch(settingsJs, /claudeAccountAutoCollectOn|claude_account_auto_collect_on/);
   assert.match(settingsJs, /setField\("update_check_on", state\.updateCheckOn\)/);
 });
 
@@ -1475,7 +1475,7 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.doesNotMatch(settingsJs, /install_statusline/);
   assert.doesNotMatch(panelMarkup, /data-settings-section="lab"/);
   assert.doesNotMatch(i18nJs, /"section\.lab": "실험실"/);
-  assert.match(i18nJs, /Claude 계정 사용량 자동 수집/);
+  assert.doesNotMatch(i18nJs, /field\.claudeUsageAutoRefresh|help\.claudeUsageAutoRefresh/);
 });
 
 test("taskbar bar right click exposes a visible refresh action", () => {
@@ -1854,7 +1854,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.35"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.36"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

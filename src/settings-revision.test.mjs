@@ -38,7 +38,7 @@ function formContext(invoke, loaded = initial) {
   const fields = new Map();
   const form = { elements: { namedItem(name) {
     if (!fields.has(name)) fields.set(name, {
-      type: name.startsWith("show_") || name.endsWith("_on") ? "checkbox" : "text", value: "", checked: false,
+      type: name.startsWith("show_") || name.startsWith("taskbar_show_") || name.endsWith("_on") ? "checkbox" : "text", value: "", checked: false,
     });
     return fields.get(name);
   } } };
@@ -59,8 +59,10 @@ function formContext(invoke, loaded = initial) {
     const settingsAuthority=createSettingsAuthority();
     let editSession={baseline:null,topology:{monitor_keys:[],monitor_modes:[]}};
     const SETTINGS_LOAD_RETRY_DELAYS_MS=[0];
+    ${settingsSource.match(/const TASKBAR_VISIBILITY_TOOLS = [^\n]+/)?.[0] ?? ''}
     ${helpers(settingsSource, "function currentLanguageSettings(")}
     ${between(settingsSource, "function setField(", "function formatRangeProgress(")}
+    ${between(settingsSource, "function settingsInputFromForm(", "function syncRangeFromNumberEditor(")}
     ${between(settingsSource, "function fillForm(", "function publishPreview(")}
     ${between(settingsSource, "function hydrateSettings(", "function renderUpdateStatus(")}
     ${between(settingsSource, "async function saveSettings(", "function enqueueLatestSettingsSave(")}

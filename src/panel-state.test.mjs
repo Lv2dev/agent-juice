@@ -282,16 +282,10 @@ test("viewModelForTool is null-safe and marks stale sessions", () => {
 
 test("viewModelForTool explains empty Claude state in the selected language", () => {
   const ko = viewModelForTool([], "claude", settings);
-  assert.equal(ko.emptyHint, "Juice 실행 후 Claude를 한 번 사용하면 표시됩니다");
+  assert.equal(ko.emptyHint, "Claude 계정 사용량을 수집 중입니다. 채팅을 보낼 필요가 없습니다.");
 
   const en = viewModelForTool([], "claude", { ...settings, language: "en" });
-  assert.equal(en.emptyHint, "Run Juice, then use Claude once on this PC");
-
-  const autoCollect = viewModelForTool([], "claude", {
-    ...settings,
-    claude_account_auto_collect_on: true,
-  });
-  assert.equal(autoCollect.emptyHint, "Claude 계정 사용량을 수집 중입니다. 채팅을 보낼 필요가 없습니다.");
+  assert.equal(en.emptyHint, "Collecting Claude account usage. No chat message is required.");
 });
 
 test("viewModelForTool exposes Grok's dynamic period and distinct tool color", () => {

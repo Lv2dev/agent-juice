@@ -51,7 +51,7 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 | 도구별 색상 | Claude·Codex의 5h/주간, Grok의 주간/월간, Cursor의 두 월간 풀, Antigravity의 5h/주간에 기본색과 경고·위험색을 지정합니다. |
 | 표현 스타일 | 플랫, 소프트 그림자, 입체, 글로우, 숨쉬기 효과를 원과 가로 바에 공통 적용합니다. |
 | 표시기 배경 | 원과 가로 바의 미사용 영역에 같은 테마 적응색과 농도를 적용하며, 색상과 농도를 직접 바꿀 수 있습니다. |
-| 도구별 독립 바 | 다섯 도구를 각각 활성화하거나 끌 수 있습니다. 끄면 해당 바와 사용량 수집이 함께 중단되며, 위치와 모니터는 따로 지정할 수 있습니다. Grok, Cursor, Antigravity는 기본 OFF입니다. |
+| 도구별 활성화·바 표시 | `활성화`는 사용량 수집과 앱 내 표시를, `작업표시줄`은 해당 바의 표출만 제어합니다. 자주 쓰는 도구만 작업표시줄에 두고 나머지는 개요·활동에서 확인할 수 있습니다. 위치와 모니터는 독립이며 Grok, Cursor, Antigravity 활성화는 기본 OFF입니다. |
 | 화면 방해 최소화 | 전체화면 또는 최대화 앱에서 숨김, 트레이 일시중지, 우클릭 강제 새로고침을 지원합니다. |
 | 원클릭 업데이트 | 하루 한 번 최신 정식 릴리즈를 확인하고, 사용자가 승인하면 서명을 검증한 설치 파일을 내려받아 업데이트 후 재시작합니다. |
 
@@ -174,7 +174,7 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 1. [Releases](https://github.com/Lv2dev/agent-juice/releases/latest)에서 최신 `Juice_*_x64-setup.exe`를 받습니다.
 2. 설치 후 Windows 트레이의 Juice 아이콘을 클릭해 패널을 엽니다.
 3. Claude가 활성화되어 있으면 Juice 설치본은 시작할 때 statusline 수집 연결을 비파괴·멱등으로 조정합니다.
-4. Claude 자동 수집을 끈 경우 이 PC에서 Claude Code를 한 번 사용해 statusline 데이터를 생성합니다.
+4. Claude를 활성화하면 기존 Code 또는 Claude 앱 로그인으로 계정 한도를 자동 조회합니다. 별도의 수집 옵션이나 채팅 전송은 필요하지 않습니다.
 5. 이 PC의 Codex Desktop 또는 Codex CLI에 로그인합니다. Juice가 공식 runtime을 자동 탐색하고 하나의 persistent app-server connection으로 정확한 계정 한도와 활동량을 조회하며, rollout 기록은 장애 시 근사 fallback으로 사용합니다.
 6. Grok Build를 사용한다면 로컬 로그인을 확인한 뒤 Juice의 표시줄 탭에서 Grok을 활성화합니다.
 7. Cursor를 사용한다면 Cursor GUI 또는 Cursor Agent CLI에 로그인한 뒤 Juice의 표시줄 탭에서 Cursor를 활성화합니다.
@@ -194,15 +194,11 @@ Claude·Codex·Grok·Cursor는 서로 다른 투명 창이므로 하나만 잡�
 | Cursor | Cursor GUI 또는 Agent CLI 로컬 credential로 Dashboard usage 조회 | credential이 없는 구버전 Agent의 bounded `/usage` | 같은 계정의 Auto/API 월간 풀을 정확값으로 표시하며 어느 경로도 모델 프롬프트를 보내지 않습니다. |
 | Antigravity | 로그인된 CLI의 읽기 전용 계정 조회 우선 | CLI 미설치 시 실행 중인 Desktop의 기간별 한도 | Gemini의 5시간·주간 잔여량과 리셋 시각을 표시합니다. Claude/GPT 등 3p 한도는 제외하며 두 수집원을 섞지 않습니다. |
 
-Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구를 끄면 해당 수집도 중단됩니다. Claude 계정 자동 수집은 Claude가 활성화된 동안 기본으로 켜져 있으며 별도로 끌 수 있고, Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다. Codex의 한도와 활동 조회는 하나의 persistent stdio connection을 공유합니다.
+Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토큰을 별도로 입력받지 않습니다. 도구의 `활성화`를 끄면 해당 수집과 앱 내 표시가 중단됩니다. `작업표시줄`만 끄면 수집과 개요·활동 표시는 유지됩니다. 바 표시 선택과 저장된 위치는 활성화를 껐다 켜도 보존되며, 화면 프로필과 별개인 전역 옵션입니다. 기존 설정에서는 활성 도구의 바가 계속 표시되도록 기본값을 유지합니다. Claude는 활성화된 동안 계정 사용량을 자동 수집하며 별도의 수집 토글은 없습니다. Grok과 Cursor는 표시줄 탭에서 처음 켠 뒤 자동 수집됩니다. Codex의 한도와 활동 조회는 하나의 persistent stdio connection을 공유합니다.
 
 #### Claude 계정 사용량 자동 수집
 
-<p align="center">
-  <img src="docs/assets/juice-v028-ko-panel-collection.png" alt="Juice Claude 계정 사용량 자동 수집 설정" width="620">
-</p>
-
-**Claude 계정 사용량 자동 수집**은 `수집` 탭의 일반 기능이며 기본값은 **켜짐**입니다.
+**Claude 계정 사용량 자동 수집**은 Claude가 활성화되어 있으면 항상 동작합니다. 별도의 수집 옵션은 없으며, 이전 버전에서 자동 수집을 꺼둔 설정도 더 이상 수집을 막지 않습니다. 수집을 중단하려면 Claude의 `활성화`를 끄세요.
 
 - 유효한 로컬 Claude Code 로그인이 있으면 우선 사용합니다. Code 로그인이 없거나 만료되면 Claude 데스크톱이 저장한 기존 로그인으로 계정의 5시간·주간 usage를 조회합니다. 추가 로그인이나 채팅 전송은 필요하지 않습니다.
 - Windows 일반 설치와 Microsoft Store 설치의 기본 Claude 프로필을 확인합니다. 앱이 생성한 호환되는 유효 인증 캐시가 필요하며, 캐시가 없거나 만료되었다면 Claude 앱을 열어 로그인 상태를 확인하세요. Juice는 인증 갱신이나 권한 추가를 대신하지 않습니다.
@@ -214,7 +210,7 @@ Juice는 각 도구의 기존 로컬 로그인 상태를 사용하며 계정 토
 - 일시적인 조회 실패 시 마지막 성공 값을 유지합니다. `조회 제한`(429)은 바에 문구를 추가하지 않고 hover와 패널에서만 안내합니다. hover에서 마지막 수집 시각도 확인할 수 있습니다. 값이 한 번도 없으면 `–`로 표시합니다. GUI·Code 모두 429 이후 최소 5분부터 점차 대기 시간을 늘리며, 수동 새로고침이나 CLI 폴백으로 대기를 우회하지 않습니다. 로그인 필요·응답 해석 오류·인증 캐시 오류는 계속 구분해 표시합니다.
 - 응답의 리셋 시각 형식을 읽지 못해도 유효한 한도 퍼센트는 표시합니다. 알 수 없는 리셋 시각을 추정하지 않습니다.
 - GUI 일반 채팅의 토큰 활동 잔디는 포함하지 않습니다. Claude 활동 집계는 기존 Code 로컬 기록 범위입니다. GUI 인증 저장 형식은 내부 구현이므로 앱 업데이트에 따라 지원이 달라질 수 있습니다.
-- 표시줄 탭에서 Claude를 끄면 계정 조회와 statusline 수집이 모두 중단되고 기존 Claude statusline 설정이 복원됩니다. 다시 켜면 수집 연결을 자동 복구하고 즉시 새 값을 조회합니다.
+- 표시줄 탭에서 Claude의 `활성화`를 끄면 계정 조회와 statusline 수집이 모두 중단되고 기존 Claude statusline 설정이 복원됩니다. 다시 켜면 수집 연결을 자동 복구하고 즉시 새 값을 조회합니다. `작업표시줄`만 끄는 것은 수집에 영향을 주지 않습니다.
 
 #### Grok Build 사용량 자동 수집
 
@@ -397,7 +393,7 @@ When Codex exposes only one window, Juice renders that real limit without an emp
 | Per-tool colors | Assign base colors to Claude/Codex 5-hour and weekly windows, Grok weekly/monthly, Cursor's two monthly pools, and Antigravity's 5-hour and weekly windows, with customizable warning and danger colors. |
 | Visual styles | Applies Flat, Soft shadow, Depth, Glow, or Breathe to rings and horizontal bars. |
 | Indicator background | Uses one theme-adaptive color and opacity for unused ring and bar areas, with optional custom color and opacity. |
-| Independent tool bars | All five tools can be enabled independently. Disabling one stops both its bar and collection; each bar can be moved and assigned to a monitor separately. Grok, Cursor, and Antigravity default to off. |
+| Tool activation and taskbar visibility | `Enabled` controls collection and in-app visibility; `Taskbar` controls only that tool's bar. Keep frequently used tools on the taskbar and check the others in Overview and Activity. Positions and monitor targets remain independent. Grok, Cursor, and Antigravity activation defaults to off. |
 | Low-interruption behavior | Supports fullscreen/maximized hiding, tray pause/resume, and force refresh from the context menu. |
 | One-click updates | Checks the latest stable release once a day and, after user approval, downloads a signed installer, verifies it, updates Juice, and restarts. |
 
@@ -520,7 +516,7 @@ Claude, Codex, Grok, and Cursor are separate transparent windows, so any one bar
 1. Download the latest `Juice_*_x64-setup.exe` from [Releases](https://github.com/Lv2dev/agent-juice/releases/latest).
 2. Install it, then click the Juice tray icon to open the panel.
 3. When Claude is enabled, the installed app non-destructively and idempotently reconciles its statusline collection at startup.
-4. If Claude auto-collection is off, use Claude Code once on this PC so statusline data is emitted.
+4. Enabling Claude automatically reads account limits through the existing Code or Claude app login. No separate collection option or chat message is required.
 5. Sign in to Codex Desktop or the Codex CLI on this PC. Juice discovers the official runtime and uses one persistent app-server connection for exact account limits and activity; existing rollout records remain an approximate fallback.
 6. If you use Grok Build, confirm its local login and then enable Grok in Juice's Taskbar tab.
 7. If you use Cursor, sign in to Cursor GUI or Cursor Agent CLI and enable Cursor in Juice's Taskbar tab.
@@ -540,15 +536,11 @@ The sections below describe each tool's collection path and the detailed behavio
 | Cursor | Dashboard usage through local Cursor GUI or Agent CLI credentials | Bounded `/usage` for legacy Agents without usable credentials | Shows the same account Auto/API monthly pools without sending a model prompt. |
 | Antigravity | Read-only account lookup through the signed-in CLI first | Period quota refresh through the running Desktop only when the CLI is not installed | Gemini's five-hour and weekly remaining quotas and reset times. Excludes Claude/GPT and other 3p quotas; sources are never mixed. |
 
-Juice reuses each tool's existing local login and never asks you to enter account tokens. Disabling a tool also stops its collection. Claude account auto-collection is on by default while Claude is enabled and can be disabled separately; Grok and Cursor start collecting after you first enable them in the Taskbar tab. Codex limit and activity requests share one persistent stdio connection.
+Juice reuses each tool's existing local login and never asks you to enter account tokens. Turning off a tool's `Enabled` toggle stops collection and its in-app display. Turning off only `Taskbar` keeps collection, Overview, and Activity available. Taskbar preferences and saved positions survive disabling and re-enabling a tool; visibility is global and independent of display profiles. Legacy settings keep bars visible for enabled tools. Claude automatically collects account usage whenever it is enabled, without a separate collection toggle. Grok and Cursor start collecting after you first enable them in the Taskbar tab. Codex limit and activity requests share one persistent stdio connection.
 
 #### Automatic Claude account usage collection
 
-<p align="center">
-  <img src="docs/assets/juice-v028-en-panel-collection.png" alt="Juice Claude account usage collection setting" width="620">
-</p>
-
-**Claude account usage auto-collection** is a regular option in the `Collection` tab and is **on by default**.
+**Claude account usage auto-collection** always runs while Claude is enabled. There is no separate collection toggle, and opting out in older versions no longer blocks collection. Turn off Claude's `Enabled` toggle to stop collection.
 
 - Juice prefers an available, unexpired local Claude Code login. If it is absent or expired, Juice reads the account's five-hour and weekly usage through the existing Claude desktop login, without another sign-in or chat message.
 - Default Windows profiles for regular and Microsoft Store installations are supported. A compatible, valid authentication cache created by Claude is required. If it is absent or expired, open Claude and check its login. Juice does not renew credentials or request additional permissions.
@@ -560,11 +552,11 @@ Juice reuses each tool's existing local login and never asks you to enter accoun
 - Temporary request failures retain the last successful values. `Rate limited` (429) appears only in the hover details and panel, without adding text to the bar. Hover also shows the last collection time. With no prior values, the bar displays `–`. Both GUI and Code queries back off progressively from at least five minutes after a 429; manual refresh and CLI fallback do not bypass that cooldown. Sign-in requirements, response errors and credential cache errors remain distinct.
 - Valid quota percentages remain visible even when the reset timestamp format is unsupported. Unknown reset times are not inferred.
 - General GUI chat token activity is not included in the heatmap; Claude activity still comes from local Code records. Desktop credential storage is an internal interface and may change with app updates.
-- Disabling Claude in the Taskbar tab stops account and statusline collection and restores the previous Claude statusline configuration. Enabling it reconnects collection and requests fresh data immediately.
+- Turning off Claude's `Enabled` toggle in the Taskbar tab stops account and statusline collection and restores the previous Claude statusline configuration. Enabling it reconnects collection and requests fresh data immediately. Turning off only `Taskbar` does not affect collection.
 
 #### Automatic Grok Build usage collection
 
-Grok defaults to **off** so existing users do not suddenly receive an empty third bar. Enabling **Grok** in the `Taskbar` tab starts its bar, limit collection, and token activity together.
+Grok defaults to **off** so existing users do not suddenly receive an empty third bar. Enabling **Grok** in the `Taskbar` tab starts limit collection and token activity; its separate `Taskbar` toggle controls the bar.
 
 - Juice initializes the logged-in Grok Build official ACP once and reuses one persistent connection only for `_x.ai/billing`. It creates no conversation, session, prompt, or model turn, so the lookup itself consumes no model tokens.
 - A weekly ACP period appears as one `Weekly` limit and a monthly period as one `Monthly` limit. Juice does not invent a 5-hour slot or render an empty second ring.

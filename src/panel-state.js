@@ -39,7 +39,11 @@ export const DEFAULT_SETTINGS = {
   show_grok: false,
   show_cursor: false,
   show_antigravity: false,
-  claude_account_auto_collect_on: true,
+  taskbar_show_claude: true,
+  taskbar_show_codex: true,
+  taskbar_show_grok: true,
+  taskbar_show_cursor: true,
+  taskbar_show_antigravity: true,
   ring_numbers_on: true,
   ring_number_outline_on: true,
   ring_number_outline_width_px: 1.2,
@@ -322,18 +326,12 @@ function limitLabels(tool, status) {
   return ["limit.fiveHour", "limit.weekly"];
 }
 
-function emptyHintForTool(tool, settings, language) {
-  if (
-    tool === "claude" &&
-    (settings?.claude_account_auto_collect_on === true ||
-      settings?.claude_usage_auto_refresh_lab_on === true)
-  ) {
-    return t("empty.claudeCollect", language);
-  }
+function emptyHintForTool(tool, language) {
+  if (tool === "claude") return t("empty.claudeCollect", language);
   if (tool === "grok") return t("empty.grok", language);
   if (tool === "cursor") return t("empty.cursor", language);
   if (tool === "antigravity") return t("empty.antigravity", language);
-  return tool === "claude" ? t("empty.claude", language) : t("empty.codex", language);
+  return t("empty.codex", language);
 }
 
 export function viewModelForTool(
@@ -383,7 +381,7 @@ export function viewModelForTool(
       context: `${t("context.label", language)} –`,
       pcId: "",
       meta: "",
-      emptyHint: issue?.detail ?? emptyHintForTool(tool, settings, language),
+      emptyHint: issue?.detail ?? emptyHintForTool(tool, language),
     };
   }
 

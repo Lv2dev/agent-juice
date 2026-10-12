@@ -17,7 +17,7 @@ test('desktop Claude keeps quota periods and identifies its source without a sec
     assert.match(vm.tooltip,language==='ko'?/Claude 데스크톱 로그인/:/Claude desktop login/);
     const panel=viewModelForTool([status],'claude',config,now,{claude:'ready'});
     assert.equal(panel.exists,true);
-    assert.match(t('help.claudeUsageAutoRefresh',language),language==='ko'?/추가 로그인이나 채팅 없이/:/without another sign-in/);
+    assert.match(t('empty.claudeCollect',language),language==='ko'?/채팅을 보낼 필요가 없습니다/:/No chat message is required/);
   }
 });
 
