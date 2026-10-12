@@ -213,6 +213,109 @@ fn statusline_binary_does_not_collect_when_claude_is_disabled() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn statusline_binary_uses_windows_subsystem_without_a_console() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(env!("CARGO_BIN_EXE_agentjuice-statusline")).unwrap();
+    let mut signature = [0u8; 2];
+    file.read_exact(&mut signature).unwrap();
+    assert_eq!(&signature, b"MZ");
+    file.seek(SeekFrom::Start(0x3c)).unwrap();
+    let mut offset = [0u8; 4];
+    file.read_exact(&mut offset).unwrap();
+    let pe_offset = u64::from(u32::from_le_bytes(offset));
+    file.seek(SeekFrom::Start(pe_offset)).unwrap();
+    let mut pe_signature = [0u8; 4];
+    file.read_exact(&mut pe_signature).unwrap();
+    assert_eq!(&pe_signature, b"PE\0\0");
+    file.seek(SeekFrom::Start(pe_offset + 24)).unwrap();
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic).unwrap();
+    assert!(matches!(u16::from_le_bytes(magic), 0x10b | 0x20b));
+    file.seek(SeekFrom::Start(pe_offset + 24 + 68)).unwrap();
+    let mut subsystem = [0u8; 2];
+    file.read_exact(&mut subsystem).unwrap();
+    assert_eq!(
+        u16::from_le_bytes(subsystem),
+        2,
+        "statusline helper must not allocate a console when launched by a GUI"
+    );
+}
+
+#[test]
+fn statusline_binary_preserves_redirected_error_and_exit_code() {
+    for args in [
+        vec!["--unknown-fixture-argument"],
+        vec!["--antigravity-cli", "--extra-fixture-argument"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agentjuice-statusline"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"unsupported agentjuice-statusline argument\n"
+        );
+    }
+}
+
+#[test]
+fn statusline_binary_preserves_piped_input_and_output_with_unicode_data_path() {
+    let root = unique_temp_dir();
+    let dir = root.join("space \u{d55c}\u{ae00}");
+    fs::create_dir_all(&dir).unwrap();
+    Settings::default()
+        .save_to(&dir.join("settings.json"))
+        .unwrap();
+    let input = br#"{"session_id":"stdio-fixture","context_window":{"used_percentage":37},"rate_limits":{"five_hour":{"used_percentage":12},"seven_day":{"used_percentage":24}}}"#;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentjuice-statusline"))
+        .env("AGENT_JUICE_DATA_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"ctx 37%\n");
+    assert!(output.stderr.is_empty());
+    let written: Value =
+        serde_json::from_slice(&fs::read(dir.join("claude_last.stdio-fixture.json")).unwrap())
+            .unwrap();
+    assert_eq!(written["rate_limits"]["five_hour"]["used_percentage"], 12);
+    assert_eq!(written["rate_limits"]["seven_day"]["used_percentage"], 24);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn antigravity_statusline_binary_is_quiet_without_an_owned_binding() {
+    let dir = unique_temp_dir();
+    fs::create_dir_all(&dir).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentjuice-statusline"))
+        .arg("--antigravity-cli")
+        .env("AGENT_JUICE_DATA_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"{}").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn restore_owned_statusline_cli_uses_exit_status_without_stdout() {
     let root = unique_temp_dir();

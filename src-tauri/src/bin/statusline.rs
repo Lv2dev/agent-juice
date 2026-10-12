@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
