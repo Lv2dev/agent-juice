@@ -161,10 +161,12 @@ test("README is product-focused and opens with the Juice brand lockup", () => {
   }
 
   assert.match(readme, /Claude 계정 사용량 자동 수집/);
-  assert.match(readme, /기본값은 \*\*켜짐\*\*/);
+  assert.match(readme, /Claude가 활성화되어 있으면 항상 동작합니다/);
+  assert.match(readme, /별도의 수집 옵션은 없으며/);
   assert.match(readme, /정확 OAuth 계정 한도는 statusline의 오래된 계정 값보다 우선합니다/);
   assert.match(readme, /Automatic Claude account usage collection/);
-  assert.match(readme, /on by default/);
+  assert.match(readme, /always runs while Claude is enabled/);
+  assert.match(readme, /There is no separate collection toggle/);
   assert.match(readme, /Exact OAuth account limits take priority over stale statusline account values/);
   assert.match(readme, /Grok Build 사용량 자동 수집/);
   assert.match(readme, /Grok은 기존 사용자에게[^\n]+기본값이 \*\*꺼짐\*\*/);
@@ -217,7 +219,6 @@ test("README uses localized current UI assets with bounded motion", () => {
     "panel-activity.png": [1240, 950, 1250],
     "panel-appearance.png": [1240, 1750, 2150],
     "panel-taskbar.png": [1240, 1950, 2450],
-    "panel-collection.png": [1240, 1600, 2000],
     "panel-effects.png": [1240, 2900, 3400],
     "panel-update.png": [1240, 850, 1100],
   };

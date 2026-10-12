@@ -29,6 +29,7 @@ function finiteNumber(value) {
 }
 
 function toolEnabled(settings, tool) {
+  if (settings[`taskbar_show_${tool}`] === false) return false;
   if (tool === "claude") return settings.show_claude !== false;
   if (tool === "codex") return settings.show_codex !== false;
   if (tool === "grok") return settings.show_grok === true;

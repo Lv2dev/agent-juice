@@ -56,6 +56,7 @@ let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
 const activeUnlisteners = new Set();
 const SETTINGS_LOAD_RETRY_DELAYS_MS = [0, 100, 250];
+const TASKBAR_VISIBILITY_TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 
@@ -120,6 +121,7 @@ function setSettingsFormEnabled(enabled) {
     updateTaskbarTextColorAvailability();
     updateTaskbarProfileOptionAvailability();
     updateActivityScaleAvailability();
+    updateTaskbarVisibilityAvailability();
   }
 }
 
@@ -244,6 +246,25 @@ function updateActivityScaleAvailability() {
   const unit = Math.max(1, Math.round(Number(tokenField?.value) || 250_000));
   const format = (value) => value.toLocaleString();
   activityScalePreview.textContent = `${format(unit)} · ${format(unit * 2)} · ${format(unit * 3)} · ${format(unit * 4)}+`;
+}
+
+function updateTaskbarVisibilityAvailability() {
+  if (!form) return;
+  for (const tool of TASKBAR_VISIBILITY_TOOLS) {
+    const field = form.elements.namedItem(`taskbar_show_${tool}`);
+    const enabled = form.elements.namedItem(`show_${tool}`);
+    if (field) field.disabled = form.dataset?.loadState !== "ready" || !enabled?.checked;
+  }
+}
+
+function settingsInputFromForm() {
+  const input = payloadFromEntries(new FormData(form));
+  // Disabled checkboxes are omitted by FormData; keep their saved preference.
+  for (const tool of TASKBAR_VISIBILITY_TOOLS) {
+    const field = form.elements.namedItem(`taskbar_show_${tool}`);
+    if (field) input[`taskbar_show_${tool}`] = field.checked;
+  }
+  return input;
 }
 
 function syncRangeFromNumberEditor(editor, commit = false) {
@@ -371,6 +392,7 @@ function updateOutputs() {
   updateTaskbarTextColorAvailability();
   updateTaskbarProfileOptionAvailability();
   updateActivityScaleAvailability();
+  updateTaskbarVisibilityAvailability();
 
   const palette = form.elements.namedItem("palette")?.value ?? "traffic";
   if (customRow) customRow.hidden = palette !== "custom";
@@ -484,7 +506,11 @@ function fillForm(settings) {
   setField("show_grok", state.showGrok);
   setField("show_cursor", state.showCursor);
   setField("show_antigravity", state.showAntigravity);
-  setField("claude_account_auto_collect_on", state.claudeAccountAutoCollectOn);
+  setField("taskbar_show_claude", state.taskbarShowClaude);
+  setField("taskbar_show_codex", state.taskbarShowCodex);
+  setField("taskbar_show_grok", state.taskbarShowGrok);
+  setField("taskbar_show_cursor", state.taskbarShowCursor);
+  setField("taskbar_show_antigravity", state.taskbarShowAntigravity);
   setField("mono_color", state.monoColor);
   setField("custom_safe", state.customSafe);
   setField("custom_warn", state.customWarn);
@@ -524,7 +550,7 @@ function fillForm(settings) {
   updateOutputs();
   renderUpdateStatus(currentUpdateStatus);
   editSession = {
-    baseline: payloadFromEntries(new FormData(form)),
+    baseline: settingsInputFromForm(),
     topology: {
       monitor_keys: [...(settings?.taskbar_layout_profiles?.at(-1)?.monitor_keys ?? [])],
       monitor_modes: (settings?.taskbar_layout_profiles?.at(-1)?.monitor_modes ?? [])
@@ -536,7 +562,7 @@ function fillForm(settings) {
 }
 
 function publishPreview(savedSettings = null) {
-  window.dispatchEvent(new CustomEvent("settings-preview", { detail: savedSettings ?? payloadFromEntries(new FormData(form)) }));
+  window.dispatchEvent(new CustomEvent("settings-preview", { detail: savedSettings ?? settingsInputFromForm() }));
 }
 
 function hydrateSettings(settings) {
@@ -790,7 +816,7 @@ function enqueueLatestSettingsSave({ failOnRollback = false } = {}) {
   if (!hasLoadedSettings || localRevision <= savedRevision) return saveQueue;
 
   const revision = localRevision;
-  const input = payloadFromEntries(new FormData(form));
+  const input = settingsInputFromForm();
   const edit = editSession;
   saveQueue = saveQueue
     .catch(() => {})

@@ -758,14 +758,6 @@
                 </label>
               </div>
 
-              <label class="toggle-row toggle-row-wide collection-toggle">
-                <input type="checkbox" name="claude_account_auto_collect_on" checked />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.claudeUsageAutoRefresh">Claude 계정 사용량 자동 수집</span>
-                  <small class="field-help" data-i18n="help.claudeUsageAutoRefresh">Code 로그인이 없거나 만료되면 Claude 앱의 기존 로그인을 사용합니다. 추가 로그인이나 채팅 없이 계정 한도를 조회합니다.</small>
-                </span>
-              </label>
-
               <section class="settings-subgroup activity-settings" data-activity-settings>
                 <div class="activity-settings-head">
                   <h3 data-i18n="activity.settingsTitle">토큰 활동</h3>
@@ -928,44 +920,66 @@
                 <span data-i18n="field.maximizedHide">전체창 숨김</span>
               </label>
 
-              <label class="toggle-row">
-                <input type="checkbox" name="show_claude" checked />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.showClaude">Claude 활성화</span>
-                  <small class="field-help" data-i18n="help.showClaude">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
-                </span>
-              </label>
-
-              <label class="toggle-row">
-                <input type="checkbox" name="show_codex" checked />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.showCodex">Codex 활성화</span>
-                  <small class="field-help" data-i18n="help.showCodex">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
-                </span>
-              </label>
-
-              <label class="toggle-row">
-                <input type="checkbox" name="show_grok" />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.showGrok">Grok 활성화</span>
-                  <small class="field-help" data-i18n="help.showGrok">작업표시줄 표시와 사용량 수집을 함께 켭니다.</small>
-                </span>
-              </label>
-
-              <label class="toggle-row">
-                <input type="checkbox" name="show_cursor" />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.showCursor">Cursor 활성화</span>
-                  <small class="field-help" data-i18n="help.showCursor">Cursor Agent의 월간 두 사용량 풀을 5분 간격으로 수집합니다.</small>
-                </span>
-              </label>
-              <label class="toggle-row">
-                <input type="checkbox" name="show_antigravity" />
-                <span class="toggle-copy">
-                  <span class="toggle-title" data-i18n="field.showAntigravity">Antigravity 활성화</span>
-                  <small class="field-help" data-i18n="help.showAntigravity">Gemini의 5시간·주간 한도: 로그인된 CLI 우선(최소 5분), CLI 미설치 시 Desktop. 별도 명령 입력 불필요. CLI 1.1.11 이상, 토큰 활동 미지원.</small>
-                </span>
-              </label>
+              <div class="tool-display-row" role="group" aria-labelledby="tool-display-claude">
+                <span class="tool-display-name" id="tool-display-claude">Claude</span>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.toolEnabled">활성화</span>
+                  <input type="checkbox" name="show_claude" checked aria-label="Claude 활성화" data-i18n-aria-label="field.showClaude" />
+                </label>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.taskbarVisible">작업표시줄</span>
+                  <input type="checkbox" name="taskbar_show_claude" checked aria-label="Claude 작업표시줄 표시" data-i18n-aria-label="field.taskbarShowClaude" />
+                </label>
+                <small class="field-help tool-display-help" data-i18n="help.showClaude">사용량 수집과 개요 표시를 켭니다.</small>
+              </div>
+              <div class="tool-display-row" role="group" aria-labelledby="tool-display-codex">
+                <span class="tool-display-name" id="tool-display-codex">Codex</span>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.toolEnabled">활성화</span>
+                  <input type="checkbox" name="show_codex" checked aria-label="Codex 활성화" data-i18n-aria-label="field.showCodex" />
+                </label>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.taskbarVisible">작업표시줄</span>
+                  <input type="checkbox" name="taskbar_show_codex" checked aria-label="Codex 작업표시줄 표시" data-i18n-aria-label="field.taskbarShowCodex" />
+                </label>
+                <small class="field-help tool-display-help" data-i18n="help.showCodex">사용량 수집과 개요 표시를 켭니다.</small>
+              </div>
+              <div class="tool-display-row" role="group" aria-labelledby="tool-display-grok">
+                <span class="tool-display-name" id="tool-display-grok">Grok</span>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.toolEnabled">활성화</span>
+                  <input type="checkbox" name="show_grok" aria-label="Grok 활성화" data-i18n-aria-label="field.showGrok" />
+                </label>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.taskbarVisible">작업표시줄</span>
+                  <input type="checkbox" name="taskbar_show_grok" checked disabled aria-label="Grok 작업표시줄 표시" data-i18n-aria-label="field.taskbarShowGrok" />
+                </label>
+                <small class="field-help tool-display-help" data-i18n="help.showGrok">사용량 수집과 개요 표시를 켭니다.</small>
+              </div>
+              <div class="tool-display-row" role="group" aria-labelledby="tool-display-cursor">
+                <span class="tool-display-name" id="tool-display-cursor">Cursor</span>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.toolEnabled">활성화</span>
+                  <input type="checkbox" name="show_cursor" aria-label="Cursor 활성화" data-i18n-aria-label="field.showCursor" />
+                </label>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.taskbarVisible">작업표시줄</span>
+                  <input type="checkbox" name="taskbar_show_cursor" checked disabled aria-label="Cursor 작업표시줄 표시" data-i18n-aria-label="field.taskbarShowCursor" />
+                </label>
+                <small class="field-help tool-display-help" data-i18n="help.showCursor">Cursor의 월간 두 사용량 풀을 수집합니다. 자동 갱신 최소 5분.</small>
+              </div>
+              <div class="tool-display-row" role="group" aria-labelledby="tool-display-antigravity">
+                <span class="tool-display-name" id="tool-display-antigravity">Antigravity</span>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.toolEnabled">활성화</span>
+                  <input type="checkbox" name="show_antigravity" aria-label="Antigravity 활성화" data-i18n-aria-label="field.showAntigravity" />
+                </label>
+                <label class="toggle-row tool-display-control">
+                  <span data-i18n="field.taskbarVisible">작업표시줄</span>
+                  <input type="checkbox" name="taskbar_show_antigravity" checked disabled aria-label="Antigravity 작업표시줄 표시" data-i18n-aria-label="field.taskbarShowAntigravity" />
+                </label>
+                <small class="field-help tool-display-help" data-i18n="help.showAntigravity">Gemini의 5시간·주간 한도: 로그인된 CLI 우선 · 자동 갱신 최소 5분. CLI 미설치 시 Desktop. 별도 명령 입력 불필요. CLI 1.1.11 이상, 토큰 활동 미지원.</small>
+              </div>
             </div>
           </fieldset>
 

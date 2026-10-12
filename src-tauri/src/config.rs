@@ -433,11 +433,16 @@ pub struct Settings {
     pub show_cursor: bool,
     #[serde(default)]
     pub show_antigravity: bool,
-    #[serde(
-        default = "default_claude_account_auto_collect_on",
-        alias = "claude_usage_auto_refresh_lab_on"
-    )]
-    pub claude_account_auto_collect_on: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_claude: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_codex: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_grok: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_cursor: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_antigravity: bool,
 }
 
 impl TaskbarPresentationProfile {
@@ -630,11 +635,16 @@ pub struct SettingsInput {
     pub show_cursor: bool,
     #[serde(default)]
     pub show_antigravity: bool,
-    #[serde(
-        default = "default_claude_account_auto_collect_on",
-        alias = "claude_usage_auto_refresh_lab_on"
-    )]
-    pub claude_account_auto_collect_on: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_claude: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_codex: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_grok: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_cursor: bool,
+    #[serde(default = "default_show_tool")]
+    pub taskbar_show_antigravity: bool,
     #[serde(default)]
     pub mono_color: Option<String>,
     #[serde(default)]
@@ -941,10 +951,6 @@ fn default_show_tool() -> bool {
     true
 }
 
-fn default_claude_account_auto_collect_on() -> bool {
-    true
-}
-
 fn default_tool_threshold_color_on() -> bool {
     true
 }
@@ -1114,7 +1120,11 @@ impl Default for Settings {
             show_grok: false,
             show_cursor: false,
             show_antigravity: false,
-            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
+            taskbar_show_claude: default_show_tool(),
+            taskbar_show_codex: default_show_tool(),
+            taskbar_show_grok: default_show_tool(),
+            taskbar_show_cursor: default_show_tool(),
+            taskbar_show_antigravity: default_show_tool(),
         }
     }
 }
@@ -1180,7 +1190,11 @@ impl Default for SettingsInput {
             show_grok: false,
             show_cursor: false,
             show_antigravity: false,
-            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
+            taskbar_show_claude: default_show_tool(),
+            taskbar_show_codex: default_show_tool(),
+            taskbar_show_grok: default_show_tool(),
+            taskbar_show_cursor: default_show_tool(),
+            taskbar_show_antigravity: default_show_tool(),
             mono_color: None,
             custom_safe: None,
             custom_warn: None,
@@ -1458,7 +1472,11 @@ impl Settings {
             show_grok: false,
             show_cursor: false,
             show_antigravity: false,
-            claude_account_auto_collect_on: default_claude_account_auto_collect_on(),
+            taskbar_show_claude: default_show_tool(),
+            taskbar_show_codex: default_show_tool(),
+            taskbar_show_grok: default_show_tool(),
+            taskbar_show_cursor: default_show_tool(),
+            taskbar_show_antigravity: default_show_tool(),
             mono_color: None,
             custom_safe: None,
             custom_warn: None,
@@ -1591,7 +1609,11 @@ impl Settings {
             show_grok: input.show_grok,
             show_cursor: input.show_cursor,
             show_antigravity: input.show_antigravity,
-            claude_account_auto_collect_on: input.claude_account_auto_collect_on,
+            taskbar_show_claude: input.taskbar_show_claude,
+            taskbar_show_codex: input.taskbar_show_codex,
+            taskbar_show_grok: input.taskbar_show_grok,
+            taskbar_show_cursor: input.taskbar_show_cursor,
+            taskbar_show_antigravity: input.taskbar_show_antigravity,
         }
     }
 
@@ -2675,6 +2697,187 @@ mod parser_tests {
             std::process::id(),
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn taskbar_visibility(settings: &Settings) -> [bool; 5] {
+        [
+            settings.taskbar_show_claude,
+            settings.taskbar_show_codex,
+            settings.taskbar_show_grok,
+            settings.taskbar_show_cursor,
+            settings.taskbar_show_antigravity,
+        ]
+    }
+
+    fn tool_activation(settings: &Settings) -> [bool; 5] {
+        [
+            settings.show_claude,
+            settings.show_codex,
+            settings.show_grok,
+            settings.show_cursor,
+            settings.show_antigravity,
+        ]
+    }
+
+    #[test]
+    fn taskbar_visibility_defaults_on_for_legacy_json_and_settings_builders() {
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        let legacy_input: SettingsInput = serde_json::from_str("{}").unwrap();
+        for settings in [
+            legacy,
+            Settings::default(),
+            Settings::from_input(legacy_input),
+            Settings::from_input(SettingsInput::default()),
+            Settings::from_ui("ocean", 70.0, 90.0, 5),
+        ] {
+            assert_eq!(taskbar_visibility(&settings), [true; 5]);
+            assert_eq!(
+                tool_activation(&settings),
+                [true, true, false, false, false]
+            );
+        }
+    }
+
+    #[test]
+    fn taskbar_visibility_preserves_each_boolean_through_input_and_json_roundtrip() {
+        for mask in 0..32 {
+            let flags: [bool; 5] = std::array::from_fn(|index| mask & (1 << index) != 0);
+            let input: SettingsInput = serde_json::from_value(serde_json::json!({
+                "taskbar_show_claude": flags[0],
+                "taskbar_show_codex": flags[1],
+                "taskbar_show_grok": flags[2],
+                "taskbar_show_cursor": flags[3],
+                "taskbar_show_antigravity": flags[4],
+            }))
+            .unwrap();
+            let settings = Settings::from_input(input);
+            assert_eq!(taskbar_visibility(&settings), flags);
+            let restored: Settings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(taskbar_visibility(&restored), flags);
+            assert_eq!(
+                tool_activation(&restored),
+                [true, true, false, false, false]
+            );
+        }
+    }
+
+    #[test]
+    fn taskbar_visibility_is_independent_of_tool_activation() {
+        for enabled in [false, true] {
+            for visible in [false, true] {
+                let settings = Settings::from_input(SettingsInput {
+                    show_claude: enabled,
+                    show_codex: enabled,
+                    show_grok: enabled,
+                    show_cursor: enabled,
+                    show_antigravity: enabled,
+                    taskbar_show_claude: visible,
+                    taskbar_show_codex: visible,
+                    taskbar_show_grok: visible,
+                    taskbar_show_cursor: visible,
+                    taskbar_show_antigravity: visible,
+                    ..SettingsInput::default()
+                });
+                let restored: Settings =
+                    serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+                assert_eq!(tool_activation(&restored), [enabled; 5]);
+                assert_eq!(taskbar_visibility(&restored), [visible; 5]);
+            }
+        }
+    }
+
+    #[test]
+    fn taskbar_visibility_and_positions_survive_unrelated_edits_and_monitor_profiles() {
+        let root = temp_root("taskbar-visibility-preservation");
+        let path = root.join("settings.json");
+        let tools = ["claude", "codex", "grok", "cursor", "antigravity"];
+        let mut json = serde_json::to_value(Settings::default()).unwrap();
+        for (index, tool) in tools.iter().enumerate() {
+            json[format!("show_{tool}")] = true.into();
+            json[format!("taskbar_show_{tool}")] = (index % 2 == 1).into();
+            json[format!("{tool}_taskbar_monitor_key")] = "monitor-a".into();
+            json[format!("{tool}_taskbar_offset_ratio")] =
+                serde_json::json!((index + 1) as f32 / 10.0);
+            json[format!("{tool}_taskbar_target_initialized")] = true.into();
+        }
+        let mut settings: Settings = serde_json::from_value(json).unwrap();
+        let source = Settings {
+            palette: Palette::Forest,
+            bar_mode: "quad".into(),
+            taskbar_show_codex: false,
+            taskbar_show_cursor: false,
+            ..Settings::default()
+        };
+        for (monitor_key, dpi) in [("monitor-a", 96), ("monitor-b", 144)] {
+            let mut profile = serde_json::json!({
+                "monitor_keys": [monitor_key],
+                "monitor_modes": [{
+                    "monitor_key": monitor_key, "width": 1920, "height": 1080, "dpi": dpi
+                }],
+                "presentation": TaskbarPresentationProfile::from_settings(&source),
+                "appearance": TaskbarAppearanceProfile::from_settings(&source),
+            });
+            for tool in tools {
+                profile[tool] = serde_json::json!({
+                    "monitor_key": monitor_key, "offset_ratio": 0.8
+                });
+            }
+            let profile: TaskbarLayoutProfile = serde_json::from_value(profile).unwrap();
+            let serialized = serde_json::to_value(&profile).unwrap();
+            for tool in tools {
+                let field = format!("taskbar_show_{tool}");
+                assert!(serialized.get(&field).is_none());
+                assert!(serialized["presentation"].get(&field).is_none());
+                assert!(serialized["appearance"].get(&field).is_none());
+            }
+            assert!(settings.upsert_taskbar_layout_profile(profile));
+        }
+        settings.save_to(&path).unwrap();
+
+        let mut expected = settings.clone();
+        expected.poll_interval_secs = 19;
+        expected.theme = "dark".into();
+        let updated = Settings::update_at(&path, |current| {
+            current.poll_interval_secs = 19;
+            current.theme = "dark".into();
+        })
+        .unwrap();
+        assert_eq!(updated, expected);
+        assert_eq!(Settings::try_load_from(&path).unwrap(), expected);
+
+        let preserved = serde_json::to_value(&updated).unwrap();
+        for profile in &updated.taskbar_layout_profiles {
+            let applied = Settings::update_at(&path, |current| {
+                let saved = current.taskbar_layout_profile(&profile.topology).unwrap();
+                let presentation = saved.presentation.clone().unwrap();
+                let appearance = saved.appearance.clone().unwrap();
+                presentation.apply_to(current);
+                appearance.apply_to(current);
+            })
+            .unwrap();
+            assert_eq!(applied.bar_mode, "quad");
+            assert_eq!(applied.palette, Palette::Forest);
+            assert_eq!(
+                taskbar_visibility(&applied),
+                [false, true, false, true, false]
+            );
+            assert_eq!(tool_activation(&applied), [true; 5]);
+            assert_eq!(
+                applied.taskbar_layout_profiles,
+                updated.taskbar_layout_profiles
+            );
+            let restored = Settings::try_load_from(&path).unwrap();
+            assert_eq!(restored, applied);
+            let current = serde_json::to_value(restored).unwrap();
+            for tool in tools {
+                for suffix in ["monitor_key", "offset_ratio", "target_initialized"] {
+                    let field = format!("{tool}_taskbar_{suffix}");
+                    assert_eq!(current[&field], preserved[&field], "{field}");
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

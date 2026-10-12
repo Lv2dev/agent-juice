@@ -1392,8 +1392,7 @@ fn collection_plan(
 ) -> CollectionPlan {
     CollectionPlan {
         claude_status: settings.show_claude,
-        claude_account: settings.show_claude
-            && (force_claude_usage || settings.claude_account_auto_collect_on),
+        claude_account: settings.show_claude,
         codex: settings.show_codex,
         grok: settings.show_grok,
         cursor: settings.show_cursor,
@@ -3912,11 +3911,11 @@ fn should_show_taskbar_bar_with_pause(
 
 fn taskbar_dock_width(settings: &Settings, tool: &str) -> Option<i32> {
     let enabled = match normalize_taskbar_tool(tool)? {
-        "claude" => settings.show_claude,
-        "codex" => settings.show_codex,
-        "grok" => settings.show_grok,
-        "cursor" => settings.show_cursor,
-        "antigravity" => settings.show_antigravity,
+        "claude" => settings.show_claude && settings.taskbar_show_claude,
+        "codex" => settings.show_codex && settings.taskbar_show_codex,
+        "grok" => settings.show_grok && settings.taskbar_show_grok,
+        "cursor" => settings.show_cursor && settings.taskbar_show_cursor,
+        "antigravity" => settings.show_antigravity && settings.taskbar_show_antigravity,
         _ => false,
     };
     if !enabled {
@@ -5930,12 +5929,10 @@ async fn save_settings(
             let refresh_app = app.clone();
             let refresh_settings = settings.clone();
             tauri::async_runtime::spawn(async move {
-                let force_claude =
-                    claude_enabled_now && refresh_settings.claude_account_auto_collect_on;
                 let _ = collect_representatives_off_thread_with_options(
                     refresh_settings,
                     codex_enabled_now,
-                    force_claude,
+                    claude_enabled_now,
                     grok_enabled_now,
                     cursor_enabled_now,
                     Some(refresh_app.clone()),
@@ -7957,6 +7954,7 @@ mod tests {
         render::Palette,
         taskbar,
     };
+
     #[test]
     fn settings_edits_merge_only_changed_fields_into_the_latest_profile() {
         let baseline = Settings::default();
@@ -9405,11 +9403,33 @@ mod tests {
     }
 
     #[test]
+    fn claude_account_collection_ignores_retired_opt_out_settings() {
+        for field in [
+            "claude_account_auto_collect_on",
+            "claude_usage_auto_refresh_lab_on",
+        ] {
+            for enabled in [false, true] {
+                let mut json = serde_json::to_value(Settings::default()).unwrap();
+                json[field] = false.into();
+                json["show_claude"] = enabled.into();
+                json["taskbar_show_claude"] = false.into();
+                let settings: Settings = serde_json::from_value(json).unwrap();
+                let automatic = super::collection_plan(&settings, false, false, false, false);
+                assert_eq!(automatic.claude_status, enabled);
+                assert_eq!(automatic.claude_account, enabled);
+                assert!(!automatic.force_claude_account);
+                let forced = super::collection_plan(&settings, false, true, false, false);
+                assert_eq!(forced.claude_account, enabled);
+                assert_eq!(forced.force_claude_account, enabled);
+            }
+        }
+    }
+
+    #[test]
     fn disabled_tools_ignore_normal_and_forced_collection() {
         let settings = Settings {
             show_claude: false,
             show_codex: false,
-            claude_account_auto_collect_on: true,
             ..Settings::default()
         };
         assert_eq!(
@@ -9430,14 +9450,13 @@ mod tests {
         let settings = Settings {
             show_claude: true,
             show_codex: false,
-            claude_account_auto_collect_on: false,
             ..Settings::default()
         };
         assert_eq!(
             super::collection_plan(&settings, false, false, false, false),
             super::CollectionPlan {
                 claude_status: true,
-                claude_account: false,
+                claude_account: true,
                 codex: false,
                 grok: false,
                 cursor: false,
@@ -9471,12 +9490,96 @@ mod tests {
     }
 
     #[test]
+    fn taskbar_hidden_tools_keep_collection_and_statuses_without_dock_space() {
+        let settings = Settings {
+            show_claude: true,
+            show_codex: true,
+            show_grok: true,
+            show_cursor: true,
+            show_antigravity: true,
+            taskbar_show_claude: false,
+            taskbar_show_codex: false,
+            taskbar_show_grok: false,
+            taskbar_show_cursor: false,
+            taskbar_show_antigravity: false,
+            ..Settings::default()
+        };
+        let plan = super::collection_plan(&settings, true, true, true, true);
+        assert!(
+            plan.claude_status && plan.claude_account && plan.codex && plan.grok && plan.cursor
+        );
+        assert!(
+            plan.force_claude_account
+                && plan.force_codex_account
+                && plan.force_grok_billing
+                && plan.force_cursor_usage
+        );
+        let mut statuses = Vec::new();
+        for (name, tool) in [
+            ("claude", Tool::Claude),
+            ("codex", Tool::Codex),
+            ("grok", Tool::Grok),
+            ("cursor", Tool::Cursor),
+            ("antigravity", Tool::Antigravity),
+        ] {
+            assert!(super::taskbar_dock_width(&settings, name).is_none());
+            assert!(!super::should_show_taskbar_bar_with_pause(
+                &settings, name, false, false, false
+            ));
+            let mut status = status_for_signature(name);
+            status.tool = tool;
+            statuses.push(status);
+        }
+        assert_eq!(
+            super::filter_enabled_statuses(statuses.clone(), &settings).len(),
+            5
+        );
+        let restored = Settings {
+            taskbar_show_claude: true,
+            taskbar_show_codex: true,
+            taskbar_show_grok: true,
+            taskbar_show_cursor: true,
+            taskbar_show_antigravity: true,
+            ..settings.clone()
+        };
+        assert_eq!(
+            super::collection_plan(&restored, true, true, true, true),
+            plan
+        );
+        assert_eq!(super::filter_enabled_statuses(statuses, &restored).len(), 5);
+        assert!(!super::CollectionChanges::between(
+            super::CollectionPolicy::from_settings(&settings),
+            super::CollectionPolicy::from_settings(&restored),
+        )
+        .any());
+        for tool in super::TASKBAR_TOOLS {
+            assert!(super::taskbar_dock_width(&restored, tool).is_some());
+        }
+    }
+
+    #[test]
+    fn taskbar_visibility_preferences_do_not_enable_disabled_tools() {
+        let settings = Settings {
+            show_claude: false,
+            show_codex: false,
+            show_grok: false,
+            show_cursor: false,
+            show_antigravity: false,
+            ..Settings::default()
+        };
+        for tool in super::TASKBAR_TOOLS {
+            assert!(super::taskbar_dock_width(&settings, tool).is_none());
+            assert!(!super::taskbar_tool_enabled(&settings, tool));
+        }
+        assert!(!super::collection_plan(&settings, true, true, true, true).claude_status);
+    }
+
+    #[test]
     fn three_tool_collection_reserves_a_final_grok_budget() {
         let settings = Settings {
             show_claude: true,
             show_codex: true,
             show_grok: true,
-            claude_account_auto_collect_on: true,
             ..Settings::default()
         };
         let plan = super::collection_plan(&settings, false, false, false, false);

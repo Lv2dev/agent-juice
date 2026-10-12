@@ -47,7 +47,7 @@ export function previewSnapshot(settings, statuses, tool = "claude", textScale =
     secondary: selected === "grok" ? null : { label: selected === "cursor" ? "other_models" : "week", used_percent: 65,
       resets_at: selected === "cursor" ? reset(168).slice(0,10) : reset(144) },
   } : current;
-  return { type: "juice-bar-preview", tool: selected, settings: { ...DEFAULT_SETTINGS, ...previewDisplaySettings(settings), [`show_${selected}`]: true },
+  return { type: "juice-bar-preview", tool: selected, settings: { ...DEFAULT_SETTINGS, ...previewDisplaySettings(settings), [`show_${selected}`]: true, [`taskbar_show_${selected}`]: true },
     statuses: [status], textScale: normalizeTextScale(textScale), active, sample };
 }
 

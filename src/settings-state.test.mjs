@@ -61,7 +61,6 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       show_codex: true,
       show_grok: true,
       show_cursor: true,
-      claude_account_auto_collect_on: true,
       tool_colors: {
         claude_primary: [0x10, 0x20, 0x30],
         claude_secondary: [0x40, 0x50, 0x60],
@@ -143,12 +142,16 @@ test("formStateFromSettings reads scalar and custom Rust palette shapes", () => 
       showGrok: true,
       showCursor: true,
       showAntigravity: false,
+      taskbarShowClaude: true,
+      taskbarShowCodex: true,
+      taskbarShowGrok: true,
+      taskbarShowCursor: true,
+      taskbarShowAntigravity: true,
       antigravityPrimaryColor: "#4285f4",
       antigravitySecondaryColor: "#b27be8",
       antigravityTaskbarOffsetRatio: 0.25,
       antigravityTextColor: "#4285f4",
       antigravityTextColorOn: false,
-      claudeAccountAutoCollectOn: true,
       monoColor: "#4f8a73",
       customSafe: "#22c55e",
       customWarn: "#f59e0b",
@@ -246,7 +249,11 @@ test("payloadFromEntries creates save_settings input payload", () => {
     show_codex: "on",
     show_grok: "on",
     show_cursor: "on",
-    claude_account_auto_collect_on: "on",
+    taskbar_show_claude: "",
+    taskbar_show_codex: "on",
+    taskbar_show_grok: "on",
+    taskbar_show_cursor: "",
+    taskbar_show_antigravity: "on",
     mono_color: "#345678",
     custom_safe: "#112233",
     custom_warn: "#445566",
@@ -332,7 +339,11 @@ test("payloadFromEntries creates save_settings input payload", () => {
     show_codex: true,
     show_grok: true,
     show_cursor: true,
-    claude_account_auto_collect_on: true,
+    taskbar_show_claude: false,
+    taskbar_show_codex: true,
+    taskbar_show_grok: true,
+    taskbar_show_cursor: false,
+    taskbar_show_antigravity: true,
     mono_color: "#345678",
     custom_safe: "#112233",
     custom_warn: "#445566",
@@ -452,7 +463,6 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({ codex_taskbar_offset_ratio: -1 }).codexTaskbarOffsetRatio, 0);
   assert.equal(formStateFromSettings({}).showClaude, true);
   assert.equal(formStateFromSettings({}).showCodex, true);
-  assert.equal(formStateFromSettings({}).claudeAccountAutoCollectOn, true);
   assert.equal(formStateFromSettings({}).updateCheckOn, true);
   assert.equal(formStateFromSettings({}).claudePrimaryColor, "#d79a32");
   assert.equal(formStateFromSettings({}).claudeSecondaryColor, "#d36b86");
@@ -475,10 +485,6 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(formStateFromSettings({}).ringTextColor, "#6b7280");
   assert.equal(formStateFromSettings({}).ringTextColorOn, false);
   assert.equal(formStateFromSettings({ update_check_on: false }).updateCheckOn, false);
-  assert.equal(
-    formStateFromSettings({ claude_usage_auto_refresh_lab_on: false }).claudeAccountAutoCollectOn,
-    false,
-  );
 
   const payload = payloadFromEntries({
     display_basis: "remaining",
@@ -548,7 +554,7 @@ test("theme defaults to system and taskbar offset is clamped", () => {
   assert.equal(payload.activity_tokens_per_level, 1);
   assert.equal(payload.show_claude, false);
   assert.equal(payload.show_codex, false);
-  assert.equal(payload.claude_account_auto_collect_on, false);
+  assert.equal("claude_account_auto_collect_on" in payload, false);
   assert.equal(payload.update_check_on, false);
   assert.equal("tool_gap_px" in payload, false);
 });

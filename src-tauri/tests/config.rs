@@ -43,6 +43,58 @@ fn storage_revision_reads_only_file_metadata() {
 }
 
 #[test]
+fn retired_claude_auto_collection_preferences_are_ignored_and_not_saved() {
+    let root = temp_root("retired-claude-auto-collection");
+    let path = root.join("settings.json");
+    let retired = [
+        "claude_account_auto_collect_on",
+        "claude_usage_auto_refresh_lab_on",
+    ];
+    for enabled in [false, true] {
+        for visible in [false, true] {
+            for legacy in [
+                serde_json::json!({retired[0]: false}),
+                serde_json::json!({retired[1]: false}),
+                serde_json::json!({retired[0]: false, retired[1]: false}),
+            ] {
+                let mut json = serde_json::to_value(Settings::default()).unwrap();
+                json.as_object_mut()
+                    .unwrap()
+                    .extend(legacy.as_object().unwrap().clone());
+                json["show_claude"] = enabled.into();
+                json["taskbar_show_claude"] = visible.into();
+                json["taskbar_bars_paused"] = true.into();
+                fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+                let loaded = Settings::try_load_from(&path).unwrap();
+                assert_eq!(loaded.show_claude, enabled);
+                assert_eq!(loaded.taskbar_show_claude, visible);
+                assert!(loaded.taskbar_bars_paused);
+                loaded.save_to(&path).unwrap();
+                let saved = read_json(&path);
+                for field in retired {
+                    assert!(saved.get(field).is_none());
+                }
+                assert_eq!(saved["show_claude"], enabled);
+                assert_eq!(saved["taskbar_show_claude"], visible);
+                assert_eq!(saved["taskbar_bars_paused"], true);
+
+                let mut input = legacy;
+                input["show_claude"] = enabled.into();
+                input["taskbar_show_claude"] = visible.into();
+                let input: SettingsInput = serde_json::from_value(input).unwrap();
+                let applied = Settings::from_input(input);
+                assert_eq!(applied.show_claude, enabled);
+                assert_eq!(applied.taskbar_show_claude, visible);
+                let applied = serde_json::to_value(applied).unwrap();
+                for field in retired {
+                    assert!(applied.get(field).is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn settings_update_rejects_malformed_json_and_preserves_bytes() {
     let root = temp_root("update-malformed");
     let path = root.join("settings.json");
@@ -236,6 +288,11 @@ fn settings_roundtrip_and_legacy_defaults() {
         taskbar_avoid_overlap_on: false,
         taskbar_bars_paused: true,
         show_antigravity: false,
+        taskbar_show_claude: true,
+        taskbar_show_codex: true,
+        taskbar_show_grok: true,
+        taskbar_show_cursor: true,
+        taskbar_show_antigravity: true,
         antigravity_taskbar_offset_ratio: 0.0,
         antigravity_taskbar_monitor_key: String::new(),
         antigravity_taskbar_target_initialized: false,
@@ -285,7 +342,6 @@ fn settings_roundtrip_and_legacy_defaults() {
         show_codex: true,
         show_grok: true,
         show_cursor: true,
-        claude_account_auto_collect_on: true,
     };
 
     settings.save_to(&path).unwrap();
@@ -353,7 +409,6 @@ fn settings_roundtrip_and_legacy_defaults() {
         loaded.cursor_taskbar_monitor_key,
         "monitor:1920,0,2560,1440"
     );
-    assert!(loaded.claude_account_auto_collect_on);
 
     fs::write(
         &path,
@@ -406,22 +461,11 @@ fn settings_roundtrip_and_legacy_defaults() {
     assert!(legacy.codex_taskbar_target_initialized);
     assert!(legacy.show_claude);
     assert!(legacy.show_codex);
-    assert!(legacy.claude_account_auto_collect_on);
     assert_eq!(legacy.tool_colors, ToolColors::default());
 
     fs::write(&path, r#"{"full_reset_time_on":false}"#).unwrap();
     let explicit_reset_off = Settings::load_from(&path);
     assert!(!explicit_reset_off.full_reset_time_on);
-
-    fs::write(&path, r#"{"claude_usage_auto_refresh_lab_on":false}"#).unwrap();
-    let migrated_claude_collection = Settings::load_from(&path);
-    assert!(!migrated_claude_collection.claude_account_auto_collect_on);
-    migrated_claude_collection.save_to(&path).unwrap();
-    let migrated_json = read_json(&path);
-    assert_eq!(migrated_json["claude_account_auto_collect_on"], false);
-    assert!(migrated_json
-        .get("claude_usage_auto_refresh_lab_on")
-        .is_none());
 
     fs::write(&path, r#"{"display_basis":"used","poll_interval_secs":2}"#).unwrap();
     let explicit_modern_interval = Settings::load_from(&path);
@@ -1417,6 +1461,11 @@ fn restore_statusline_fails_closed_when_settings_becomes_malformed() {
 fn settings_input_normalizes_task10_fields_and_custom_palette() {
     let input = SettingsInput {
         show_antigravity: false,
+        taskbar_show_claude: true,
+        taskbar_show_codex: true,
+        taskbar_show_grok: true,
+        taskbar_show_cursor: true,
+        taskbar_show_antigravity: true,
         antigravity_taskbar_offset_ratio: 0.0,
         antigravity_taskbar_monitor_key: String::new(),
         antigravity_primary_color: None,
@@ -1478,7 +1527,6 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
         show_codex: true,
         show_grok: true,
         show_cursor: true,
-        claude_account_auto_collect_on: true,
         mono_color: Some("#345678".into()),
         custom_safe: Some("#112233".into()),
         custom_warn: Some("#445566".into()),
@@ -1607,7 +1655,6 @@ fn settings_input_normalizes_task10_fields_and_custom_palette() {
     assert!(settings.show_codex);
     assert!(settings.show_grok);
     assert!(settings.show_cursor);
-    assert!(settings.claude_account_auto_collect_on);
 }
 
 #[test]
@@ -1707,5 +1754,4 @@ fn settings_input_defaults_theme_to_system_and_clamps_tool_taskbar_offsets() {
     assert_eq!(settings.codex_taskbar_offset_ratio, 1.0);
     assert!(settings.show_claude);
     assert!(settings.show_codex);
-    assert!(settings.claude_account_auto_collect_on);
 }

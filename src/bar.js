@@ -152,6 +152,11 @@ function refreshMenu() {
   return document.querySelector("#bar-menu");
 }
 
+function currentBarIsVisible() {
+  const view = currentBarView ?? barViewModel(statuses, settings);
+  return view.tools.some(tool => !CURRENT_TOOL || tool.tool === CURRENT_TOOL);
+}
+
 function clampMenuPosition(value, size, max) {
   const coordinate = Number.isFinite(value) ? value : MENU_MARGIN;
   const upper = Math.max(MENU_MARGIN, max - size - MENU_MARGIN);
@@ -159,6 +164,7 @@ function clampMenuPosition(value, size, max) {
 }
 
 async function showRefreshMenu(event) {
+  if (!currentBarIsVisible()) return;
   const menu = refreshMenu();
   if (!menu) {
     void refreshTaskbarStatus();
@@ -174,6 +180,11 @@ async function showRefreshMenu(event) {
   try {
     const nativeOpened = await setNativeMenuOpen(true);
     if (!nativeOpened) throw new Error("native menu state is unavailable");
+    if (!currentBarIsVisible()) {
+      hideRefreshMenu();
+      setRefreshMenuState(MENU_STATES.CLOSED);
+      return;
+    }
     if (request !== refreshMenuRequest || refreshMenuState !== MENU_STATES.OPENING) {
       if (!refreshMenuDesiredOpen) {
         setRefreshMenuState(MENU_STATES.CLOSING);
@@ -498,7 +509,7 @@ function observeTaskbarContentSize() {
 }
 
 function refreshTooltipSnapshot() {
-  if (!CURRENT_TOOL || listenersDisposed) return;
+  if (!CURRENT_TOOL || listenersDisposed || !currentBarIsVisible()) return;
   const vm = barToolViewModel(statuses, CURRENT_TOOL, settings, new Date(), {
     startupLoading: startupStatusLoading,
     collectionHealth,
@@ -508,7 +519,7 @@ function refreshTooltipSnapshot() {
 }
 
 function startTooltipClock() {
-  if (PREVIEW || !CURRENT_TOOL || listenersDisposed || tooltipClockTimer) return;
+  if (PREVIEW || !CURRENT_TOOL || listenersDisposed || tooltipClockTimer || !currentBarIsVisible()) return;
   refreshTooltipSnapshot();
   tooltipClockTimer = setInterval(refreshTooltipSnapshot, 30_000);
   tooltipClockTimer?.unref?.();
@@ -544,6 +555,15 @@ function renderBar() {
       ? document.documentElement?.clientWidth : document.documentElement?.clientHeight,
   });
   currentBarView = vm;
+  if (!currentBarIsVisible()) {
+    stopTooltipClock();
+    pendingNativeTooltip = null;
+    lastNativeTooltip = "";
+    if (refreshMenuDesiredOpen || refreshMenuState === MENU_STATES.OPEN || refreshMenuState === MENU_STATES.OPENING || refreshMenu()?.hidden === false) {
+      hideRefreshMenu();
+    }
+    setRefreshMenuState(MENU_STATES.CLOSED);
+  }
   root.dataset.mode = vm.mode;
   root.dataset.menuState = refreshMenuState;
   root.dataset.fullResetTime = vm.fullResetTimeOn ? "on" : "off";
