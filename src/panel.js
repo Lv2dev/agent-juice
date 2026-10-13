@@ -13,6 +13,7 @@ import { panelCollectionIssue } from "./collection-state.js";
 import { applyPanelSkin, applyTheme } from "./theme.js";
 import { createBarPreview } from "./bar-preview.js";
 import { createSettingsAuthority } from "./settings-revision.js";
+import { createStatusRequests } from "./status-requests.js";
 
 const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 const PANEL_VIEWS = ["overview", "activity", "settings", "about"];
@@ -51,8 +52,16 @@ const systemTextScale = createTextScaleState(() => {
 });
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
+const statusRequests = createStatusRequests({
+  invoke,
+  getStatusGeneration: () => statusEventGeneration,
+  getHealthGeneration: () => collectionHealthEventGeneration,
+  acceptStatus: renderStatuses,
+  acceptHealth: health => { collectionHealth = health && typeof health === "object" ? health : {}; },
+});
 
 function setPanelVisible(visible) {
+  if (listenersDisposed) return;
   const becameVisible = visible && !panelVisible;
   panelVisible = visible;
   document.documentElement.dataset.panelVisible = visible ? "true" : "false";
@@ -67,6 +76,7 @@ function tauriApi() {
 }
 
 async function invoke(command) {
+  if (listenersDisposed) return null;
   const fn = tauriApi().core?.invoke;
   if (!fn) return null;
   return fn(command);
@@ -581,25 +591,11 @@ async function loadSettings() {
 }
 
 async function loadStatus() {
-  const requestGeneration = statusEventGeneration;
-  const healthRequestGeneration = collectionHealthEventGeneration;
-  try {
-    const statuses = await invoke("get_status");
-    try {
-      const health = await invoke("get_collection_health");
-      if (collectionHealthEventGeneration === healthRequestGeneration) {
-        collectionHealth = health && typeof health === "object" ? health : {};
-      }
-    } catch {
-      // Health is supplemental; keep rendering the last valid usage snapshot.
-    }
-    if (statusEventGeneration === requestGeneration) renderStatuses(statuses);
-  } catch {
-    if (statusEventGeneration === requestGeneration) renderStatuses([]);
-  }
+  return statusRequests.load();
 }
 
 async function loadActivity() {
+  if (listenersDisposed) return;
   if (activityLoadPromise) return activityLoadPromise;
   activityLoadPromise = loadActivityOnce();
   try {
@@ -613,14 +609,14 @@ async function loadActivityOnce() {
   const requestGeneration = activityEventGeneration;
   try {
     const snapshot = await invoke("get_activity");
-    if (activityEventGeneration !== requestGeneration) return;
+    if (listenersDisposed || activityEventGeneration !== requestGeneration || snapshot === null) return;
     activitySnapshot = snapshot && typeof snapshot === "object"
       ? snapshot
       : { days: [], partial: true };
     activityDataRevision += 1;
     renderActivity();
   } catch {
-    if (activityEventGeneration !== requestGeneration) return;
+    if (listenersDisposed || activityEventGeneration !== requestGeneration) return;
     activitySnapshot = { days: [], partial: true };
     activityDataRevision += 1;
     renderActivity();
@@ -630,6 +626,7 @@ async function loadActivityOnce() {
 function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
+    if (!panelVisible || listenersDisposed) return;
     void systemTextScale.load(invoke);
     void loadSettings();
     void loadStatus();
@@ -640,7 +637,7 @@ function scheduleSnapshotFallback() {
 function scheduleActivityRefresh() {
   if (activityRefreshTimer || listenersDisposed) return;
   activityRefreshTimer = setInterval(() => {
-    if (panelVisible) void loadActivity();
+    if (panelVisible && !listenersDisposed) void loadActivity();
   }, 300_000);
   activityRefreshTimer?.unref?.();
 }
@@ -657,6 +654,7 @@ function unlistenSafely(unlisten) {
 function cleanupListeners() {
   if (listenersDisposed) return;
   listenersDisposed = true;
+  statusRequests.dispose();
   systemTextScale.dispose();
   listenerLifecycleGeneration += 1;
   if (snapshotFallbackTimer) {
@@ -713,11 +711,12 @@ function registerListenerAttempt(listen, eventName, handler) {
 }
 
 async function listenWithRetry(listen, eventName, handler) {
+  const activeHandler = event => { if (!listenersDisposed) handler(event); };
   for (const delay of LISTENER_RETRY_DELAYS_MS) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     if (listenersDisposed) return false;
     try {
-      const unlisten = await registerListenerAttempt(listen, eventName, handler);
+      const unlisten = await registerListenerAttempt(listen, eventName, activeHandler);
       if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
       return true;
     } catch {

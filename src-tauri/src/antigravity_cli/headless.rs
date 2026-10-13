@@ -114,10 +114,25 @@ fn workspace() -> Result<PathBuf, CaptureError> {
 }
 
 #[cfg(any(windows, test))]
-fn quota_command(executable: &Path, directory: &Path) -> Command {
+fn readonly_command(executable: &Path, directory: &Path) -> Command {
     let mut command = Command::new(executable);
     command
         .current_dir(directory)
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    command
+}
+
+#[cfg(any(windows, test))]
+fn changelog_command(executable: &Path, directory: &Path) -> Command {
+    let mut command = readonly_command(executable, directory);
+    command.arg("changelog");
+    command
+}
+
+#[cfg(any(windows, test))]
+fn quota_command(executable: &Path, directory: &Path) -> Command {
+    let mut command = readonly_command(executable, directory);
+    command
         .args([
             "--print",
             "/usage",
@@ -137,8 +152,9 @@ pub fn collect(
     pc_id: &str,
     captured_at: &str,
     deadline: Instant,
+    admitted: &dyn Fn() -> bool,
 ) -> Result<AgentStatus, CaptureError> {
-    if Instant::now() >= deadline {
+    if Instant::now() >= deadline || !admitted() {
         return Err(CaptureError::Unavailable);
     }
     let runtime = checked_runtime()?;
@@ -152,13 +168,11 @@ pub fn collect(
     let supported = match known {
         Some(value) => value,
         None => {
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline || !admitted() {
                 return Err(CaptureError::Unavailable);
             }
-            let mut command = Command::new(&runtime.path);
-            command.current_dir(&directory).arg("changelog");
             let output = crate::collector::captured_command_output_with_input_caps(
-                command,
+                changelog_command(&runtime.path, &directory),
                 None,
                 deadline
                     .saturating_duration_since(Instant::now())
@@ -174,7 +188,7 @@ pub fn collect(
             remember_capability(&CAPABILITY, runtime.clone(), output.success, &output.stdout)?
         }
     };
-    if !supported || Instant::now() >= deadline {
+    if !supported || Instant::now() >= deadline || !admitted() {
         return Err(CaptureError::Unavailable);
     }
     let output = crate::collector::captured_command_output_with_input_caps(
@@ -206,6 +220,7 @@ pub fn collect(
     _pc_id: &str,
     _captured_at: &str,
     _deadline: Instant,
+    _admitted: &dyn Fn() -> bool,
 ) -> Result<AgentStatus, CaptureError> {
     Err(CaptureError::AppRequired)
 }
@@ -260,6 +275,8 @@ mod tests {
     }
     #[test]
     fn quota_command_never_accepts_a_model_prompt_or_shell_interpolation() {
+        let auto_update_before = std::env::var_os("AGY_CLI_DISABLE_AUTO_UPDATE");
+        let account_info_before = std::env::var_os("AGY_CLI_HIDE_ACCOUNT_INFO");
         let command = quota_command(Path::new("fixture.exe"), Path::new("fixture-workspace"));
         let args: Vec<_> = command
             .get_args()
@@ -283,6 +300,104 @@ mod tests {
             command.get_current_dir(),
             Some(Path::new("fixture-workspace"))
         );
+        assert_eq!(
+            std::env::var_os("AGY_CLI_DISABLE_AUTO_UPDATE"),
+            auto_update_before
+        );
+        assert_eq!(
+            std::env::var_os("AGY_CLI_HIDE_ACCOUNT_INFO"),
+            account_info_before
+        );
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [
+                (
+                    std::ffi::OsStr::new("AGY_CLI_DISABLE_AUTO_UPDATE"),
+                    Some(std::ffi::OsStr::new("true"))
+                ),
+                (
+                    std::ffi::OsStr::new("AGY_CLI_HIDE_ACCOUNT_INFO"),
+                    Some(std::ffi::OsStr::new("1"))
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn changelog_command_is_readonly_and_disables_auto_updates_per_child() {
+        let auto_update_before = std::env::var_os("AGY_CLI_DISABLE_AUTO_UPDATE");
+        let account_info_before = std::env::var_os("AGY_CLI_HIDE_ACCOUNT_INFO");
+        let command = changelog_command(Path::new("fixture.exe"), Path::new("fixture-workspace"));
+        assert_eq!(command.get_program(), "fixture.exe");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("changelog")]
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("fixture-workspace"))
+        );
+        assert_eq!(
+            std::env::var_os("AGY_CLI_DISABLE_AUTO_UPDATE"),
+            auto_update_before
+        );
+        assert_eq!(
+            std::env::var_os("AGY_CLI_HIDE_ACCOUNT_INFO"),
+            account_info_before
+        );
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("AGY_CLI_DISABLE_AUTO_UPDATE"),
+                Some(std::ffi::OsStr::new("true"))
+            )]
+        );
+    }
+
+    #[test]
+    fn readonly_commands_override_inherited_one_without_changing_global_environment() {
+        const KEY: &str = "AGY_CLI_DISABLE_AUTO_UPDATE";
+        const FAKE_CHILD: &str = "JUICE_TEST_ANTIGRAVITY_AUTO_UPDATE_ENV";
+        let before = std::env::var_os(KEY);
+        if std::env::var_os(FAKE_CHILD).as_deref() == Some(std::ffi::OsStr::new("one")) {
+            assert_eq!(before.as_deref(), Some(std::ffi::OsStr::new("1")));
+            for command in [
+                changelog_command(Path::new("fixture.exe"), Path::new("fixture-workspace")),
+                quota_command(Path::new("fixture.exe"), Path::new("fixture-workspace")),
+            ] {
+                assert_eq!(
+                    command.get_envs().find(|(key, _)| *key == KEY),
+                    Some((
+                        std::ffi::OsStr::new(KEY),
+                        Some(std::ffi::OsStr::new("true"))
+                    ))
+                );
+                assert_eq!(std::env::var_os(KEY), before);
+            }
+            return;
+        }
+        let mut test = Command::new(std::env::current_exe().expect("fake test executable"));
+        test.args([
+                "--exact",
+                "antigravity_cli::headless::tests::readonly_commands_override_inherited_one_without_changing_global_environment",
+                "--nocapture",
+            ])
+            .env(KEY, "1")
+            .env(FAKE_CHILD, "one");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            test.creation_flags(0x0800_0000);
+        }
+        let output = test.output().expect("isolated fake environment regression");
+        assert_eq!(std::env::var_os(KEY), before);
+        assert!(
+            output.status.success(),
+            "fake regression failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
     }
 
     #[test]
@@ -297,6 +412,7 @@ mod tests {
             "live-fixture",
             &captured,
             Instant::now() + Duration::from_secs(15),
+            &|| true,
         )
         .expect("read-only CLI account quota");
         assert_eq!(status.session_id, SESSION_ID);

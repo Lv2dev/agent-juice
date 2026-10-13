@@ -79,9 +79,9 @@ function formContext(invoke, loaded = initial) {
 
 function barContext(invoke = async () => null) {
   const context = vm.createContext({ DEFAULT_SETTINGS, invoke, barViewModel, createSettingsAuthority, applyTheme() {}, applyFont() {}, applyTranslations() {}, loadTaskbarOrientation: async () => {} });
-  vm.runInContext(`let settings={...DEFAULT_SETTINGS},settingsEventGeneration=0;
+  vm.runInContext(`let settings={...DEFAULT_SETTINGS},settingsEventGeneration=0,listenersDisposed=false;
     const settingsAuthority=createSettingsAuthority();
-    ${helpers(barSource, "function withTimeout(")}
+    ${helpers(barSource, "function refreshTaskbarStatus(")}
     function renderBar(){globalThis.view=barViewModel([],settings,new Date(),{});}
     ${between(barSource, "async function loadSettings()", "async function loadTaskbarOrientation(")}
     globalThis.onSettings=${handler(barSource, 'void listenWithRetry(listen, "settings-updated", ', 'void listenWithRetry(listen, "taskbar-dragging-updated",')};

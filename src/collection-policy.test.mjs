@@ -25,7 +25,8 @@ test('startup and deferred broker/Claude work load policy under the same setting
   assert.match(current, /apply_collection_policy_from_settings\(tool, load_settings\(\), reconcile\)/);
   const apply = body('apply_collection_policy_from_settings');
   assert.match(apply, /apply_collection_policy_from_settings_with_retirement\(tool, settings, reconcile/);
-  assert.match(apply, /antigravity::set_enabled\(false\)/);
+  assert.match(apply, /antigravity::suspend_for_settings_failure\(\)/);
+  assert.doesNotMatch(apply, /antigravity::set_enabled\(false\)/);
   const retirement = body('apply_collection_policy_from_settings_with_retirement');
   assert.match(retirement, /reconcile\(CollectionPolicy::from_settings\(&settings\).enabled\(tool\)\)/);
   assert.match(retirement, /Tool::Codex \| Tool::Grok[\s\S]*?reconcile\(false\)/);
@@ -33,6 +34,64 @@ test('startup and deferred broker/Claude work load policy under the same setting
   assert.match(body('reconcile_broker_policy_for'), /reconcile_current_collection_policy[\s\S]*?Settings::try_load/);
   assert.match(body('reconcile_claude_statusline_for_release'), /reconcile_current_collection_policy[\s\S]*?Settings::try_load/);
   assert.doesNotMatch(body('spawn_claude_statusline_reconcile'), /enabled: bool|settings.show_claude/);
+});
+
+test('settings-read retirement keeps the Antigravity external-attempt throttles', () => {
+  const cache = readFileSync(new URL('../src-tauri/src/antigravity.rs', import.meta.url), 'utf8');
+  const suspension = cache.match(/fn suspend_for_settings_failure\(&mut self\)[\s\S]*?\n    }/)?.[0] ?? '';
+  assert.match(suspension, /self.suspended = true/);
+  assert.match(suspension, /self.generation = self.generation.wrapping_add\(1\)/);
+  assert.match(suspension, /self.result = None/);
+  assert.doesNotMatch(suspension, /self\.(?:retry_at|last_started_at|force_retry_at) = None|self.failures = 0/);
+});
+
+test('automatic native snapshots honor shared system activity while manual refresh stays explicit', () => {
+  const status = body('get_status');
+  assert.match(status, /if !automatic_collection_allowed\(&app\)[\s\S]*?return current_collection_snapshot\(\)/);
+  assert.ok(status.indexOf('automatic_collection_allowed') < status.indexOf('Settings::try_load'));
+  const activity = body('get_activity');
+  assert.match(activity, /Result<Option<activity::ActivitySnapshot>, String>/);
+  assert.match(activity, /if !automatic_collection_allowed\(&app\)[\s\S]*?return Ok\(None\)/);
+  assert.ok(activity.indexOf('automatic_collection_allowed') < activity.indexOf('collect_activity_off_thread'));
+  assert.match(activity, /with_taskbar_settings_read[\s\S]*?Settings::try_load[\s\S]*?Ok\(Some\(current_activity_snapshot\(/);
+  assert.match(activity, /&snapshot,[\s\S]*?settings.show_codex/);
+  assert.match(source, /app.manage\(system_activity.clone\(\)\)/);
+  assert.doesNotMatch(body('refresh_status'), /automatic_collection_allowed|system_activity_allows_automatic/);
+  assert.match(body('refresh_status'), /collect_force_refresh_off_thread[\s\S]*?spawn_activity_refresh[\s\S]*?spawn_cursor_activity_refresh/);
+});
+
+test('activity results keep internal Codex provenance through final IPC and both emitters', () => {
+  assert.match(source, /struct CollectedActivity\s*\{[\s\S]*?snapshot: activity::ActivitySnapshot,[\s\S]*?codex_generation: Option<u64>/);
+  const collect = body('collect_activity_off_thread');
+  assert.match(collect, /Result<CollectedActivity, String>/);
+  assert.match(collect, /collector::codex_collection_generation\(\)[\s\S]*?codex_activity::collect/);
+  assert.match(collect, /current_activity_snapshot\(&local, settings.show_codex\)/);
+  assert.match(body('current_activity_snapshot_with_policy'), /result.codex_generation == current_generation\(\)/);
+  assert.match(body('current_activity_snapshot_with_policy'), /merge_codex_activity\(snapshot, None, codex_enabled\)/);
+  for (const name of ['spawn_activity_refresh', 'spawn_cursor_activity_refresh']) {
+    assert.match(body(name), /with_taskbar_settings_read[\s\S]*?current_activity_snapshot[\s\S]*?emit\("activity-updated"/);
+  }
+  assert.match(body('get_activity'), /Result<Option<activity::ActivitySnapshot>, String>/);
+});
+
+test('queued Cursor activity reads current settings and their generation before dispatch', () => {
+  const spawn = body('spawn_cursor_activity_refresh');
+  assert.ok(spawn.indexOf('current_cursor_activity_request') < spawn.indexOf('try_begin_cursor_activity_refresh'));
+  assert.ok(spawn.indexOf('current_cursor_activity_request') < spawn.indexOf('tauri::async_runtime::spawn'));
+  const request = body('current_cursor_activity_request');
+  assert.match(request, /with_taskbar_settings_read[\s\S]*?load_settings\(\)/);
+  assert.match(request, /TASKBAR_SETTINGS_GENERATION.load\(Ordering::Acquire\) == generation/);
+  assert.match(request, /settings.show_cursor.then_some\(\(settings, generation\)\)/);
+});
+
+test('automatic activity backfill rechecks inactivity between passes without blocking force', () => {
+  const activity = body('spawn_activity_refresh');
+  assert.match(activity, /if !force_codex && !automatic_collection_allowed\(&app\)/);
+  assert.match(activity, /for pass in 0\.\.ACTIVITY_BACKFILL_MAX_PASSES[\s\S]*?if !force_codex && !automatic_collection_allowed\(&app\)[\s\S]*?break/);
+  const cursor = body('spawn_cursor_activity_refresh');
+  assert.match(cursor, /!force && !automatic_collection_allowed\(&app\)/);
+  assert.match(cursor, /for _ in 0\.\.CURSOR_ACTIVITY_MAX_PASSES[\s\S]*?system_activity_allows_automatic\(activity_monitor.as_ref\(\)\)/);
+  assert.match(cursor, /force\s*\|\|\s*system_activity_allows_automatic\(activity_monitor.as_ref\(\)\)/);
 });
 
 test('failed policies are recovered before collection without polling healthy bindings', () => {
