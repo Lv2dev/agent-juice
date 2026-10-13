@@ -867,15 +867,22 @@ impl BrokerPolicy {
     }
 
     fn set_enabled(&self, enabled: bool) -> bool {
-        self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                if (current & 1 != 0) == enabled {
-                    None
-                } else {
-                    Some((current.wrapping_add(2) & !1) | u64::from(enabled))
-                }
-            })
-            .is_ok()
+        let mut current = self.snapshot();
+        loop {
+            if (current & 1 != 0) == enabled {
+                return false;
+            }
+            let next = (current.wrapping_add(2) & !1) | u64::from(enabled);
+            match self.state.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
@@ -3470,6 +3477,65 @@ mod tests {
         assert_ne!(current, original);
         assert!(!policy.is_current(original));
         assert!(policy.is_current(current));
+    }
+
+    #[test]
+    fn contended_same_policy_transition_advances_only_one_epoch() {
+        let policy = Arc::new(BrokerPolicy::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let policy = policy.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                policy.set_enabled(true)
+            }));
+        }
+        let changed = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|changed| *changed)
+            .count();
+        assert_eq!(changed, 1);
+        assert_eq!(policy.admission(), Some(3));
+    }
+
+    #[test]
+    fn contended_policy_epochs_match_successful_transitions() {
+        let policy = Arc::new(BrokerPolicy::new(false));
+        let changes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let policy = policy.clone();
+            let changes = changes.clone();
+            workers.push(std::thread::spawn(move || {
+                for enabled in [true, false].into_iter().cycle().take(200) {
+                    if policy.set_enabled(enabled) {
+                        changes.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(policy.snapshot(), changes.load(Ordering::Relaxed) * 2);
+        assert!(policy.admission().is_none());
+    }
+
+    #[test]
+    fn policy_epoch_wrap_keeps_enabled_bit_and_no_op_semantics() {
+        let policy = BrokerPolicy {
+            state: std::sync::atomic::AtomicU64::new(u64::MAX),
+        };
+        assert!(!policy.set_enabled(true));
+        assert_eq!(policy.snapshot(), u64::MAX);
+        assert!(policy.set_enabled(false));
+        assert_eq!(policy.snapshot(), 0);
+        assert!(!policy.set_enabled(false));
+        assert!(policy.set_enabled(true));
+        assert_eq!(policy.admission(), Some(3));
     }
 
     #[test]
