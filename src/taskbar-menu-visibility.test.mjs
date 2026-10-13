@@ -15,7 +15,7 @@ function fixture(tool, { delayedOpen = false, failedClose = false } = {}) {
   const root = { dataset: {}, style: { setProperty() {} } };
   const items = Object.fromEntries(tools.map(name => [name, { hidden: true }]));
   const calls = [];
-  const context = vm.createContext({ DEFAULT_SETTINGS, barViewModel, Date, menu,
+  const context = vm.createContext({ DEFAULT_SETTINGS, barViewModel, Date, menu, setTimeout, clearTimeout,
     document: { documentElement: { clientHeight: 48, clientWidth: 400 }, querySelector: selector => selector === '#bar' ? root : selector === '#bar-menu' ? menu : null },
     window: { innerWidth: 400, innerHeight: 48 },
     toolElement: name => items[name], renderTool: model => { items[model.tool].hidden = false; },
@@ -31,14 +31,16 @@ function fixture(tool, { delayedOpen = false, failedClose = false } = {}) {
   vm.runInContext(`
     const CURRENT_TOOL=${JSON.stringify(tool)}, PREVIEW=false, TOOLS=${JSON.stringify(tools)};
     const MENU_WIDTH=88,MENU_HEIGHT=28,MENU_MARGIN=4,REFRESH_MENU_OPENED_EVENT='opened';
+    const MENU_CLOSE_RETRY_DELAY_MS=250,MENU_CLOSE_MAX_RETRIES=3,MENU_CLOSE_RECOVERY_DELAY_MS=5000;
     const MENU_STATES={CLOSED:'closed',OPENING:'opening',OPEN:'open',CLOSING:'closing'};
     let refreshMenuState='closed',refreshMenuRequest=0,refreshMenuDesiredOpen=false;
+    let refreshMenuRecoveryTimer=null,refreshMenuCloseInFlight=null,refreshMenuRecoveryAt=0;
     let currentBarView=null,pendingNativeTooltip=null,lastNativeTooltip='';
-    let statuses=[],collectionHealth={},startupStatusLoading=false;
+    let statuses=[],collectionHealth={},startupStatusLoading=false,listenersDisposed=false;
     const systemTextScale={factor:1};
     let settings={...DEFAULT_SETTINGS,${tools.map(name => `show_${name}:true`).join(',')}};
     ${body('currentBarIsVisible')}
-    ${['refreshMenu', 'clampMenuPosition', 'showRefreshMenu', 'hideRefreshMenu', 'setRefreshMenuState', 'renderBar'].map(body).join('\n')}
+    ${['refreshMenu', 'clampMenuPosition', 'showRefreshMenu', 'hideRefreshMenu', 'cancelRefreshMenuRecovery', 'closeRefreshMenu', 'retryRefreshMenuClose', 'setRefreshMenuState', 'renderBar'].map(body).join('\n')}
     globalThis.show=()=>showRefreshMenu({clientX:10,clientY:10});
     globalThis.visibility=(name,value)=>{settings['taskbar_show_'+name]=value;renderBar();};
     globalThis.inspect=()=>({state:refreshMenuState,desired:refreshMenuDesiredOpen,hidden:menu.hidden});

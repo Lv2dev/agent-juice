@@ -284,22 +284,27 @@ impl Rpc {
     }
 }
 
+fn admitted_until(deadline: Instant, admitted: &dyn Fn() -> bool) -> bool {
+    Instant::now() < deadline && admitted() && Instant::now() < deadline
+}
+
 fn request(
     agent: &ureq::Agent,
     server: &Server,
     port: u16,
     rpc: Rpc,
     deadline: Instant,
+    admitted: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, Error> {
     #[cfg(test)]
     let started = Instant::now();
-    if Instant::now() >= deadline || !server_owns_port(server, port) {
+    if !admitted_until(deadline, admitted) || !server_owns_port(server, port) {
         return Err(Error::Unavailable);
     }
     let method = rpc.method();
     let url =
         format!("https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/{method}");
-    let mut response = agent
+    let request = agent
         .post(&url)
         .header("Content-Type", "application/json")
         .header("x-codeium-csrf-token", &server.csrf)
@@ -310,17 +315,19 @@ fn request(
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_secs(8)),
         ))
-        .build()
-        .send(rpc.body())
-        .map_err(|_| {
-            #[cfg(test)]
-            eprintln!(
-                "[antigravity-test] {method} request failed after {:?}",
-                started.elapsed()
-            );
-            Error::Unavailable
-        })?;
-    if !server_owns_port(server, port) {
+        .build();
+    if !admitted_until(deadline, admitted) {
+        return Err(Error::Unavailable);
+    }
+    let mut response = request.send(rpc.body()).map_err(|_| {
+        #[cfg(test)]
+        eprintln!(
+            "[antigravity-test] {method} request failed after {:?}",
+            started.elapsed()
+        );
+        Error::Unavailable
+    })?;
+    if !admitted_until(deadline, admitted) || !server_owns_port(server, port) {
         return Err(Error::Unavailable);
     }
     let status = response.status().as_u16();
@@ -331,7 +338,10 @@ fn request(
         .take(1024 * 1024 + 1)
         .read_to_end(&mut body)
         .map_err(|_| Error::Unavailable)?;
-    if body.len() > 1024 * 1024 || Instant::now() >= deadline || !server_owns_port(server, port) {
+    if body.len() > 1024 * 1024
+        || !admitted_until(deadline, admitted)
+        || !server_owns_port(server, port)
+    {
         return Err(Error::Unavailable);
     }
     if status != 200 {
@@ -350,7 +360,11 @@ pub(super) fn collect(
     pc_id: &str,
     captured_at: &str,
     deadline: Instant,
+    admitted: &dyn Fn() -> bool,
 ) -> Result<AgentStatus, Error> {
+    if !admitted_until(deadline, admitted) {
+        return Err(Error::Unavailable);
+    }
     let servers = servers(deadline)?;
     if servers.is_empty() {
         return Err(Error::AppRequired);
@@ -376,11 +390,35 @@ pub(super) fn collect(
         )
         .build()
         .new_agent();
-    for port in ports(server.pid)? {
-        if Instant::now() >= deadline {
-            break;
+    collect_from_ports(
+        pc_id,
+        captured_at,
+        ports(server.pid)?,
+        deadline,
+        admitted,
+        |port, rpc| request(&agent, server, port, rpc, deadline, admitted),
+    )
+}
+
+fn collect_from_ports(
+    pc_id: &str,
+    captured_at: &str,
+    ports: impl IntoIterator<Item = u16>,
+    deadline: Instant,
+    admitted: &dyn Fn() -> bool,
+    mut request: impl FnMut(u16, Rpc) -> Result<Vec<u8>, Error>,
+) -> Result<AgentStatus, Error> {
+    for port in ports {
+        if !admitted_until(deadline, admitted) {
+            return Err(Error::Unavailable);
         }
-        let auth = match request(&agent, server, port, Rpc::Auth, deadline) {
+        let mut request_current = |rpc| {
+            if !admitted_until(deadline, admitted) {
+                return Err(Error::Unavailable);
+            }
+            request(port, rpc)
+        };
+        let auth = match request_current(Rpc::Auth) {
             Ok(body) => body,
             Err(Error::LoginRequired) => return Err(Error::LoginRequired),
             Err(_) => continue,
@@ -388,9 +426,9 @@ pub(super) fn collect(
         if !authenticated(&auth)? {
             return Err(Error::LoginRequired);
         }
-        let body = request(&agent, server, port, Rpc::Quota, deadline)?;
+        let body = request_current(Rpc::Quota)?;
         let status = parse_status(&body, pc_id, captured_at)?;
-        if !authenticated(&request(&agent, server, port, Rpc::Auth, deadline)?)? {
+        if !authenticated(&request_current(Rpc::Auth)?)? {
             return Err(Error::LoginRequired);
         }
         return Ok(status);
@@ -401,6 +439,225 @@ pub(super) fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admission_that_expires_while_waiting_never_authorizes_dispatch() {
+        let deadline = Instant::now() + Duration::from_millis(20);
+        assert!(!admitted_until(deadline, &|| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining + Duration::from_millis(1));
+            true
+        }));
+    }
+
+    #[test]
+    fn expired_admission_skips_policy_lookup_and_current_admission_preserves_it() {
+        let calls = std::cell::Cell::new(0);
+        let policy = || {
+            calls.set(calls.get() + 1);
+            true
+        };
+        assert!(!admitted_until(Instant::now(), &policy));
+        assert_eq!(calls.get(), 0);
+        assert!(admitted_until(
+            Instant::now() + Duration::from_secs(2),
+            &policy
+        ));
+        assert_eq!(calls.get(), 1);
+        assert!(!admitted_until(
+            Instant::now() + Duration::from_secs(2),
+            &|| false
+        ));
+    }
+
+    fn desktop_response(rpc: Rpc) -> Vec<u8> {
+        match rpc {
+            Rpc::Auth => br#"{"authResult":{"hasValidAuth":true}}"#.to_vec(),
+            Rpc::Quota => {
+                br#"{"response":{"buckets":[{"bucketId":"gemini-5h","remainingFraction":0.5}]}}"#
+                    .to_vec()
+            }
+        }
+    }
+
+    enum PolicyTransition {
+        Off,
+        Suspend,
+        OffOn,
+    }
+
+    fn assert_retired_desktop_stops(
+        force: bool,
+        transition: PolicyTransition,
+        pause_at: usize,
+        fail_first_auth: bool,
+    ) {
+        use super::super::{refresh_cache, Cache};
+        use std::sync::{mpsc, Mutex};
+
+        let state = Mutex::new(Cache {
+            enabled: true,
+            ..Default::default()
+        });
+        let calls = Mutex::new(Vec::new());
+        let (reached_tx, reached_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let timeout = Duration::from_secs(2);
+        let result = std::thread::scope(|scope| {
+            let state = &state;
+            let calls = &calls;
+            let worker = scope.spawn(move || {
+                refresh_cache(state, force, |admitted| {
+                    collect_from_ports(
+                        "test-pc",
+                        "2026-10-13T00:00:00Z",
+                        [1, 2],
+                        Instant::now() + Duration::from_secs(5),
+                        admitted,
+                        |port, rpc| {
+                            assert!(state.try_lock().is_ok(), "I/O must not hold CACHE");
+                            let index = {
+                                let mut calls = calls.lock().unwrap();
+                                calls.push((port, rpc.method()));
+                                calls.len()
+                            };
+                            if index == pause_at {
+                                reached_tx.send(()).unwrap();
+                                resume_rx.recv_timeout(timeout).unwrap();
+                            }
+                            if fail_first_auth && index == 1 {
+                                Err(Error::Unavailable)
+                            } else {
+                                Ok(desktop_response(rpc))
+                            }
+                        },
+                    )
+                })
+            });
+            reached_rx.recv_timeout(timeout).unwrap();
+            {
+                let mut cache = state.lock().unwrap();
+                match transition {
+                    PolicyTransition::Off => assert!(cache.set_enabled(false)),
+                    PolicyTransition::Suspend => assert!(cache.suspend_for_settings_failure()),
+                    PolicyTransition::OffOn => {
+                        assert!(cache.set_enabled(false));
+                        assert!(cache.set_enabled(true));
+                    }
+                }
+            }
+            resume_tx.send(()).unwrap();
+            worker.join().unwrap()
+        });
+        assert!(result.is_none(), "retired Desktop quota must not return");
+        let cache = state.lock().unwrap();
+        assert!(!cache.busy);
+        assert!(cache.result.is_none(), "retired quota must not enter CACHE");
+        assert!(cache.retry_at.is_some() && cache.force_retry_at.is_some());
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            pause_at,
+            "no new RPC after retirement"
+        );
+    }
+
+    #[test]
+    fn desktop_current_epoch_preserves_auth_quota_auth_for_normal_and_force() {
+        use super::super::{refresh_cache, Cache};
+        use std::sync::Mutex;
+
+        for force in [false, true] {
+            let state = Mutex::new(Cache {
+                enabled: true,
+                ..Default::default()
+            });
+            let mut calls = Vec::new();
+            let status = refresh_cache(&state, force, |admitted| {
+                collect_from_ports(
+                    "test-pc",
+                    "2026-10-13T00:00:00Z",
+                    [1, 2],
+                    Instant::now() + Duration::from_secs(5),
+                    admitted,
+                    |port, rpc| {
+                        assert!(state.try_lock().is_ok(), "I/O must not hold CACHE");
+                        calls.push((port, rpc.method()));
+                        Ok(desktop_response(rpc))
+                    },
+                )
+            })
+            .unwrap();
+            assert_eq!(status.session_id, "antigravity-gui");
+            assert_eq!(status.primary.unwrap().used_percent, Some(50.0));
+            assert_eq!(
+                calls,
+                [
+                    (1, "GetAuthStatus"),
+                    (1, "RetrieveUserQuotaSummary"),
+                    (1, "GetAuthStatus"),
+                ]
+            );
+            let cache = state.lock().unwrap();
+            assert!(cache.result.as_ref().unwrap().is_ok());
+            assert!(cache.force_retry_at.is_none());
+            assert_eq!(cache.failures, 0);
+        }
+    }
+
+    #[test]
+    fn desktop_off_after_auth_blocks_quota() {
+        for force in [false, true] {
+            assert_retired_desktop_stops(force, PolicyTransition::Off, 1, false);
+        }
+    }
+
+    #[test]
+    fn desktop_suspension_after_auth_blocks_quota() {
+        for force in [false, true] {
+            assert_retired_desktop_stops(force, PolicyTransition::Suspend, 1, false);
+        }
+    }
+
+    #[test]
+    fn desktop_off_on_after_auth_keeps_old_generation_retired() {
+        for force in [false, true] {
+            assert_retired_desktop_stops(force, PolicyTransition::OffOn, 1, false);
+        }
+    }
+
+    #[test]
+    fn desktop_failed_auth_after_off_blocks_next_port() {
+        for force in [false, true] {
+            assert_retired_desktop_stops(force, PolicyTransition::Off, 1, true);
+        }
+    }
+
+    #[test]
+    fn desktop_off_during_quota_blocks_reauthentication() {
+        for force in [false, true] {
+            assert_retired_desktop_stops(force, PolicyTransition::Off, 2, false);
+        }
+    }
+
+    #[test]
+    fn desktop_policy_or_deadline_denial_never_dispatches() {
+        for (allowed, deadline) in [
+            (false, Instant::now() + Duration::from_secs(5)),
+            (true, Instant::now() - Duration::from_secs(1)),
+        ] {
+            assert_eq!(
+                collect_from_ports(
+                    "test-pc",
+                    "2026-10-13T00:00:00Z",
+                    [1, 2],
+                    deadline,
+                    &|| allowed,
+                    |_, _| panic!("denied collection must not dispatch"),
+                ),
+                Err(Error::Unavailable)
+            );
+        }
+    }
+
     #[test]
     fn quota_rpc_requests_a_fresh_summary_and_auth_remains_read_only() {
         assert_eq!(Rpc::Quota.method(), "RetrieveUserQuotaSummary");
@@ -435,6 +692,7 @@ mod tests {
             "test-pc",
             &chrono::Utc::now().to_rfc3339(),
             Instant::now() + super::super::COLLECTION_TIMEOUT,
+            &|| true,
         )
         .unwrap();
         assert!(status.primary.is_some());

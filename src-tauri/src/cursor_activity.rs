@@ -174,6 +174,30 @@ trait UsageSource {
     ) -> Result<cursor_dashboard::UsageEventPage, ActivityError>;
 }
 
+struct AdmittedSource<'a, S> {
+    source: &'a S,
+    request_allowed: &'a dyn Fn() -> bool,
+}
+
+impl<S: UsageSource> UsageSource for AdmittedSource<'_, S> {
+    fn filtered(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+        page: u32,
+        page_size: u32,
+        deadline: Instant,
+    ) -> Result<cursor_dashboard::UsageEventPage, ActivityError> {
+        if !(self.request_allowed)() {
+            return Err(ActivityError::changed(
+                "Cursor activity scope or settings changed",
+            ));
+        }
+        self.source
+            .filtered(start_ms, end_ms, page, page_size, deadline)
+    }
+}
+
 struct DashboardSource<'a> {
     credentials: &'a DashboardCredentials,
 }
@@ -655,6 +679,10 @@ fn refresh_step_at_path(
     let source = DashboardSource {
         credentials: &credentials,
     };
+    let source = AdmittedSource {
+        source: &source,
+        request_allowed: &commit_allowed,
+    };
     let month = fetch_month(&source, target, &Local, deadline)?;
     validate_cache_access(&cache, deadline, &commit_allowed)?;
     cache.months.insert(target.key(), month);
@@ -694,7 +722,10 @@ mod tests {
     use super::*;
     use crate::cursor_dashboard::TokenUsage;
     use chrono_tz::America::New_York;
-    use std::{cell::RefCell, collections::VecDeque};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+    };
 
     #[test]
     #[ignore = "read-only account month diagnosis; never changes the activity cache"]
@@ -744,6 +775,214 @@ mod tests {
                 .get(&page)
                 .cloned()
                 .ok_or_else(|| ActivityError::parse("missing fake page"))
+        }
+    }
+
+    struct RevokingSource<'a> {
+        source: FakeSource,
+        allowed: &'a Cell<bool>,
+        revoke_after: Option<usize>,
+        oversized_first: bool,
+        requests: RefCell<Vec<(u32, u32)>>,
+    }
+
+    impl UsageSource for RevokingSource<'_> {
+        fn filtered(
+            &self,
+            start_ms: i64,
+            end_ms: i64,
+            page: u32,
+            page_size: u32,
+            deadline: Instant,
+        ) -> Result<cursor_dashboard::UsageEventPage, ActivityError> {
+            let count = {
+                let mut requests = self.requests.borrow_mut();
+                requests.push((page, page_size));
+                requests.len()
+            };
+            if self.revoke_after == Some(count) {
+                self.allowed.set(false);
+            }
+            if self.oversized_first && count == 1 {
+                return Err(ActivityError::new(
+                    DashboardErrorKind::Oversized,
+                    "fake oversized page",
+                ));
+            }
+            self.source
+                .filtered(start_ms, end_ms, page, page_size, deadline)
+        }
+    }
+
+    fn revoking_source(allowed: &Cell<bool>, revoke_after: Option<usize>) -> RevokingSource<'_> {
+        let first = cursor_dashboard::UsageEventPage {
+            events: vec![event("2026-08-21T01:00:00Z", 10)],
+            total_count: 3,
+        };
+        RevokingSource {
+            source: FakeSource {
+                first_pages: RefCell::new(VecDeque::from([first.clone(), first])),
+                other_pages: BTreeMap::from([
+                    (
+                        2,
+                        cursor_dashboard::UsageEventPage {
+                            events: vec![event("2026-08-21T02:00:00Z", 20)],
+                            total_count: 3,
+                        },
+                    ),
+                    (
+                        3,
+                        cursor_dashboard::UsageEventPage {
+                            events: vec![event("2026-08-21T03:00:00Z", 30)],
+                            total_count: 3,
+                        },
+                    ),
+                ]),
+            },
+            allowed,
+            revoke_after,
+            oversized_first: false,
+            requests: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn pagination_admission_rejects_the_first_request_when_already_disabled() {
+        let allowed = Cell::new(false);
+        let source = revoking_source(&allowed, None);
+        let error = fetch_month_with_page_size(
+            &AdmittedSource {
+                source: &source,
+                request_allowed: &|| allowed.get(),
+            },
+            Month {
+                year: 2026,
+                month: 8,
+            },
+            &Utc,
+            1,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+        assert!(source.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn pagination_admission_rechecks_before_each_next_page() {
+        for revoke_after in [1, 2] {
+            let allowed = Cell::new(true);
+            let source = revoking_source(&allowed, Some(revoke_after));
+            let error = fetch_month_with_page_size(
+                &AdmittedSource {
+                    source: &source,
+                    request_allowed: &|| allowed.get(),
+                },
+                Month {
+                    year: 2026,
+                    month: 8,
+                },
+                &Utc,
+                1,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+            assert_eq!(source.requests.borrow().len(), revoke_after);
+        }
+    }
+
+    #[test]
+    fn pagination_admission_rechecks_before_first_page_revalidation() {
+        let allowed = Cell::new(true);
+        let source = revoking_source(&allowed, Some(3));
+        let error = fetch_month_with_page_size(
+            &AdmittedSource {
+                source: &source,
+                request_allowed: &|| allowed.get(),
+            },
+            Month {
+                year: 2026,
+                month: 8,
+            },
+            &Utc,
+            1,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+        assert_eq!(*source.requests.borrow(), vec![(1, 1), (2, 1), (3, 1)]);
+    }
+
+    #[test]
+    fn pagination_admission_preserves_valid_in_progress_work() {
+        let allowed = Cell::new(true);
+        let source = revoking_source(&allowed, None);
+        let month = fetch_month_with_page_size(
+            &AdmittedSource {
+                source: &source,
+                request_allowed: &|| allowed.get(),
+            },
+            Month {
+                year: 2026,
+                month: 8,
+            },
+            &Utc,
+            1,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(month.days.get("2026-08-21"), Some(&60));
+        assert_eq!(
+            *source.requests.borrow(),
+            vec![(1, 1), (2, 1), (3, 1), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn month_fallback_admission_preserves_valid_retry_and_rejects_revoked_retry() {
+        for revoke_after in [None, Some(1)] {
+            let allowed = Cell::new(true);
+            let empty = cursor_dashboard::UsageEventPage {
+                events: vec![],
+                total_count: 0,
+            };
+            let source = RevokingSource {
+                source: FakeSource {
+                    first_pages: RefCell::new(VecDeque::from([empty.clone(), empty])),
+                    other_pages: BTreeMap::new(),
+                },
+                allowed: &allowed,
+                revoke_after,
+                oversized_first: true,
+                requests: RefCell::new(Vec::new()),
+            };
+            let result = fetch_month(
+                &AdmittedSource {
+                    source: &source,
+                    request_allowed: &|| allowed.get(),
+                },
+                Month {
+                    year: 2026,
+                    month: 8,
+                },
+                &Utc,
+                Instant::now() + Duration::from_secs(2),
+            );
+            if revoke_after.is_some() {
+                assert_eq!(result.unwrap_err().kind, DashboardErrorKind::ScopeChanged);
+                assert_eq!(*source.requests.borrow(), vec![(1, PAGE_SIZE)]);
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(
+                    *source.requests.borrow(),
+                    vec![
+                        (1, PAGE_SIZE),
+                        (1, FALLBACK_PAGE_SIZE),
+                        (1, FALLBACK_PAGE_SIZE)
+                    ]
+                );
+            }
         }
     }
 

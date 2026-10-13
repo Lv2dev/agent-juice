@@ -4,6 +4,8 @@ use std::sync::{
 };
 use tokio::sync::watch;
 
+pub const STARTUP_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActivitySnapshot {
     pub active: bool,
@@ -110,16 +112,39 @@ impl SystemActivityShutdown {
     }
 }
 
+#[derive(Clone)]
 pub struct SystemActivityMonitor {
     receiver: Option<watch::Receiver<ActivitySnapshot>>,
     _watcher_ready: Arc<AtomicBool>,
     _watcher_stopped: Arc<AtomicBool>,
+    readiness_deadline: std::time::Instant,
+    readiness_timed_out: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
     publish_gate: Arc<Mutex<()>>,
 }
 
 impl SystemActivityMonitor {
+    #[cfg(test)]
+    pub(crate) fn from_test_snapshot(
+        snapshot: ActivitySnapshot,
+    ) -> (Self, watch::Sender<ActivitySnapshot>) {
+        let (sender, receiver) = watch::channel(snapshot);
+        (
+            Self {
+                receiver: Some(receiver),
+                _watcher_ready: Arc::new(AtomicBool::new(true)),
+                _watcher_stopped: Arc::new(AtomicBool::new(false)),
+                readiness_deadline: std::time::Instant::now() + STARTUP_READINESS_TIMEOUT,
+                readiness_timed_out: Arc::new(AtomicBool::new(false)),
+                shutdown_requested: Arc::new(AtomicBool::new(false)),
+                publish_gate: Arc::new(Mutex::new(())),
+            },
+            sender,
+        )
+    }
+
     pub fn start() -> (Self, SystemActivityShutdown) {
+        let readiness_deadline = std::time::Instant::now() + STARTUP_READINESS_TIMEOUT;
         let (sender, receiver) = watch::channel(ActivitySnapshot::default());
         let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
         let watcher_ready = Arc::new(AtomicBool::new(false));
@@ -156,6 +181,8 @@ impl SystemActivityMonitor {
                 receiver: watcher_started.then_some(receiver),
                 _watcher_ready: watcher_ready,
                 _watcher_stopped: watcher_stopped,
+                readiness_deadline,
+                readiness_timed_out: Arc::new(AtomicBool::new(false)),
                 shutdown_requested: shutdown_requested.clone(),
                 publish_gate,
             },
@@ -168,6 +195,31 @@ impl SystemActivityMonitor {
 
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_requested.load(Ordering::Acquire)
+    }
+
+    /// Nonblocking startup admission; manual force keeps using the raw snapshot.
+    pub fn allows_automatic_collection(&self) -> bool {
+        self.allows_automatic_collection_at(std::time::Instant::now())
+    }
+
+    fn allows_automatic_collection_at(&self, now: std::time::Instant) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
+        if !self._watcher_ready.load(Ordering::Acquire)
+            && !self._watcher_stopped.load(Ordering::Acquire)
+            && self
+                .receiver
+                .as_ref()
+                .is_some_and(|receiver| receiver.has_changed().is_ok())
+            && !self.readiness_timed_out.load(Ordering::Acquire)
+        {
+            if now < self.readiness_deadline {
+                return false;
+            }
+            self.readiness_timed_out.store(true, Ordering::Release);
+        }
+        self.snapshot().active
     }
 
     pub fn snapshot(&self) -> ActivitySnapshot {
@@ -205,19 +257,29 @@ impl SystemActivityMonitor {
     }
 
     pub async fn wait_until_ready_or_timeout(&self, duration: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + duration;
+        let deadline = (tokio::time::Instant::now() + duration)
+            .min(tokio::time::Instant::from_std(self.readiness_deadline));
         while !self._watcher_ready.load(Ordering::Acquire) {
-            if self.is_shutdown() {
+            if self.is_shutdown()
+                || self._watcher_stopped.load(Ordering::Acquire)
+                || self.readiness_timed_out.load(Ordering::Acquire)
+            {
                 return;
             }
             let closed = match self.receiver.as_ref() {
                 Some(receiver) => receiver.has_changed().is_err(),
                 None => true,
             };
-            if closed || tokio::time::Instant::now() >= deadline {
+            if closed {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                self.readiness_timed_out.store(true, Ordering::Release);
+                return;
+            }
+            tokio::time::sleep_until(deadline.min(now + std::time::Duration::from_millis(10)))
+                .await;
         }
     }
 
@@ -567,6 +629,254 @@ unsafe extern "system" fn system_activity_window_proc(
 mod tests {
     use super::*;
 
+    fn pending_monitor() -> (SystemActivityMonitor, watch::Sender<ActivitySnapshot>) {
+        let (monitor, sender) =
+            SystemActivityMonitor::from_test_snapshot(ActivitySnapshot::default());
+        monitor._watcher_ready.store(false, Ordering::Release);
+        (monitor, sender)
+    }
+
+    #[test]
+    fn healthy_pending_blocks_automatic_but_keeps_manual_snapshot_available() {
+        let (monitor, _sender) = pending_monitor();
+        let reader = monitor.clone();
+        assert!(monitor.snapshot().active);
+        assert!(reader.snapshot().active);
+        assert!(!monitor.allows_automatic_collection());
+        assert!(!reader.allows_automatic_collection());
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pending_admission_does_not_block_the_caller_or_renew_the_deadline() {
+        let (mut monitor, _sender) = pending_monitor();
+        monitor.readiness_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = monitor.readiness_deadline;
+        let reader = monitor.clone();
+        let (reply_sender, reply_receiver) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            reply_sender
+                .send((
+                    reader.allows_automatic_collection(),
+                    reader.readiness_deadline,
+                ))
+                .unwrap();
+        });
+        let reply = reply_receiver.recv_timeout(std::time::Duration::from_secs(1));
+        // Release a regressed blocking implementation before joining its test thread.
+        monitor._watcher_ready.store(true, Ordering::Release);
+        caller.join().unwrap();
+        let (allowed, reader_deadline) = reply.expect("automatic admission blocked the caller");
+        assert!(!allowed);
+        assert_eq!(reader_deadline, deadline);
+        assert_eq!(monitor.readiness_deadline, deadline);
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ready_test_snapshots_keep_existing_automatic_admission_behavior() {
+        let (monitor, sender) =
+            SystemActivityMonitor::from_test_snapshot(ActivitySnapshot::default());
+        assert!(monitor._watcher_ready.load(Ordering::Acquire));
+        assert!(monitor.allows_automatic_collection());
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        assert!(!monitor.allows_automatic_collection());
+    }
+
+    #[test]
+    fn pending_resumes_automatic_when_ready_without_an_activity_transition() {
+        let (monitor, _sender) = pending_monitor();
+        let reader = monitor.clone();
+        assert!(!reader.allows_automatic_collection());
+        monitor._watcher_ready.store(true, Ordering::Release);
+        assert!(monitor.allows_automatic_collection());
+        assert!(reader.allows_automatic_collection());
+        assert_eq!(reader.snapshot().generation, 0);
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ready_automatic_admission_preserves_initial_lock_and_display_state() {
+        let (monitor, sender) = pending_monitor();
+        let reader = monitor.clone();
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        assert!(!reader.allows_automatic_collection());
+        monitor._watcher_ready.store(true, Ordering::Release);
+        assert!(!reader.allows_automatic_collection());
+        sender.send_replace(ActivitySnapshot {
+            active: true,
+            generation: 2,
+        });
+        assert!(reader.allows_automatic_collection());
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 3,
+        });
+        assert!(!reader.allows_automatic_collection());
+    }
+
+    #[test]
+    fn missing_watcher_fails_open_without_waiting_for_readiness() {
+        let (mut monitor, _sender) = pending_monitor();
+        monitor.receiver = None;
+        assert!(monitor.allows_automatic_collection());
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn closed_watcher_fails_open_even_after_an_inactive_snapshot() {
+        let (monitor, sender) = pending_monitor();
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        let reader = monitor.clone();
+        drop(sender);
+        assert!(monitor.allows_automatic_collection());
+        assert!(reader.allows_automatic_collection());
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+        monitor.shutdown_requested.store(true, Ordering::Release);
+        assert!(!reader.allows_automatic_collection());
+    }
+
+    #[test]
+    fn stopped_watcher_does_not_leave_healthy_pending_gate_closed() {
+        let (monitor, _sender) = pending_monitor();
+        let reader = monitor.clone();
+        monitor._watcher_stopped.store(true, Ordering::Release);
+        assert!(reader.allows_automatic_collection());
+        assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn startup_timeout_is_shared_by_clones_and_still_honors_activity() {
+        let (monitor, sender) = pending_monitor();
+        let reader = monitor.clone();
+        let before = monitor.readiness_deadline - std::time::Duration::from_nanos(1);
+        assert_eq!(reader.readiness_deadline, monitor.readiness_deadline);
+        assert!(!monitor.allows_automatic_collection_at(before));
+        assert!(reader.allows_automatic_collection_at(monitor.readiness_deadline));
+        assert!(monitor.readiness_timed_out.load(Ordering::Acquire));
+        assert!(monitor.allows_automatic_collection());
+        let late_reader = reader.clone();
+        assert_eq!(late_reader.readiness_deadline, monitor.readiness_deadline);
+        assert!(late_reader.allows_automatic_collection());
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        assert!(!reader.allows_automatic_collection());
+        monitor._watcher_ready.store(true, Ordering::Release);
+        assert!(!monitor.allows_automatic_collection());
+        sender.send_replace(ActivitySnapshot {
+            active: true,
+            generation: 2,
+        });
+        assert!(reader.allows_automatic_collection());
+    }
+
+    #[test]
+    fn shutdown_takes_priority_over_pending_ready_failed_stopped_and_timeout() {
+        for state in 0..5 {
+            let (mut monitor, sender) = pending_monitor();
+            let (stop_sender, _stop_receiver) = mpsc::sync_channel(1);
+            let shutdown = SystemActivityShutdown {
+                stop_sender,
+                shutdown_requested: monitor.shutdown_requested.clone(),
+            };
+            match state {
+                0 => {}
+                1 => monitor._watcher_ready.store(true, Ordering::Release),
+                2 => monitor.receiver = None,
+                3 => monitor._watcher_stopped.store(true, Ordering::Release),
+                _ => monitor.readiness_timed_out.store(true, Ordering::Release),
+            }
+            let reader = monitor.clone();
+            shutdown.stop();
+            shutdown.stop();
+            assert!(!monitor.allows_automatic_collection());
+            assert!(!reader.allows_automatic_collection());
+            assert!(!reader.snapshot().active);
+            drop(sender);
+            assert!(!reader.allows_automatic_collection());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_readiness_timeout_opens_the_shared_automatic_gate() {
+        let (monitor, _sender) = pending_monitor();
+        let reader = monitor.clone();
+        monitor
+            .wait_until_ready_or_timeout(std::time::Duration::ZERO)
+            .await;
+        assert!(monitor.readiness_timed_out.load(Ordering::Acquire));
+        assert!(reader.allows_automatic_collection());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_readiness_wait_observes_a_fake_ready_locked_snapshot() {
+        let (monitor, sender) = pending_monitor();
+        let reader = monitor.clone();
+        tokio::join!(
+            monitor.wait_until_ready_or_timeout(STARTUP_READINESS_TIMEOUT),
+            async {
+                assert!(!reader.allows_automatic_collection());
+                sender.send_replace(ActivitySnapshot {
+                    active: false,
+                    generation: 1,
+                });
+                reader._watcher_ready.store(true, Ordering::Release);
+            }
+        );
+        assert!(!monitor.allows_automatic_collection());
+        assert!(!reader.readiness_timed_out.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_wait_exits_for_failure_stop_and_shutdown_without_timeout() {
+        for state in 0..4 {
+            let (mut monitor, sender) = pending_monitor();
+            match state {
+                0 => monitor.receiver = None,
+                1 => drop(sender),
+                2 => monitor._watcher_stopped.store(true, Ordering::Release),
+                _ => monitor.shutdown_requested.store(true, Ordering::Release),
+            }
+            monitor
+                .wait_until_ready_or_timeout(std::time::Duration::ZERO)
+                .await;
+            assert!(!monitor.readiness_timed_out.load(Ordering::Acquire));
+            assert_eq!(monitor.allows_automatic_collection(), state != 3);
+        }
+    }
+
+    #[test]
+    fn cloned_monitor_sees_the_same_lock_display_and_shutdown_state() {
+        let (monitor, sender) =
+            SystemActivityMonitor::from_test_snapshot(ActivitySnapshot::default());
+        let reader = monitor.clone();
+        assert!(reader.snapshot().active);
+        sender.send_replace(ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        assert!(!reader.snapshot().active);
+        sender.send_replace(ActivitySnapshot {
+            active: true,
+            generation: 2,
+        });
+        assert_eq!(reader.snapshot(), monitor.snapshot());
+        monitor.shutdown_requested.store(true, Ordering::Release);
+        assert!(!reader.snapshot().active);
+    }
+
     #[test]
     fn activity_state_requires_both_session_and_display_to_be_available() {
         let mut state = ActivityInputs::default();
@@ -661,6 +971,8 @@ mod tests {
             receiver: Some(receiver),
             _watcher_ready: Arc::new(AtomicBool::new(true)),
             _watcher_stopped: Arc::new(AtomicBool::new(false)),
+            readiness_deadline: std::time::Instant::now() + STARTUP_READINESS_TIMEOUT,
+            readiness_timed_out: Arc::new(AtomicBool::new(false)),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             publish_gate,
         };

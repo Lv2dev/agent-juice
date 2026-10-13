@@ -100,7 +100,7 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 | 탭 | 설정할 수 있는 항목 |
 | --- | --- |
 | 기본 | 시스템/라이트/다크 테마, 라이트 스타일(Fluent/Paper), 시스템/한국어/영어, Windows/Pretendard 폰트, Windows 자동 시작 |
-| 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, Claude 계정 자동 수집, 토큰 활동 기간·농도 |
+| 수집 | 잔여량/사용량 기준, 경고·위험 임계값, 수집주기, 오래됨 기준, 토큰 활동 기간·농도 |
 | 표시줄 | 4개 바 모드, 한도 순서, 원/가로 바 표시, 겹침 자동 방지, 화면 조합별 위치·표시 구성·크기·간격 프로필과 선택적 색상 기억, 전체화면·최대화 숨김, 도구별 표시·수집 활성화 |
 | 색상 | 9개 팔레트, 다섯 도구의 한도별 기본 10색, 경고·위험색과 단계별 토글, 이름·정보·링 숫자 글자색 |
 | 표시기·글자 | 표현 스타일, 공용 표시기 배경색·농도, 링·숫자·윤곽, 크기·두께·간격·폰트 조절 |
@@ -145,7 +145,7 @@ Juice에는 **4가지 바 모드**가 있습니다.
 - 숨겨 둔 도구를 나중에 켜면 기존 바를 움직이지 않고 작업표시줄의 첫 빈 위치에 배치합니다.
 - 기본으로 켜진 `바 겹침 자동 방지`는 값이나 리셋 문구가 길어질 때 같은 작업표시줄의 뒤쪽 바만 임시로 밀어냅니다. 사용자가 저장한 위치와 간격은 바뀌지 않으며 내용이 짧아지면 원래 배치로 돌아갑니다.
 - 재부팅이나 첫 실행의 최초 수집 중에는 `로딩 중`을 표시합니다. 지난 리셋 시간이 남아 있고 새 한도를 아직 받지 못한 경우에는 `갱신 대기`로 구분합니다.
-- Windows가 잠기거나 모든 디스플레이가 꺼지면 자동 주기 수집을 쉬고, 잠금 해제 또는 화면 ON 시 즉시 한 번 갱신합니다. 사용자가 누른 수동 새로고침은 그대로 동작합니다.
+- Windows가 잠기거나 모든 디스플레이가 꺼지면 자동 주기 수집을 쉬고, 잠금 해제 또는 화면 ON 시 즉시 한 번 갱신합니다. 사용자가 누른 수동 새로고침은 그대로 동작합니다. 설정창의 자동 사용량·활동 갱신도 같은 휴식 정책을 따르며, 일시 정지 중에는 표시 중인 활동 기록을 유지합니다.
 - 바에 마우스를 올리면 도구명과 실제로 존재하는 5h·주간·월간 한도의 초기화까지 남은 시간을 보여줍니다.
 - hover에는 기간별 **잔여량과 사용량**, 초기화 날짜·시각, 마지막 기록 시각·경과 시간, 정상·경고·위험·오래됨 상태와 근사치 여부, PC 표시명도 함께 표시합니다. 설정한 표시 기준을 먼저 보여주며, 날짜만 제공되는 한도에 임의의 시각을 붙이지 않습니다.
 - 마지막 기록은 데이터에 담긴 기록 시각이며 최근 네트워크 조회 시각과는 다를 수 있습니다. 로그인 필요·최초 로딩에서는 이전 수치를 노출하지 않고, hover 자체가 추가 사용량 조회나 외부 프로세스를 실행하지 않습니다.
@@ -229,6 +229,7 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 - CLI를 우선 조회하며 Desktop이 켜져 있거나 꺼져 있어도 같은 CLI 경로를 사용합니다. CLI가 설치되지 않았을 때만 실행 중인 Desktop을 사용합니다. 설치된 CLI의 로그인·조회 실패를 다른 Desktop 계정 값으로 덮거나 두 수집원을 합치지 않습니다. CLI는 설치하고 한 번 로그인하면 터미널을 열어 두지 않아도 됩니다. GUI 앱을 대신 실행하거나 사용자 대화에 메시지를 보내지 않습니다.
 - Desktop 자동 수집은 설정된 수집주기를 따르되 최소 60초 간격입니다. GUI의 자동·수동 조회는 실행 중인 앱에 기간별 한도의 갱신을 요청하며, 채팅이나 모델 요청은 보내지 않습니다.
 - CLI `1.1.11` 이상에서 공식 읽기 전용 `agy --print /usage --output-format json`을 백그라운드로 실행합니다. CLI가 스스로 처리하는 계정 조회이며 모델 턴을 시작하지 않습니다. 구조화된 `command.name=usage`, 모델 토큰과 턴 수 `0`, Gemini 기간별 데이터까지 검증한 응답만 사용합니다.
+- Juice의 CLI 한도·버전 확인 명령에서는 자체 자동 업데이트를 끕니다. 사용자 CLI 설정이나 전역 환경은 바꾸지 않으므로, 직접 실행한 CLI의 업데이트에는 영향을 주지 않습니다.
 - 사용자가 `/usage`나 `/statusline on`을 입력할 필요가 없으며, CLI settings 파일의 사전 생성이나 statusline 설정도 필요하지 않습니다. 표시를 켜면 최초 조회가 시작되고, 자동 조회는 수집주기를 따르되 최소 5분 간격입니다. 빠르게 반복한 수동 새로고침은 30초 간격으로 제한합니다.
 - 기존 버전의 Juice statusline 연결이 있으면 자기 연동만 해제하고 기존 설정을 복원합니다. custom statusline의 명령과 옵션은 유지하며 새 연결을 등록하지 않습니다. 이미 열린 사용자 CLI는 종료하거나 조작하지 않습니다.
 - 검증한 설치 경로의 실행 파일을 직접 호출하므로 Node, PATH 검색이나 명령 셸, 8.3 짧은 경로에 의존하지 않습니다. 공백·한글 경로를 지원하고 숨김 실행, 출력 크기 제한, 타임아웃과 자식 프로세스 정리를 적용합니다.
@@ -317,7 +318,7 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 ### 문제 해결
 
 - **로그인 필요가 표시됨:** 사용 중인 Claude 앱/Code·Codex Desktop/CLI·Grok Build·Cursor GUI/Agent의 로그인 상태를 확인한 뒤 Juice에서 강제 새로고침하세요. 다음 정상 수집에서 자동으로 해제됩니다.
-- **Claude가 비어 있음:** Claude 표시와 계정 자동 수집을 켜세요. GUI만 사용하는 경우 Claude 앱의 로그인을 확인하고 강제 새로고침하면 됩니다. 만료·미지원·모호한 GUI 인증을 무조건 로그아웃으로 단정하지는 않습니다.
+- **Claude가 비어 있음:** Claude의 활성화를 켜세요. 계정 한도는 자동으로 수집됩니다. GUI만 사용하는 경우 Claude 앱의 로그인을 확인하고 강제 새로고침하면 됩니다. 만료·미지원·모호한 GUI 인증을 무조건 로그아웃으로 단정하지는 않습니다.
 - **Codex가 비어 있음:** 현재 PC의 Codex Desktop 또는 CLI 설치·로그인을 확인하고 강제 새로고침하세요. Juice는 Desktop versioned runtime을 우선 탐색하고 CLI로 fallback합니다.
 - **Grok이 비어 있음:** 표시줄 탭에서 Grok을 활성화하고 현재 PC의 Grok Build 설치·로그인을 확인하세요. Grok은 기본 OFF이며 공식 ACP billing을 사용할 수 있을 때 표시됩니다.
 - **Cursor가 비어 있음:** 표시줄 탭에서 Cursor를 활성화하고 Cursor GUI 또는 Agent CLI 로그인을 확인한 뒤 강제 새로고침하세요. Juice는 GUI credential, CLI credential, bounded `/usage` 순서로 시도합니다.
@@ -331,7 +332,7 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니다. 다른 PC에서는 그 PC에 Juice를 설치하고 사용할 Claude 앱/Code·Codex·Grok Build·Cursor·Antigravity의 로컬 로그인을 각각 확인해야 합니다. 단, Cursor 활동 필터는 Cursor 계정 자체가 제공하는 event라 같은 계정의 다른 PC·Cloud Agent 사용도 포함합니다.
 
 1. Juice에서 Claude가 활성화되어 있는지 확인해 statusline 자동 연결과 수집을 시작합니다.
-2. Claude 계정 자동 수집을 켜고 Code 또는 Claude 앱의 로그인을 확인합니다. GUI 경로에서는 Code 사용이나 statusline 파일 생성이 필요하지 않습니다.
+2. Claude를 활성화하고 Code 또는 Claude 앱의 로그인을 확인합니다. 계정 한도는 자동으로 수집되며, GUI 경로에서는 Code 사용이나 statusline 파일 생성이 필요하지 않습니다.
 3. Codex Desktop 또는 Codex CLI 로그인을 확인합니다. Juice는 둘 중 사용 가능한 공식 app-server runtime을 자동 탐색합니다.
 4. exact 조회가 일시적으로 실패할 때 사용할 rollout JSONL은 해당 PC에서 Codex를 사용한 적이 있는 경우에만 생성됩니다.
 5. Grok을 사용한다면 Grok Build 로그인을 확인하고 Juice에서 Grok을 활성화합니다.
@@ -348,6 +349,8 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 - Cursor 한도는 GUI 또는 Agent CLI의 local access token을 고정 Cursor Dashboard usage endpoint에만 전달합니다. refresh token은 사용·보관하지 않으며, credential 기반 조회가 불가능할 때만 Agent PTY `/usage`를 사용합니다.
 - Cursor 토큰 활동은 같은 account Dashboard의 event를 읽으며 계정 전체 범위입니다. Juice는 날짜별 네 token component 합계만 local cache에 남기고 email·model·conversation/request ID와 raw response를 저장하지 않습니다.
 - Codex 한도와 토큰 활동은 로그인된 공식 Desktop/CLI app-server의 persistent stdio connection으로 `account/rateLimits/read`와 `account/usage/read`를 직렬 조회합니다. 계정 token을 직접 읽지 않고 raw response도 저장하지 않습니다.
+- 정상 형식의 RPC 오류는 조회 실패로 알리되 연결을 유지합니다. 통신 단절·타임아웃·잘못된 프레임·초기화 실패에서는 기존 연결 정리와 재시도 제한을 적용합니다.
+- 수집을 끄면 이전 활성화 상태에서 대기하던 조회도 취소합니다. 빠르게 다시 켜도 이전 종료 요청이 새 연결을 끊지 않습니다.
 - Antigravity CLI 계정 조회는 원문, email·text·token, 대화 본문을 저장하지 않습니다. 모델 토큰·턴 수가 `0`인 공식 읽기 전용 응답의 Gemini 한도와 초기화 시각만 사용하며, 로그인 정보는 CLI 내부에 맡깁니다. 이전 버전 statusline 자료와 복원 기록은 다른 수집값과 합치지 않습니다.
 - 업데이트 확인은 고정된 GitHub `latest.json` 주소로 표준 HTTPS 요청만 전송합니다. 사용자가 설치를 승인하면 해당 manifest가 지정한 서명된 설치 파일만 내려받으며, 계정 token, 사용량, PC 식별값은 보내지 않습니다.
 - LLM API 키나 Juice 전용 계정을 저장하지 않습니다.
@@ -442,7 +445,7 @@ The **Taskbar preview** at the top of Settings lets you choose a tool and see co
 | Tab | Controls |
 | --- | --- |
 | General | System/light/dark theme, light style (Fluent/Paper), system/Korean/English language, Windows/Pretendard font, Windows autostart |
-| Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, Claude account collection, token activity range and intensity |
+| Collection | Remaining/usage basis, warning/danger thresholds, collection interval, stale threshold, token activity range and intensity |
 | Taskbar | Four modes, limit order, ring/horizontal-bar display, overlap prevention, monitor-setup profiles for position, presentation, size, spacing, and optional colors, fullscreen/maximized hiding, per-tool display and collection |
 | Colors | Nine palettes, ten per-limit base colors across five tools, warning/danger colors and toggles, name/info/ring-number text colors |
 | Indicators & text | Visual style, shared indicator background and opacity, ring/numbers/outline, size, thickness, spacing, and typography |
@@ -487,7 +490,7 @@ Juice provides **four bar modes**.
 - Enabling a previously hidden tool places it in the first free taskbar position without moving existing bars.
 - `Prevent bar overlap` is enabled by default. When values or reset text grow, Juice temporarily moves only the trailing bar on the same taskbar. Saved positions and spacing remain unchanged, and the original layout returns when content shrinks.
 - During the first collection after startup or reboot, the bar shows `Loading`. If a stored reset time has passed but a new limit has not arrived yet, it shows `Waiting for refresh`.
-- Automatic polling pauses while Windows is locked or every display is off, then refreshes once immediately after unlock or display-on. Explicit manual refresh remains available.
+- Automatic polling pauses while Windows is locked or every display is off, then refreshes once immediately after unlock or display-on. Explicit manual refresh remains available. The panel's automatic usage and activity refreshes follow the same pause policy, keeping existing activity visible while paused.
 - Hovering a bar shows the tool name and time remaining until each available 5-hour, weekly, or monthly limit resets.
 - The tooltip also includes **remaining and used percentages**, reset dates and times, the last record timestamp and age, ready/warning/danger/stale state, approximation status, and the PC display name. Your selected display basis comes first. Date-only limits keep their original precision.
 - The last record timestamp comes from the data and may differ from the latest network check. Sign-in-required and initial loading states hide previous values. Hovering does not trigger additional usage collection or start external processes.
@@ -571,6 +574,7 @@ Enable **Antigravity** in the `Taskbar` tab to display **Gemini's five-hour and 
 - CLI takes priority whether Desktop is running or closed. The running Desktop is used only when CLI is not installed. An installed CLI's authentication or request failure is not replaced with a different Desktop account's values, and the two sources are never merged. Install the CLI and sign in once; its terminal does not need to stay open. Juice does not launch the GUI or send messages to your conversations.
 - Automatic Desktop reads follow your collection interval, with a minimum of 60 seconds. Automatic and manual GUI reads request a period quota refresh through the running app without sending a chat or model request.
 - CLI `1.1.11` or later supports the official read-only `agy --print /usage --output-format json` command, which Juice runs in the background. The CLI handles this account read itself without starting a model turn. Juice requires structured `command.name=usage`, zero model tokens and turns, and valid Gemini period quotas.
+- Juice disables CLI self-updates for its quota and version checks only. User CLI settings and global environment variables are unchanged, so independently launched CLI sessions can still update normally.
 - You do not need to enter `/usage` or `/statusline on`, create a CLI settings file, or configure its statusline. Enabling the tool starts an initial read. Automatic reads follow your interval with a minimum of 5 minutes; rapid manual refreshes are limited to once every 30 seconds.
 - Juice removes only its own statusline connection from older versions and restores the previous settings. Custom commands and options are preserved, and no new connection is registered. It never terminates or operates an already-open user CLI.
 - The verified installed executable is launched directly without Node, PATH lookup, a command shell, or 8.3 short paths. Spaces and non-ASCII paths are supported, with hidden execution, output limits, timeouts, and child-process cleanup.
@@ -659,7 +663,7 @@ The `About` tab is split into an `Updates` group at the top and an `About` group
 ### Troubleshooting
 
 - **Sign in required is shown:** Check the affected Claude app/Code, Codex Desktop/CLI, Grok Build, or Cursor GUI/Agent login, then force a refresh in Juice. The state clears after a successful collection.
-- **Claude is empty:** Enable Claude and account auto-collection. GUI-only users can check the Claude app login and force a refresh. Expired, unsupported, or ambiguous desktop caches are not automatically treated as a sign-out.
+- **Claude is empty:** Enable Claude; account limits are collected automatically. GUI-only users can check the Claude app login and force a refresh. Expired, unsupported, or ambiguous desktop caches are not automatically treated as a sign-out.
 - **Codex is empty:** Confirm the local Codex Desktop or CLI installation and login, then force a refresh. Juice prefers the Desktop versioned runtime and falls back to the CLI.
 - **Grok is empty:** Enable Grok in the Taskbar tab and confirm the local Grok Build installation and login. Grok defaults to off and appears when official ACP billing is available.
 - **Cursor is empty:** Enable Cursor in the Taskbar tab, confirm a Cursor GUI or Agent CLI login, then force a refresh. Juice tries GUI credentials, CLI credentials, and bounded `/usage` in that order.
@@ -673,7 +677,7 @@ The `About` tab is split into an `Updates` group at the top and an `About` group
 Juice v1 has no Juice server and does not synchronize its cache between PCs. Install Juice and verify the local Claude app/Code, Codex, Grok Build, Cursor, and Antigravity logins on every PC. The Cursor activity filter is the exception in scope: Cursor account events include other PCs and Cloud Agents on the same account.
 
 1. Confirm that Claude is enabled in Juice so automatic statusline connection and collection can start.
-2. Enable Claude account auto-collection and check the Code or desktop login. The desktop path does not require Code usage or a statusline file.
+2. Enable Claude and check the Code or desktop login. Account limits are collected automatically; the desktop path does not require Code usage or a statusline file.
 3. Confirm a Codex Desktop or Codex CLI login. Juice automatically discovers either official app-server runtime.
 4. Rollout JSONL fallback exists only after Codex has produced local records on that PC.
 5. If you use Grok, confirm the Grok Build login and enable Grok in Juice.
@@ -690,6 +694,8 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 - Cursor limits send the GUI or Agent CLI local access token only to the fixed Cursor Dashboard usage endpoint. Juice never uses or retains the refresh token and invokes Agent PTY `/usage` only when credential-based lookup is unavailable.
 - Cursor token activity is account-wide. Juice stores only daily totals of the four token components and discards email, model, conversation/request IDs, and raw responses.
 - Codex limits and token activity serialize `account/rateLimits/read` and `account/usage/read` over one persistent stdio connection to the logged-in official Desktop/CLI app-server. Juice never reads the account token directly and never stores raw responses.
+- Valid RPC errors remain query failures without retiring the connection. Transport failures, timeouts, malformed frames, and initialization failures retain bounded cleanup and retry behavior.
+- Disabling collection also cancels queued reads from the previous activation. Re-enabling quickly does not let an old cleanup request close the new connection.
 - Antigravity CLI account reads store no raw responses, email, text, token, or conversation content. Only Gemini quotas and reset times from a zero-token, zero-turn read-only response are used, and the CLI handles its own login. Old statusline snapshots and restoration records are not merged into another source.
 - Update checks send only a standard HTTPS request to the fixed GitHub `latest.json` endpoint. After user approval, Juice downloads only the signed installer named by that manifest. It sends no account token, usage data, or PC identifier.
 - Juice stores no LLM API key and requires no Juice account.

@@ -1,9 +1,9 @@
 use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
@@ -689,6 +689,33 @@ pub fn codex_account_usage_response(timeout: Duration) -> anyhow::Result<String>
     codex_app_server_broker()?.request("account/usage/read", timeout)
 }
 
+#[derive(Debug)]
+pub(crate) struct CollectionPolicyCancelled;
+
+impl std::fmt::Display for CollectionPolicyCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("command unavailable by collection policy")
+    }
+}
+
+impl std::error::Error for CollectionPolicyCancelled {}
+
+pub(crate) fn codex_collection_generation() -> Option<u64> {
+    match CODEX_APP_SERVER_BROKER.get() {
+        Some(Ok(broker)) => broker.policy.admission(),
+        Some(Err(_)) => None,
+        None => Some(1),
+    }
+}
+
+pub(crate) fn grok_collection_generation() -> Option<u64> {
+    match GROK_ACP_BROKER.get() {
+        Some(Ok(broker)) => broker.policy.admission(),
+        Some(Err(_)) => None,
+        None => Some(1),
+    }
+}
+
 pub fn set_codex_app_server_enabled(enabled: bool) -> anyhow::Result<()> {
     codex_app_server_broker()?.set_enabled(enabled);
     Ok(())
@@ -815,10 +842,48 @@ impl BrokerProtocol {
 
 type CodexCommandFactory = Arc<dyn Fn() -> anyhow::Result<Command> + Send + Sync + 'static>;
 
+struct BrokerPolicy {
+    state: AtomicU64,
+}
+
+impl BrokerPolicy {
+    fn new(enabled: bool) -> Self {
+        Self {
+            state: AtomicU64::new(u64::from(enabled)),
+        }
+    }
+
+    fn snapshot(&self) -> u64 {
+        self.state.load(Ordering::Acquire)
+    }
+
+    fn admission(&self) -> Option<u64> {
+        let state = self.snapshot();
+        (state & 1 != 0).then_some(state)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        generation & 1 != 0 && self.snapshot() == generation
+    }
+
+    fn set_enabled(&self, enabled: bool) -> bool {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if (current & 1 != 0) == enabled {
+                    None
+                } else {
+                    Some((current.wrapping_add(2) & !1) | u64::from(enabled))
+                }
+            })
+            .is_ok()
+    }
+}
+
 enum CodexBrokerMessage {
     Request {
         method: &'static str,
         deadline: Instant,
+        generation: u64,
         reply: mpsc::SyncSender<Result<String, String>>,
     },
     Reset,
@@ -829,7 +894,7 @@ enum CodexBrokerMessage {
 
 struct CodexAppServerBroker {
     sender: mpsc::SyncSender<CodexBrokerMessage>,
-    enabled: Arc<AtomicBool>,
+    policy: Arc<BrokerPolicy>,
     protocol: BrokerProtocol,
     #[cfg(test)]
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -844,15 +909,15 @@ impl CodexAppServerBroker {
         max_backoff: Duration,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::sync_channel(CODEX_BROKER_QUEUE_CAPACITY);
-        let enabled = Arc::new(AtomicBool::new(enabled));
-        let worker_enabled = Arc::clone(&enabled);
+        let policy = Arc::new(BrokerPolicy::new(enabled));
+        let worker_policy = Arc::clone(&policy);
         let worker = std::thread::Builder::new()
             .name(protocol.worker_name().into())
             .spawn(move || {
                 CodexBrokerWorker::new(
                     protocol,
                     command_factory,
-                    worker_enabled,
+                    worker_policy,
                     min_backoff,
                     max_backoff,
                 )
@@ -868,7 +933,7 @@ impl CodexAppServerBroker {
         drop(worker);
         Ok(Self {
             sender,
-            enabled,
+            policy,
             protocol,
             #[cfg(test)]
             worker: Mutex::new(Some(worker)),
@@ -876,12 +941,9 @@ impl CodexAppServerBroker {
     }
 
     fn request(&self, method: &'static str, timeout: Duration) -> anyhow::Result<String> {
-        if !self.enabled.load(Ordering::Acquire) {
-            anyhow::bail!(
-                "{} command unavailable by collection policy",
-                self.protocol.label()
-            );
-        }
+        let Some(generation) = self.policy.admission() else {
+            return Err(CollectionPolicyCancelled.into());
+        };
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| anyhow::anyhow!("{} timed out", self.protocol.label()))?;
@@ -893,6 +955,7 @@ impl CodexAppServerBroker {
             CodexBrokerMessage::Request {
                 method,
                 deadline,
+                generation,
                 reply,
             },
             deadline,
@@ -901,22 +964,26 @@ impl CodexAppServerBroker {
         if remaining.is_zero() {
             anyhow::bail!("{} timed out", self.protocol.label());
         }
-        match response.recv_timeout(remaining) {
+        let result = match response.recv_timeout(remaining) {
             Ok(Ok(raw)) => Ok(raw),
             Ok(Err(error)) => Err(anyhow::anyhow!(error)),
             Err(_) => Err(anyhow::anyhow!("{} timed out", self.protocol.label())),
+        };
+        if !self.policy.is_current(generation) {
+            return Err(CollectionPolicyCancelled.into());
         }
+        result
     }
 
     fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Release);
-        if !enabled {
+        if self.policy.set_enabled(enabled) {
+            // The atomic policy remains authoritative if the bounded wake-up queue is full.
             let _ = self.sender.try_send(CodexBrokerMessage::Reset);
         }
     }
 
     fn begin_shutdown(&self) {
-        self.enabled.store(false, Ordering::Release);
+        self.policy.set_enabled(false);
         let sender = self.sender.clone();
         let protocol = self.protocol;
         let _ = std::thread::Builder::new()
@@ -940,7 +1007,7 @@ impl CodexAppServerBroker {
 
     #[cfg(test)]
     fn shutdown_for_test(&self) {
-        self.enabled.store(false, Ordering::Release);
+        self.policy.set_enabled(false);
         let deadline = Instant::now() + CODEX_BROKER_CONTROL_TIMEOUT;
         let (reply, response) = mpsc::sync_channel(1);
         let sent = self
@@ -992,7 +1059,8 @@ fn send_codex_broker_message_until(
 struct CodexBrokerWorker {
     protocol: BrokerProtocol,
     command_factory: CodexCommandFactory,
-    enabled: Arc<AtomicBool>,
+    policy: Arc<BrokerPolicy>,
+    generation: u64,
     session: Option<CodexAppServerSession>,
     consecutive_failures: u32,
     retry_at: Option<Instant>,
@@ -1005,14 +1073,15 @@ impl CodexBrokerWorker {
     fn new(
         protocol: BrokerProtocol,
         command_factory: CodexCommandFactory,
-        enabled: Arc<AtomicBool>,
+        policy: Arc<BrokerPolicy>,
         min_backoff: Duration,
         max_backoff: Duration,
     ) -> Self {
         Self {
             protocol,
             command_factory,
-            enabled,
+            generation: policy.snapshot(),
+            policy,
             session: None,
             consecutive_failures: 0,
             retry_at: None,
@@ -1024,6 +1093,7 @@ impl CodexBrokerWorker {
 
     fn run(&mut self, receiver: mpsc::Receiver<CodexBrokerMessage>) {
         loop {
+            self.reconcile_policy();
             if let Some(session) = self.session.as_mut() {
                 if let Err(error) = session.poll_idle() {
                     self.session.take();
@@ -1034,12 +1104,13 @@ impl CodexBrokerWorker {
                 Ok(CodexBrokerMessage::Request {
                     method,
                     deadline,
+                    generation,
                     reply,
                 }) => {
-                    let result = self.handle_request(method, deadline);
+                    let result = self.handle_request(method, deadline, generation);
                     let _ = reply.send(result);
                 }
-                Ok(CodexBrokerMessage::Reset) => self.reset(),
+                Ok(CodexBrokerMessage::Reset) => self.reconcile_policy(),
                 Ok(CodexBrokerMessage::Shutdown { reply }) => {
                     self.reset();
                     let _ = reply.send(());
@@ -1058,9 +1129,10 @@ impl CodexBrokerWorker {
         &mut self,
         method: &'static str,
         deadline: Instant,
+        generation: u64,
     ) -> Result<String, String> {
-        if !self.enabled.load(Ordering::Acquire) {
-            self.reset();
+        self.reconcile_policy();
+        if !self.policy.is_current(generation) {
             return Err(format!(
                 "{} command unavailable by collection policy",
                 self.protocol.label()
@@ -1082,11 +1154,19 @@ impl CodexBrokerWorker {
             match CodexAppServerSession::start(
                 self.protocol,
                 Arc::clone(&self.command_factory),
-                Arc::clone(&self.enabled),
+                Arc::clone(&self.policy),
+                generation,
                 deadline,
             ) {
                 Ok(session) => self.session = Some(session),
                 Err(error) => {
+                    if !self.policy.is_current(generation) {
+                        self.reconcile_policy();
+                        return Err(format!(
+                            "{} command unavailable by collection policy",
+                            self.protocol.label()
+                        ));
+                    }
                     self.record_failure(&error);
                     return Err(error);
                 }
@@ -1098,6 +1178,13 @@ impl CodexBrokerWorker {
             .as_mut()
             .expect("persistent RPC session must exist after successful start")
             .request(method, deadline);
+        if !self.policy.is_current(generation) {
+            self.reconcile_policy();
+            return Err(format!(
+                "{} command unavailable by collection policy",
+                self.protocol.label()
+            ));
+        }
         match result {
             Ok(raw) => {
                 self.consecutive_failures = 0;
@@ -1106,9 +1193,12 @@ impl CodexBrokerWorker {
                 Ok(raw)
             }
             Err(error) => {
-                let disabled = !self.enabled.load(Ordering::Acquire);
-                self.session.take();
-                if disabled {
+                let transport_failed = matches!(error, SessionRequestError::Transport(_));
+                let error = error.into_message();
+                if transport_failed {
+                    self.session.take();
+                }
+                if !transport_failed {
                     self.consecutive_failures = 0;
                     self.retry_at = None;
                     self.retry_error = None;
@@ -1144,33 +1234,103 @@ impl CodexBrokerWorker {
         self.retry_at = None;
         self.retry_error = None;
     }
+
+    fn reconcile_policy(&mut self) {
+        let generation = self.policy.snapshot();
+        if self.generation != generation {
+            self.reset();
+            self.generation = generation;
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SessionRequestError {
+    Application(String),
+    Transport(String),
+}
+
+impl SessionRequestError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Application(message) | Self::Transport(message) => message,
+        }
+    }
+}
+
+impl From<String> for SessionRequestError {
+    fn from(message: String) -> Self {
+        Self::Transport(message)
+    }
 }
 
 struct CodexAppServerSession {
     protocol: BrokerProtocol,
     child: Option<Child>,
     tree: Option<ProcessTree>,
-    stdin: Option<ChildStdin>,
+    stdin: Option<mpsc::SyncSender<BrokerWrite>>,
+    stdin_done: mpsc::Receiver<()>,
     stdout: Option<mpsc::Receiver<std::io::Result<String>>>,
     stdout_done: mpsc::Receiver<()>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
     stderr_done: mpsc::Receiver<()>,
-    enabled: Arc<AtomicBool>,
+    policy: Arc<BrokerPolicy>,
+    generation: u64,
     next_request_id: i64,
+}
+
+struct BrokerWrite {
+    message: Value,
+    deadline: Instant,
+    reply: mpsc::SyncSender<std::io::Result<()>>,
+}
+
+fn broker_stdin_writer(
+    mut stdin: impl Write,
+    requests: mpsc::Receiver<BrokerWrite>,
+    done: mpsc::SyncSender<()>,
+    policy: Arc<BrokerPolicy>,
+    generation: u64,
+) {
+    while let Ok(request) = requests.recv() {
+        let result = if !policy.is_current(generation) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "collection policy changed",
+            ))
+        } else if Instant::now() >= request.deadline {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "write deadline expired",
+            ))
+        } else {
+            writeln!(stdin, "{}", request.message).and_then(|()| stdin.flush())
+        };
+        let failed = result.is_err();
+        let _ = request.reply.send(result);
+        if failed {
+            break;
+        }
+    }
+    let _ = done.send(());
 }
 
 impl CodexAppServerSession {
     fn start(
         protocol: BrokerProtocol,
         command_factory: CodexCommandFactory,
-        enabled: Arc<AtomicBool>,
+        policy: Arc<BrokerPolicy>,
+        generation: u64,
         deadline: Instant,
     ) -> Result<Self, String> {
-        if !enabled.load(Ordering::Acquire) {
+        if !policy.is_current(generation) {
             return Err(format!(
                 "{} command unavailable by collection policy",
                 protocol.label()
             ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{} timed out", protocol.label()));
         }
         let mut command =
             command_factory().map_err(|_| format!("{} command unavailable", protocol.label()))?;
@@ -1178,6 +1338,15 @@ impl CodexAppServerSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if !policy.is_current(generation) {
+            return Err(format!(
+                "{} command unavailable by collection policy",
+                protocol.label()
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{} timed out", protocol.label()));
+        }
         let hard_deadline = deadline
             .checked_add(PROCESS_CLEANUP_GRACE)
             .unwrap_or(deadline);
@@ -1232,86 +1401,164 @@ impl CodexAppServerSession {
                     let _ = stderr_done_sender.send(());
                 })
                 .map_err(|_| format!("{} stderr reader unavailable", protocol.label()))?;
+            let (stdin_sender, stdin_receiver) = mpsc::sync_channel(1);
+            let (stdin_done_sender, stdin_done_receiver) = mpsc::sync_channel(1);
+            let stdin_policy = Arc::clone(&policy);
+            std::thread::Builder::new()
+                .name(protocol.reader_name("stdin"))
+                .spawn(move || {
+                    broker_stdin_writer(
+                        stdin,
+                        stdin_receiver,
+                        stdin_done_sender,
+                        stdin_policy,
+                        generation,
+                    )
+                })
+                .map_err(|_| format!("{} stdin writer unavailable", protocol.label()))?;
             Ok::<_, String>((
-                stdin,
+                stdin_sender,
+                stdin_done_receiver,
                 stdout_receiver,
                 stdout_done_receiver,
                 stderr_tail,
                 stderr_done_receiver,
             ))
         })();
-        let (stdin, stdout_receiver, stdout_done_receiver, stderr_tail, stderr_done_receiver) =
-            match setup {
-                Ok(setup) => setup,
-                Err(error) => {
-                    terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
-                    return Err(error);
-                }
-            };
+        let (
+            stdin,
+            stdin_done,
+            stdout_receiver,
+            stdout_done_receiver,
+            stderr_tail,
+            stderr_done_receiver,
+        ) = match setup {
+            Ok(setup) => setup,
+            Err(error) => {
+                terminate_process_tree_until(&mut child, Some(&tree), hard_deadline);
+                return Err(error);
+            }
+        };
 
         let mut session = Self {
             protocol,
             child: Some(child),
             tree: Some(tree),
             stdin: Some(stdin),
+            stdin_done,
             stdout: Some(stdout_receiver),
             stdout_done: stdout_done_receiver,
             stderr_tail,
             stderr_done: stderr_done_receiver,
-            enabled,
+            policy,
+            generation,
             next_request_id: 2,
         };
         let initialize = protocol.initialize();
-        session.write_message(&initialize)?;
-        session.wait_for_response(1, deadline)?;
+        session.write_message(&initialize, deadline)?;
+        session
+            .wait_for_response(1, deadline)
+            .map_err(SessionRequestError::into_message)?;
         if protocol.sends_initialized() {
-            session.write_message(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "initialized",
-                "params": {}
-            }))?;
+            session.write_message(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialized",
+                    "params": {}
+                }),
+                deadline,
+            )?;
         }
         Ok(session)
     }
 
-    fn request(&mut self, method: &'static str, deadline: Instant) -> Result<String, String> {
+    fn request(
+        &mut self,
+        method: &'static str,
+        deadline: Instant,
+    ) -> Result<String, SessionRequestError> {
         let request_id = self.next_request_id;
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
             .ok_or_else(|| format!("{} request id exhausted", self.protocol.label()))?;
-        self.write_message(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": {}
-        }))?;
+        self.write_message(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {}
+            }),
+            deadline,
+        )?;
         self.wait_for_response(request_id, deadline)
     }
 
-    fn write_message(&mut self, message: &Value) -> Result<(), String> {
+    fn write_message(&mut self, message: &Value, deadline: Instant) -> Result<(), String> {
+        if !self.policy.is_current(self.generation) {
+            return Err(format!(
+                "{} command unavailable by collection policy",
+                self.protocol.label()
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{} timed out", self.protocol.label()));
+        }
         let stdin = self
             .stdin
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| format!("{} stdin unavailable", self.protocol.label()))?;
-        writeln!(stdin, "{message}")
-            .and_then(|()| stdin.flush())
-            .map_err(|_| format!("{} transport failed", self.protocol.label()))
-    }
-
-    fn wait_for_response(&mut self, response_id: i64, deadline: Instant) -> Result<String, String> {
-        let mut skipped = 0usize;
+        let (reply, response) = mpsc::sync_channel(1);
+        // The session actor never blocks on a full OS pipe; its owned child releases the writer.
+        stdin
+            .try_send(BrokerWrite {
+                message: message.clone(),
+                deadline,
+                reply,
+            })
+            .map_err(|_| format!("{} transport failed", self.protocol.label()))?;
         loop {
-            if !self.enabled.load(Ordering::Acquire) {
+            if !self.policy.is_current(self.generation) {
                 return Err(format!(
                     "{} command unavailable by collection policy",
                     self.protocol.label()
                 ));
             }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!("{} timed out", self.protocol.label()));
+            }
+            match response.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    return Err(format!("{} timed out", self.protocol.label()));
+                }
+                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!("{} transport failed", self.protocol.label()));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn wait_for_response(
+        &mut self,
+        response_id: i64,
+        deadline: Instant,
+    ) -> Result<String, SessionRequestError> {
+        let mut skipped = 0usize;
+        loop {
+            if !self.policy.is_current(self.generation) {
+                return Err(format!(
+                    "{} command unavailable by collection policy",
+                    self.protocol.label()
+                )
+                .into());
+            }
             if Instant::now() >= deadline {
-                return Err(
-                    self.failure_with_stderr(&format!("{} timed out", self.protocol.label()))
-                );
+                return Err(self
+                    .failure_with_stderr(&format!("{} timed out", self.protocol.label()))
+                    .into());
             }
             if self
                 .child
@@ -1320,12 +1567,13 @@ impl CodexAppServerSession {
                 .is_some()
             {
                 return Err(self
-                    .failure_with_stderr(&format!("{} transport failed", self.protocol.label())));
+                    .failure_with_stderr(&format!("{} transport failed", self.protocol.label()))
+                    .into());
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let wait_for = remaining.min(Duration::from_millis(50));
             let Some(stdout) = self.stdout.as_ref() else {
-                return Err(format!("{} stdout unavailable", self.protocol.label()));
+                return Err(format!("{} stdout unavailable", self.protocol.label()).into());
             };
             match stdout.recv_timeout(wait_for) {
                 Ok(Ok(line)) => {
@@ -1341,27 +1589,40 @@ impl CodexAppServerSession {
                             return Err(format!(
                                 "{} message limit exceeded",
                                 self.protocol.label()
-                            ));
+                            )
+                            .into());
                         }
                         continue;
                     }
                     let value = value.expect("matching response id requires a JSON object");
                     if let Some(error) = value.get("error") {
-                        if text_requires_login(&error.to_string()) {
+                        if value.get("result").is_some()
+                            || error.get("code").and_then(Value::as_i64).is_none()
+                            || error.get("message").and_then(Value::as_str).is_none()
+                        {
                             return Err(format!(
+                                "{} returned malformed RPC response",
+                                self.protocol.label()
+                            )
+                            .into());
+                        }
+                        if text_requires_login(&error.to_string()) {
+                            return Err(SessionRequestError::Application(format!(
                                 "{} authentication required",
                                 self.protocol.label()
-                            ));
+                            )));
                         }
-                        return Err(format!("{} returned an error", self.protocol.label()));
+                        return Err(SessionRequestError::Application(format!(
+                            "{} returned an error",
+                            self.protocol.label()
+                        )));
                     }
                     return Ok(line);
                 }
                 Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(self.failure_with_stderr(&format!(
-                        "{} transport failed",
-                        self.protocol.label()
-                    )));
+                    return Err(self
+                        .failure_with_stderr(&format!("{} transport failed", self.protocol.label()))
+                        .into());
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
             }
@@ -1431,6 +1692,9 @@ impl Drop for CodexAppServerSession {
         if let Some(child) = self.child.as_mut() {
             terminate_process_tree_until(child, self.tree.as_ref(), deadline);
         }
+        let _ = self
+            .stdin_done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()));
         let _ = self
             .stdout_done
             .recv_timeout(deadline.saturating_duration_since(Instant::now()));
@@ -2630,6 +2894,7 @@ mod tests {
         let mut reader = BufReader::new(stdin.lock());
         let mut initialize_count = 0u64;
         let mut account_responses = 0u64;
+        let mut application_errors = 0u64;
         loop {
             let mut request = String::new();
             if reader.read_line(&mut request).unwrap_or_default() == 0 {
@@ -2649,6 +2914,18 @@ mod tests {
                         );
                     }
                     initialize_count += 1;
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_INITIALIZE_ERROR").is_some() {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32602, "message": "fixture-private-initialize-error"}
+                            })
+                        );
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
                     println!(
                         "{}",
                         serde_json::json!({
@@ -2658,6 +2935,10 @@ mod tests {
                         })
                     );
                     std::io::stdout().flush().unwrap();
+                    if std::env::var_os("AGENT_JUICE_FAKE_BROKER_STOP_READING").is_some() {
+                        std::thread::sleep(Duration::from_secs(8));
+                        break;
+                    }
                 }
                 Some("initialized") => {}
                 Some("account/rateLimits/read")
@@ -2680,13 +2961,63 @@ mod tests {
                         std::io::stdout().flush().unwrap();
                         continue;
                     }
+                    if let Ok(mode) = std::env::var("AGENT_JUICE_FAKE_BROKER_INVALID_ERROR") {
+                        let mut response = serde_json::json!({"jsonrpc": "2.0", "id": id});
+                        response["error"] = match mode.as_str() {
+                            "null" => Value::Null,
+                            "string" => serde_json::json!("fixture-private-message"),
+                            "array" => serde_json::json!([]),
+                            "missing-code" => {
+                                serde_json::json!({"message": "fixture-private-message"})
+                            }
+                            "missing-message" => serde_json::json!({"code": -32603}),
+                            "invalid-code" => {
+                                serde_json::json!({"code": "invalid", "message": "fixture-private-message"})
+                            }
+                            "invalid-message" => {
+                                serde_json::json!({"code": -32603, "message": null})
+                            }
+                            "both" => {
+                                response["result"] = serde_json::json!({});
+                                serde_json::json!({"code": -32603, "message": "fixture-private-message"})
+                            }
+                            _ => panic!("invalid fixture mode"),
+                        };
+                        println!("{response}");
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
                     if std::env::var_os("AGENT_JUICE_FAKE_BROKER_AUTH_ERROR").is_some() {
                         println!(
                             "{}",
                             serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
-                                "error": {"message": "authentication required"}
+                                "error": {"code": -32000, "message": "authentication required"}
+                            })
+                        );
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+                    let usage_error = method == Some("account/usage/read")
+                        && std::env::var_os("AGENT_JUICE_FAKE_BROKER_USAGE_ERROR").is_some();
+                    let once_error = application_errors == 0
+                        && std::env::var_os("AGENT_JUICE_FAKE_BROKER_ERROR_ONCE").is_some();
+                    if usage_error || once_error {
+                        application_errors += 1;
+                        let message = if std::env::var("AGENT_JUICE_FAKE_BROKER_USAGE_ERROR")
+                            .as_deref()
+                            == Ok("auth")
+                        {
+                            "authentication required fixture-private-message"
+                        } else {
+                            "unsupported method fixture-private-message"
+                        };
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32601, "message": message}
                             })
                         );
                         std::io::stdout().flush().unwrap();
@@ -2828,6 +3159,464 @@ mod tests {
         }
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn expired_session_start_does_not_resolve_a_command() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::clone(&calls);
+            let factory: CodexCommandFactory = Arc::new(move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Command::new(""))
+            });
+            let policy = Arc::new(BrokerPolicy::new(true));
+            let error = CodexAppServerSession::start(
+                protocol,
+                factory,
+                Arc::clone(&policy),
+                policy.admission().unwrap(),
+                Instant::now(),
+            )
+            .err()
+            .expect("expired startup must fail before command resolution");
+            assert_eq!(error, format!("{} timed out", protocol.label()));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn session_start_rechecks_deadline_after_command_factory() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::clone(&calls);
+            let factory: CodexCommandFactory = Arc::new(move || {
+                factory_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                // An attempted spawn would report transport failure instead of timeout.
+                Ok(Command::new(""))
+            });
+            let policy = Arc::new(BrokerPolicy::new(true));
+            let error = CodexAppServerSession::start(
+                protocol,
+                factory,
+                Arc::clone(&policy),
+                policy.admission().unwrap(),
+                deadline,
+            )
+            .err()
+            .expect("expired factory result must not start a child");
+            assert_eq!(error, format!("{} timed out", protocol.label()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn session_start_rechecks_policy_after_command_factory() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            for reenable in [false, true] {
+                let policy = Arc::new(BrokerPolicy::new(true));
+                let generation = policy.admission().unwrap();
+                let (entered_sender, entered) = mpsc::sync_channel(1);
+                let (release_sender, release) = mpsc::sync_channel(1);
+                let release = Mutex::new(release);
+                let factory: CodexCommandFactory = Arc::new(move || {
+                    entered_sender.send(()).unwrap();
+                    release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))?;
+                    Ok(Command::new(""))
+                });
+                let session_policy = Arc::clone(&policy);
+                let startup = std::thread::spawn(move || {
+                    CodexAppServerSession::start(
+                        protocol,
+                        factory,
+                        session_policy,
+                        generation,
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .map(drop)
+                });
+                entered.recv_timeout(Duration::from_secs(1)).unwrap();
+                policy.set_enabled(false);
+                if reenable {
+                    policy.set_enabled(true);
+                }
+                release_sender.send(()).unwrap();
+                let error = startup.join().unwrap().unwrap_err();
+                assert_eq!(
+                    error,
+                    format!(
+                        "{} command unavailable by collection policy",
+                        protocol.label()
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slow_command_factory_within_deadline_preserves_session_reuse() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            let spawns = Arc::new(AtomicUsize::new(0));
+            let broker = fake_persistent_broker_for(
+                protocol,
+                Arc::clone(&spawns),
+                |_| std::thread::sleep(Duration::from_millis(20)),
+                Duration::from_secs(1),
+            );
+            let method = match protocol {
+                BrokerProtocol::Codex => "account/rateLimits/read",
+                BrokerProtocol::Grok => "_x.ai/billing",
+            };
+            let first = broker.request(method, Duration::from_secs(2));
+            let second = broker.request(method, Duration::from_secs(2));
+            broker.shutdown_for_test();
+            let first: Value = serde_json::from_str(&first.unwrap()).unwrap();
+            let second: Value = serde_json::from_str(&second.unwrap()).unwrap();
+            assert_eq!(first["result"]["initializeCount"], 1);
+            assert_eq!(second["result"]["initializeCount"], 1);
+            assert_eq!(
+                first["result"]["fixturePid"],
+                second["result"]["fixturePid"]
+            );
+            assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn queued_stdin_writer_rechecks_policy_and_deadline_before_os_write() {
+        for cancel_policy in [false, true] {
+            let policy = Arc::new(BrokerPolicy::new(true));
+            let generation = policy.admission().unwrap();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let (reply, response) = mpsc::sync_channel(1);
+            let (done_sender, done) = mpsc::sync_channel(1);
+            sender
+                .send(BrokerWrite {
+                    message: serde_json::json!({"fixture":"must-not-write"}),
+                    deadline: if cancel_policy {
+                        Instant::now() + Duration::from_secs(1)
+                    } else {
+                        Instant::now()
+                    },
+                    reply,
+                })
+                .unwrap();
+            if cancel_policy {
+                policy.set_enabled(false);
+            }
+            let mut output = Vec::new();
+            broker_stdin_writer(&mut output, receiver, done_sender, policy, generation);
+            assert!(output.is_empty());
+            let error = response.recv().unwrap().unwrap_err();
+            assert_eq!(
+                error.kind(),
+                if cancel_policy {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::TimedOut
+                }
+            );
+            done.recv().unwrap();
+        }
+    }
+
+    #[test]
+    fn blocked_session_stdin_obeys_deadline_and_releases_its_writer() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            let policy = Arc::new(BrokerPolicy::new(true));
+            let factory: CodexCommandFactory = Arc::new(move || {
+                let mut command =
+                    test_process("collector::tests::fake_persistent_app_server_child");
+                command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+                command.env("AGENT_JUICE_FAKE_BROKER_STOP_READING", "1");
+                if protocol == BrokerProtocol::Grok {
+                    command.env("AGENT_JUICE_FAKE_GROK_BROKER", "1");
+                }
+                Ok(command)
+            });
+            let mut session = CodexAppServerSession::start(
+                protocol,
+                factory,
+                Arc::clone(&policy),
+                policy.admission().unwrap(),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            let began = Instant::now();
+            let error = session
+                .write_message(
+                    &serde_json::json!({"fixture": "x".repeat(256 * 1024)}),
+                    began + Duration::from_millis(100),
+                )
+                .unwrap_err();
+            assert!(error.contains("timed out"));
+            assert!(began.elapsed() < Duration::from_secs(1));
+            session.stdin.take();
+            let cleanup = Instant::now() + PROCESS_CLEANUP_GRACE;
+            terminate_process_tree_until(
+                session.child.as_mut().unwrap(),
+                session.tree.as_ref(),
+                cleanup,
+            );
+            session
+                .stdin_done
+                .recv_timeout(Duration::from_secs(1))
+                .expect("owned child cleanup releases blocked writer");
+            assert!(session
+                .child
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn blocked_session_stdin_obeys_policy_cancellation() {
+        let policy = Arc::new(BrokerPolicy::new(true));
+        let factory: CodexCommandFactory = Arc::new(|| {
+            let mut command = test_process("collector::tests::fake_persistent_app_server_child");
+            command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+            command.env("AGENT_JUICE_FAKE_BROKER_STOP_READING", "1");
+            Ok(command)
+        });
+        let mut session = CodexAppServerSession::start(
+            BrokerProtocol::Codex,
+            factory,
+            Arc::clone(&policy),
+            policy.admission().unwrap(),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let cancel_policy = Arc::clone(&policy);
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            cancel_policy.set_enabled(false);
+        });
+        let began = Instant::now();
+        let error = session
+            .write_message(
+                &serde_json::json!({"fixture": "x".repeat(256 * 1024)}),
+                began + Duration::from_secs(3),
+            )
+            .unwrap_err();
+        cancel.join().unwrap();
+        assert!(error.contains("collection policy"));
+        assert!(began.elapsed() < Duration::from_secs(1));
+        drop(session);
+    }
+
+    #[test]
+    fn nonfatal_codex_rpc_errors_preserve_the_same_child_without_transport_backoff() {
+        for mode in ["unsupported", "auth"] {
+            let spawns = Arc::new(AtomicUsize::new(0));
+            let broker = fake_persistent_broker(
+                Arc::clone(&spawns),
+                move |command| {
+                    command.env("AGENT_JUICE_FAKE_BROKER_USAGE_ERROR", mode);
+                },
+                Duration::from_secs(1),
+            );
+            let mut pid = None;
+            for _ in 0..6 {
+                let response = broker.request("account/rateLimits/read", Duration::from_secs(2));
+                if response.is_err() {
+                    broker.shutdown_for_test();
+                }
+                let value: Value =
+                    serde_json::from_str(&response.expect(
+                        "a nonfatal RPC error must not retire or back off the healthy child",
+                    ))
+                    .unwrap();
+                let current = value.pointer("/result/fixturePid").and_then(Value::as_u64);
+                assert!(current.is_some());
+                assert!(pid.is_none() || pid == current);
+                pid = current;
+                assert_eq!(
+                    value
+                        .pointer("/result/initializeCount")
+                        .and_then(Value::as_u64),
+                    Some(1)
+                );
+                let error = broker
+                    .request("account/usage/read", Duration::from_secs(2))
+                    .unwrap_err();
+                assert_eq!(error_requires_login(&error), mode == "auth");
+                assert!(!error.to_string().contains("fixture-private-message"));
+            }
+            let final_response = broker.request("account/rateLimits/read", Duration::from_secs(2));
+            broker.shutdown_for_test();
+            assert!(final_response.is_ok());
+            assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn broker_policy_does_not_readmit_an_old_epoch_after_off_on() {
+        let policy = BrokerPolicy::new(true);
+        let original = policy.admission().unwrap();
+        assert!(!policy.set_enabled(true));
+        assert!(policy.is_current(original));
+        assert!(policy.set_enabled(false));
+        assert!(policy.admission().is_none());
+        assert!(policy.set_enabled(true));
+        let current = policy.admission().unwrap();
+        assert_ne!(current, original);
+        assert!(!policy.is_current(original));
+        assert!(policy.is_current(current));
+    }
+
+    #[test]
+    fn stale_requests_and_late_policy_wakeups_preserve_the_new_session() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            let spawns = Arc::new(AtomicUsize::new(0));
+            let spawned = Arc::clone(&spawns);
+            let factory: CodexCommandFactory = Arc::new(move || {
+                spawned.fetch_add(1, Ordering::SeqCst);
+                let mut command =
+                    test_process("collector::tests::fake_persistent_app_server_child");
+                command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+                if protocol == BrokerProtocol::Grok {
+                    command.env("AGENT_JUICE_FAKE_GROK_BROKER", "1");
+                }
+                Ok(command)
+            });
+            let policy = Arc::new(BrokerPolicy::new(true));
+            let mut worker = CodexBrokerWorker::new(
+                protocol,
+                factory,
+                Arc::clone(&policy),
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+            );
+            let method = match protocol {
+                BrokerProtocol::Codex => "account/rateLimits/read",
+                BrokerProtocol::Grok => "_x.ai/billing",
+            };
+            let deadline = || Instant::now() + Duration::from_secs(2);
+            let original = policy.admission().unwrap();
+            let first = worker.handle_request(method, deadline(), original).unwrap();
+            policy.set_enabled(false);
+            policy.set_enabled(true);
+            let current = policy.admission().unwrap();
+            let stale = worker
+                .handle_request(method, deadline(), original)
+                .unwrap_err();
+            assert!(stale.contains("collection policy"));
+            assert_eq!(spawns.load(Ordering::SeqCst), 1);
+            let second = worker.handle_request(method, deadline(), current).unwrap();
+            worker.reconcile_policy();
+            let third = worker.handle_request(method, deadline(), current).unwrap();
+            worker.reset();
+            let pid = |raw: &str| {
+                serde_json::from_str::<Value>(raw)
+                    .unwrap()
+                    .pointer("/result/fixturePid")
+                    .and_then(Value::as_u64)
+                    .unwrap()
+            };
+            assert_ne!(pid(&first), pid(&second));
+            assert_eq!(pid(&second), pid(&third));
+            assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn nonfatal_grok_rpc_error_preserves_the_shared_worker_connection() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker_for(
+            BrokerProtocol::Grok,
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_ERROR_ONCE", "1");
+            },
+            Duration::from_secs(1),
+        );
+        let error = broker
+            .request("_x.ai/billing", Duration::from_secs(2))
+            .unwrap_err();
+        let next = broker.request("_x.ai/billing", Duration::from_secs(2));
+        broker.shutdown_for_test();
+        assert!(!error.to_string().contains("fixture-private-message"));
+        let value: Value =
+            serde_json::from_str(&next.expect("normal RPC errors keep the connection")).unwrap();
+        assert_eq!(
+            value
+                .pointer("/result/initializeCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn initialize_application_error_never_leaves_an_initialized_session() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker(
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_INITIALIZE_ERROR", "1");
+            },
+            Duration::from_secs(1),
+        );
+        let first = broker
+            .request("account/rateLimits/read", Duration::from_secs(2))
+            .unwrap_err();
+        let second = broker
+            .request("account/rateLimits/read", Duration::from_millis(300))
+            .unwrap_err();
+        broker.shutdown_for_test();
+        assert!(first.to_string().contains("returned an error"));
+        assert!(!first
+            .to_string()
+            .contains("fixture-private-initialize-error"));
+        assert!(second.to_string().contains("retry backoff"));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn invalid_rpc_error_envelopes_retire_codex_and_grok_sessions_with_backoff() {
+        for protocol in [BrokerProtocol::Codex, BrokerProtocol::Grok] {
+            for mode in [
+                "null",
+                "string",
+                "array",
+                "missing-code",
+                "missing-message",
+                "invalid-code",
+                "invalid-message",
+                "both",
+            ] {
+                let spawns = Arc::new(AtomicUsize::new(0));
+                let broker = fake_persistent_broker_for(
+                    protocol,
+                    Arc::clone(&spawns),
+                    move |command| {
+                        command.env("AGENT_JUICE_FAKE_BROKER_INVALID_ERROR", mode);
+                    },
+                    Duration::from_secs(1),
+                );
+                let method = match protocol {
+                    BrokerProtocol::Codex => "account/rateLimits/read",
+                    BrokerProtocol::Grok => "_x.ai/billing",
+                };
+                let first = broker.request(method, Duration::from_secs(2)).unwrap_err();
+                let second = broker
+                    .request(method, Duration::from_millis(300))
+                    .unwrap_err();
+                broker.shutdown_for_test();
+                assert!(first.to_string().contains("malformed RPC response"));
+                assert!(!first.to_string().contains("fixture-private-message"));
+                assert!(second.to_string().contains("retry backoff"));
+                assert_eq!(spawns.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 
     #[test]
@@ -3066,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_broker_backoff_preserves_authentication_error_classification() {
+    fn codex_broker_preserves_authentication_errors_without_restarting_a_healthy_session() {
         let spawns = Arc::new(AtomicUsize::new(0));
         let broker = fake_persistent_broker(
             Arc::clone(&spawns),

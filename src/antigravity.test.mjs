@@ -18,7 +18,8 @@ test('Antigravity collects CLI before Desktop and only evaluates Desktop on fall
   const source = readFileSync(new URL('../src-tauri/src/antigravity.rs', import.meta.url), 'utf8');
   const collection = source.match(/pub fn collect\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
   assert.match(collection, /resolve_collection_source\(\s*crate::antigravity_cli::headless::collect/);
-  assert.match(collection, /\|\| native::collect\(pc_id, captured_at, deadline\)/);
+  assert.match(collection, /headless::collect\(pc_id, captured_at, deadline, admitted\)/);
+  assert.match(collection, /\|\| \{[\s\S]*?if !admitted\(\)[\s\S]*?return Err\(Error::Unavailable\);[\s\S]*?native::collect\(pc_id, captured_at, deadline, admitted\)/);
 });
 
 test('Gemini period quota uses five-hour and weekly labels in compact and panel', () => {

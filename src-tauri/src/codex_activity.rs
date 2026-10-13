@@ -119,6 +119,7 @@ pub fn parse_response(raw: &str) -> anyhow::Result<CodexActivityView> {
 
 #[derive(Default)]
 struct FetchState {
+    generation: Option<u64>,
     attempted_at: Option<Instant>,
     view: Option<CodexActivityView>,
 }
@@ -130,8 +131,16 @@ struct CodexActivityCollector {
 }
 
 impl CodexActivityCollector {
-    fn cached(&self, now: Instant, freshness: Duration) -> Option<CodexActivityView> {
+    fn cached(
+        &self,
+        now: Instant,
+        freshness: Duration,
+        generation: u64,
+    ) -> Option<CodexActivityView> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.generation != Some(generation) {
+            return None;
+        }
         state
             .attempted_at
             .filter(|attempted| now.saturating_duration_since(*attempted) < freshness)
@@ -143,32 +152,64 @@ impl CodexActivityCollector {
         force: bool,
         now: Instant,
         deadline: Instant,
+        current_generation: impl Fn() -> Option<u64>,
         fetch: impl FnOnce(Duration) -> anyhow::Result<String>,
     ) -> CodexActivityView {
+        let Some(generation) = current_generation() else {
+            return CodexActivityView::unavailable();
+        };
         let freshness = if force {
             FORCE_COALESCE
         } else {
             NORMAL_FRESHNESS
         };
-        if let Some(view) = self.cached(now, freshness) {
-            return view;
+        if let Some(view) = self.cached(now, freshness, generation) {
+            return if current_generation() == Some(generation) {
+                view
+            } else {
+                CodexActivityView::unavailable()
+            };
         }
 
         let _gate = self.gate.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(view) = self.cached(now, freshness) {
-            return view;
+        if current_generation() != Some(generation) {
+            return CodexActivityView::unavailable();
+        }
+        if let Some(view) = self.cached(now, freshness, generation) {
+            return if current_generation() == Some(generation) {
+                view
+            } else {
+                CodexActivityView::unavailable()
+            };
         }
         let timeout = deadline.saturating_duration_since(Instant::now());
-        let view = if timeout.is_zero() {
-            CodexActivityView::unavailable()
+        if current_generation() != Some(generation) {
+            return CodexActivityView::unavailable();
+        }
+        let result = if timeout.is_zero() {
+            Ok(CodexActivityView::unavailable())
         } else {
-            fetch(timeout)
-                .and_then(|raw| parse_response(&raw))
-                .unwrap_or_else(|_| CodexActivityView::unavailable())
+            fetch(timeout).and_then(|raw| parse_response(&raw))
         };
+        let cancelled = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<collector::CollectionPolicyCancelled>());
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.attempted_at = Some(now);
-        state.view = Some(view.clone());
+        if cancelled || current_generation() != Some(generation) {
+            *state = FetchState::default();
+            return CodexActivityView::unavailable();
+        }
+        let view = result.unwrap_or_else(|_| CodexActivityView::unavailable());
+        *state = FetchState {
+            generation: Some(generation),
+            attempted_at: Some(now),
+            view: Some(view.clone()),
+        };
+        if current_generation() != Some(generation) {
+            *state = FetchState::default();
+            return CodexActivityView::unavailable();
+        }
         view
     }
 }
@@ -176,21 +217,55 @@ impl CodexActivityCollector {
 static COLLECTOR: Lazy<CodexActivityCollector> = Lazy::new(CodexActivityCollector::default);
 
 pub fn collect(force: bool, deadline: Instant) -> CodexActivityView {
-    COLLECTOR.collect_with(force, Instant::now(), deadline, |timeout| {
-        collector::codex_account_usage_response(timeout)
-    })
+    COLLECTOR.collect_with(
+        force,
+        Instant::now(),
+        deadline,
+        collector::codex_collection_generation,
+        collector::codex_account_usage_response,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Barrier,
     };
 
     fn response(summary: &str, buckets: &str) -> String {
         format!(r#"{{"result":{{"summary":{summary},"dailyUsageBuckets":{buckets}}}}}"#)
+    }
+
+    fn token_response(tokens: u64) -> String {
+        response(
+            &format!(r#"{{"lifetimeTokens":{tokens},"peakDailyTokens":{tokens}}}"#),
+            &format!(r#"[{{"startDate":"2026-08-25","tokens":{tokens}}}]"#),
+        )
+    }
+
+    fn admission(policy: &AtomicU64) -> Option<u64> {
+        let generation = policy.load(Ordering::SeqCst);
+        (generation & 1 != 0).then_some(generation)
+    }
+
+    fn fetch_outcome(outcome: &str) -> anyhow::Result<String> {
+        match outcome {
+            "success" => Ok(token_response(111)),
+            "login" => anyhow::bail!("authentication required"),
+            "parse" => Ok("{invalid json".to_owned()),
+            "transport" => anyhow::bail!("transport timed out"),
+            "cancellation text" => anyhow::bail!("command unavailable by collection policy"),
+            _ => panic!("unknown test outcome"),
+        }
+    }
+
+    fn assert_uncached(collector: &CodexActivityCollector) {
+        let state = collector.state.lock().unwrap();
+        assert_eq!(state.generation, None);
+        assert_eq!(state.attempted_at, None);
+        assert_eq!(state.view, None);
     }
 
     #[test]
@@ -257,18 +332,25 @@ mod tests {
     fn failed_actual_refresh_replaces_success_instead_of_using_last_good() {
         let collector = CodexActivityCollector::default();
         let now = Instant::now();
-        let success = collector.collect_with(false, now, now + Duration::from_secs(5), |_| {
-            Ok(response(
-                r#"{"lifetimeTokens":10,"peakDailyTokens":10}"#,
-                r#"[{"startDate":"2026-08-25","tokens":10}]"#,
-            ))
-        });
+        let success = collector.collect_with(
+            false,
+            now,
+            now + Duration::from_secs(5),
+            || Some(1),
+            |_| {
+                Ok(response(
+                    r#"{"lifetimeTokens":10,"peakDailyTokens":10}"#,
+                    r#"[{"startDate":"2026-08-25","tokens":10}]"#,
+                ))
+            },
+        );
         assert_eq!(success.days.get("2026-08-25"), Some(&10));
 
         let failed = collector.collect_with(
             true,
             now + FORCE_COALESCE + Duration::from_millis(1),
             Instant::now() + Duration::from_secs(5),
+            || Some(1),
             |_| anyhow::bail!("authentication required"),
         );
         assert!(failed.days.is_empty());
@@ -288,20 +370,462 @@ mod tests {
             let calls = Arc::clone(&calls);
             threads.push(std::thread::spawn(move || {
                 barrier.wait();
-                collector.collect_with(true, now, Instant::now() + Duration::from_secs(5), |_| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(50));
-                    Ok(response(
-                        r#"{"lifetimeTokens":1,"peakDailyTokens":1}"#,
-                        r#"[{"startDate":"2026-08-25","tokens":1}]"#,
-                    ))
-                })
+                collector.collect_with(
+                    true,
+                    now,
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(1),
+                    |_| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(50));
+                        Ok(response(
+                            r#"{"lifetimeTokens":1,"peakDailyTokens":1}"#,
+                            r#"[{"startDate":"2026-08-25","tokens":1}]"#,
+                        ))
+                    },
+                )
             }));
         }
         for thread in threads {
             assert_eq!(thread.join().unwrap().days.get("2026-08-25"), Some(&1));
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn epoch_off_on_force_at_one_second_refetches_instead_of_returning_old_success() {
+        let collector = CodexActivityCollector::default();
+        let policy = AtomicU64::new(1);
+        let calls = AtomicUsize::new(0);
+        let now = Instant::now();
+        let first = collector.collect_with(
+            false,
+            now,
+            now + Duration::from_secs(5),
+            || admission(&policy),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(token_response(111))
+            },
+        );
+        assert_eq!(first.days.get("2026-08-25"), Some(&111));
+        policy.store(2, Ordering::SeqCst);
+        assert_eq!(admission(&policy), None);
+        policy.store(3, Ordering::SeqCst);
+        let second = collector.collect_with(
+            true,
+            now + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+            || admission(&policy),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(token_response(222))
+            },
+        );
+        assert_eq!(second.days.get("2026-08-25"), Some(&222));
+        assert!(!second.partial);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn epoch_off_on_normal_at_one_second_recovers_from_old_failure_cache() {
+        let collector = CodexActivityCollector::default();
+        let policy = AtomicU64::new(1);
+        let now = Instant::now();
+        let failed = collector.collect_with(
+            false,
+            now,
+            now + Duration::from_secs(5),
+            || admission(&policy),
+            |_| anyhow::bail!("transport timed out"),
+        );
+        assert_eq!(failed, CodexActivityView::unavailable());
+        policy.store(2, Ordering::SeqCst);
+        assert_eq!(admission(&policy), None);
+        policy.store(3, Ordering::SeqCst);
+        let recovered = collector.collect_with(
+            false,
+            now + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+            || admission(&policy),
+            |_| Ok(token_response(222)),
+        );
+        assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+        assert!(!recovered.partial);
+    }
+
+    #[test]
+    fn same_epoch_success_and_failures_preserve_normal_and_force_freshness_boundaries() {
+        for outcome in [
+            "success",
+            "login",
+            "parse",
+            "transport",
+            "cancellation text",
+        ] {
+            for (force, freshness) in [(false, NORMAL_FRESHNESS), (true, FORCE_COALESCE)] {
+                let collector = CodexActivityCollector::default();
+                let now = Instant::now();
+                let initial = collector.collect_with(
+                    false,
+                    now,
+                    now + Duration::from_secs(5),
+                    || Some(1),
+                    |_| fetch_outcome(outcome),
+                );
+                if outcome == "success" {
+                    assert_eq!(initial.days.get("2026-08-25"), Some(&111));
+                    assert!(!initial.partial);
+                } else {
+                    assert_eq!(initial, CodexActivityView::unavailable(), "{outcome}");
+                }
+                let cached = collector.collect_with(
+                    force,
+                    now + freshness - Duration::from_millis(1),
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(1),
+                    |_| panic!("same-epoch fresh result must coalesce: {outcome}"),
+                );
+                assert_eq!(cached, initial);
+                let refreshed = collector.collect_with(
+                    force,
+                    now + freshness,
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(1),
+                    |_| Ok(token_response(222)),
+                );
+                assert_eq!(refreshed.days.get("2026-08-25"), Some(&222));
+                let state = collector.state.lock().unwrap();
+                assert_eq!(state.generation, Some(1));
+                assert_eq!(state.attempted_at, Some(now + freshness));
+            }
+        }
+    }
+
+    #[test]
+    fn login_parse_and_transport_refresh_failures_replace_success_and_recover_in_new_epoch() {
+        for outcome in ["login", "parse", "transport"] {
+            let collector = CodexActivityCollector::default();
+            let policy = AtomicU64::new(1);
+            let now = Instant::now();
+            let attempted = now + FORCE_COALESCE + Duration::from_millis(1);
+            let success = collector.collect_with(
+                false,
+                now,
+                now + Duration::from_secs(5),
+                || admission(&policy),
+                |_| Ok(token_response(111)),
+            );
+            assert_eq!(success.days.get("2026-08-25"), Some(&111));
+            let failed = collector.collect_with(
+                true,
+                attempted,
+                Instant::now() + Duration::from_secs(5),
+                || admission(&policy),
+                |_| fetch_outcome(outcome),
+            );
+            assert_eq!(failed, CodexActivityView::unavailable(), "{outcome}");
+            let cached = collector.collect_with(
+                false,
+                attempted + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || admission(&policy),
+                |_| panic!("real failure must keep normal freshness: {outcome}"),
+            );
+            assert_eq!(cached, failed);
+            policy.store(2, Ordering::SeqCst);
+            policy.store(3, Ordering::SeqCst);
+            let recovered = collector.collect_with(
+                false,
+                attempted + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || admission(&policy),
+                |_| Ok(token_response(222)),
+            );
+            assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+            assert!(!recovered.partial);
+        }
+    }
+
+    #[test]
+    fn disabled_or_shutdown_generation_neither_dispatches_nor_returns_cached_success() {
+        for seed_cache in [false, true] {
+            let collector = CodexActivityCollector::default();
+            let now = Instant::now();
+            if seed_cache {
+                collector.collect_with(
+                    false,
+                    now,
+                    now + Duration::from_secs(5),
+                    || Some(1),
+                    |_| Ok(token_response(111)),
+                );
+            }
+            let unavailable = collector.collect_with(
+                true,
+                now + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || None,
+                |_| panic!("disabled or shutdown policy must not dispatch"),
+            );
+            assert_eq!(unavailable, CodexActivityView::unavailable());
+            if !seed_cache {
+                assert_uncached(&collector);
+            }
+            let recovered = collector.collect_with(
+                false,
+                now + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || Some(3),
+                |_| Ok(token_response(222)),
+            );
+            assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+        }
+    }
+
+    #[test]
+    fn policy_change_while_waiting_for_gate_cancels_without_dispatch() {
+        let collector = Arc::new(CodexActivityCollector::default());
+        let policy = Arc::new(AtomicU64::new(1));
+        let gate = collector.gate.lock().unwrap();
+        let (captured, ready) = std::sync::mpsc::channel();
+        let worker_collector = Arc::clone(&collector);
+        let worker_policy = Arc::clone(&policy);
+        let worker = std::thread::spawn(move || {
+            worker_collector.collect_with(
+                true,
+                Instant::now(),
+                Instant::now() + Duration::from_secs(5),
+                || {
+                    let generation = admission(&worker_policy);
+                    captured.send(()).unwrap();
+                    generation
+                },
+                |_| panic!("old queued epoch must not dispatch"),
+            )
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        policy.store(2, Ordering::SeqCst);
+        policy.store(3, Ordering::SeqCst);
+        drop(gate);
+        assert_eq!(worker.join().unwrap(), CodexActivityView::unavailable());
+        assert_uncached(&collector);
+    }
+
+    #[test]
+    fn policy_change_immediately_before_dispatch_does_not_fetch_or_cache() {
+        for next_generation in [None, Some(3)] {
+            let collector = CodexActivityCollector::default();
+            let samples = AtomicUsize::new(0);
+            let now = Instant::now();
+            let unavailable = collector.collect_with(
+                false,
+                now,
+                now + Duration::from_secs(5),
+                || match samples.fetch_add(1, Ordering::SeqCst) {
+                    0 | 1 => Some(1),
+                    _ => next_generation,
+                },
+                |_| panic!("policy changed at dispatch admission"),
+            );
+            assert_eq!(unavailable, CodexActivityView::unavailable());
+            assert_eq!(samples.load(Ordering::SeqCst), 3);
+            assert_uncached(&collector);
+        }
+    }
+
+    #[test]
+    fn policy_change_after_cached_clone_discards_it_before_return() {
+        for outcome in ["success", "transport"] {
+            let collector = CodexActivityCollector::default();
+            let now = Instant::now();
+            collector.collect_with(
+                false,
+                now,
+                now + Duration::from_secs(5),
+                || Some(1),
+                |_| fetch_outcome(outcome),
+            );
+            let samples = AtomicUsize::new(0);
+            let unavailable = collector.collect_with(
+                true,
+                now + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || {
+                    if samples.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Some(1)
+                    } else {
+                        Some(3)
+                    }
+                },
+                |_| panic!("fresh lookup must not dispatch"),
+            );
+            assert_eq!(unavailable, CodexActivityView::unavailable());
+            assert_eq!(samples.load(Ordering::SeqCst), 2);
+            let recovered = collector.collect_with(
+                true,
+                now + Duration::from_secs(1),
+                Instant::now() + Duration::from_secs(5),
+                || Some(3),
+                |_| Ok(token_response(222)),
+            );
+            assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+        }
+    }
+
+    #[test]
+    fn policy_change_during_fetch_discards_success_or_failure_without_freshness() {
+        for outcome in ["success", "login", "parse", "transport"] {
+            for next_generation in [2, 3] {
+                let collector = CodexActivityCollector::default();
+                let policy = AtomicU64::new(1);
+                let now = Instant::now();
+                collector.collect_with(
+                    false,
+                    now,
+                    now + Duration::from_secs(5),
+                    || admission(&policy),
+                    |_| Ok(token_response(111)),
+                );
+                let attempted = now + FORCE_COALESCE;
+                let unavailable = collector.collect_with(
+                    true,
+                    attempted,
+                    Instant::now() + Duration::from_secs(5),
+                    || admission(&policy),
+                    |_| {
+                        policy.store(next_generation, Ordering::SeqCst);
+                        fetch_outcome(outcome)
+                    },
+                );
+                assert_eq!(unavailable, CodexActivityView::unavailable());
+                assert_uncached(&collector);
+                policy.store(3, Ordering::SeqCst);
+                let recovered = collector.collect_with(
+                    false,
+                    attempted,
+                    Instant::now() + Duration::from_secs(5),
+                    || admission(&policy),
+                    |_| Ok(token_response(222)),
+                );
+                assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+            }
+        }
+    }
+
+    #[test]
+    fn policy_change_after_commit_discards_success_or_failure_cache() {
+        for outcome in ["success", "transport"] {
+            for next_generation in [None, Some(3)] {
+                let collector = CodexActivityCollector::default();
+                let fetched = std::sync::atomic::AtomicBool::new(false);
+                let completed_samples = AtomicUsize::new(0);
+                let now = Instant::now();
+                let unavailable = collector.collect_with(
+                    false,
+                    now,
+                    now + Duration::from_secs(5),
+                    || {
+                        if fetched.load(Ordering::SeqCst)
+                            && completed_samples.fetch_add(1, Ordering::SeqCst) > 0
+                        {
+                            next_generation
+                        } else {
+                            Some(1)
+                        }
+                    },
+                    |_| {
+                        fetched.store(true, Ordering::SeqCst);
+                        fetch_outcome(outcome)
+                    },
+                );
+                assert_eq!(unavailable, CodexActivityView::unavailable());
+                assert_eq!(completed_samples.load(Ordering::SeqCst), 2);
+                assert_uncached(&collector);
+                let recovered = collector.collect_with(
+                    false,
+                    now,
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(3),
+                    |_| Ok(token_response(222)),
+                );
+                assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+            }
+        }
+    }
+
+    #[test]
+    fn typed_policy_cancellation_including_context_is_not_cached_as_failure() {
+        for seed_cache in [false, true] {
+            for with_context in [false, true] {
+                let collector = CodexActivityCollector::default();
+                let now = Instant::now();
+                if seed_cache {
+                    collector.collect_with(
+                        false,
+                        now,
+                        now + Duration::from_secs(5),
+                        || Some(1),
+                        |_| Ok(token_response(111)),
+                    );
+                }
+                let attempted = now + FORCE_COALESCE;
+                let unavailable = collector.collect_with(
+                    true,
+                    attempted,
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(1),
+                    |_| {
+                        let error = anyhow::Error::new(collector::CollectionPolicyCancelled);
+                        Err(if with_context {
+                            error.context("account usage request cancelled")
+                        } else {
+                            error
+                        })
+                    },
+                );
+                assert_eq!(unavailable, CodexActivityView::unavailable());
+                assert_uncached(&collector);
+                let recovered = collector.collect_with(
+                    false,
+                    attempted,
+                    Instant::now() + Duration::from_secs(5),
+                    || Some(1),
+                    |_| Ok(token_response(222)),
+                );
+                assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
+            }
+        }
+    }
+
+    #[test]
+    fn expired_deadline_remains_a_same_epoch_unavailable_cache_without_dispatch() {
+        let collector = CodexActivityCollector::default();
+        let now = Instant::now();
+        let unavailable = collector.collect_with(
+            false,
+            now,
+            now,
+            || Some(1),
+            |_| panic!("expired deadline must not dispatch"),
+        );
+        assert_eq!(unavailable, CodexActivityView::unavailable());
+        let cached = collector.collect_with(
+            false,
+            now + Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+            || Some(1),
+            |_| panic!("deadline failure must keep existing freshness semantics"),
+        );
+        assert_eq!(cached, unavailable);
+        let recovered = collector.collect_with(
+            true,
+            now + FORCE_COALESCE,
+            Instant::now() + Duration::from_secs(5),
+            || Some(1),
+            |_| Ok(token_response(222)),
+        );
+        assert_eq!(recovered.days.get("2026-08-25"), Some(&222));
     }
 
     #[test]

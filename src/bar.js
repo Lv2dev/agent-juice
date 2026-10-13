@@ -5,6 +5,7 @@ import { createTextScaleState, fittedRingNumberSize, TEXT_SCALE_EVENT } from "./
 import { applyTranslations } from "./i18n.js";
 import { applyTheme } from "./theme.js";
 import { createSettingsAuthority } from "./settings-revision.js";
+import { createStatusRequests } from "./status-requests.js";
 
 let settings = { ...DEFAULT_SETTINGS };
 let statuses = [];
@@ -21,6 +22,18 @@ const activeUnlisteners = new Set();
 const LISTENER_RETRY_DELAYS_MS = [0, 100, 250];
 const LISTENER_REGISTRATION_TIMEOUT_MS = 500;
 const STARTUP_STATUS_TIMEOUT_MS = 20_000;
+const statusRequests = createStatusRequests({
+  invoke,
+  getStatusGeneration: () => statusEventGeneration,
+  getHealthGeneration: () => collectionHealthEventGeneration,
+  statusTimeoutMs: STARTUP_STATUS_TIMEOUT_MS,
+  acceptStatus: loaded => {
+    statuses = Array.isArray(loaded) ? loaded : [];
+    startupStatusLoading = false;
+    renderBar();
+  },
+  acceptHealth: health => { collectionHealth = health && typeof health === "object" ? health : {}; },
+});
 const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
 const CONTENT_WIDTH_RETRY_DELAY_MS = 250;
 const CONTENT_WIDTH_MAX_RETRIES = 20;
@@ -45,6 +58,9 @@ const MENU_WIDTH = 88;
 const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
 const MENU_CLOSE_GRACE_MS = 120;
+const MENU_CLOSE_RETRY_DELAY_MS = 250;
+const MENU_CLOSE_MAX_RETRIES = 3;
+const MENU_CLOSE_RECOVERY_DELAY_MS = 5_000;
 const REFRESH_MENU_OPENED_EVENT = "bar-refresh-menu-opened";
 const MENU_STATES = Object.freeze({
   CLOSED: "closed",
@@ -53,6 +69,9 @@ const MENU_STATES = Object.freeze({
   CLOSING: "closing",
 });
 let refreshMenuCloseTimer = null;
+let refreshMenuRecoveryTimer = null;
+let refreshMenuCloseInFlight = null;
+let refreshMenuRecoveryAt = 0;
 let refreshMenuState = MENU_STATES.CLOSED;
 let refreshMenuRequest = 0;
 let refreshMenuDesiredOpen = false;
@@ -99,6 +118,7 @@ function tauriApi() {
 }
 
 async function invoke(command, args) {
+  if (listenersDisposed) return null;
   const fn = tauriApi().core?.invoke;
   if (!fn) return null;
   return fn(command, args);
@@ -108,24 +128,8 @@ function acceptSettingsSnapshot(snapshot) {
   return settingsAuthority.accept(snapshot);
 }
 
-function withTimeout(promise, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("status request timed out")), timeoutMs);
-    timer?.unref?.();
-    Promise.resolve(promise).then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
 function refreshTaskbarStatus() {
+  if (listenersDisposed) return Promise.resolve();
   if (refreshStatusInFlight) return refreshStatusInFlight;
   const request = invoke("refresh_status")
     .catch(() => {
@@ -139,6 +143,7 @@ function refreshTaskbarStatus() {
 }
 
 function emitSafely(eventName, payload) {
+  if (listenersDisposed) return;
   const emit = tauriApi().event?.emit;
   if (!emit) return;
   try {
@@ -164,7 +169,7 @@ function clampMenuPosition(value, size, max) {
 }
 
 async function showRefreshMenu(event) {
-  if (!currentBarIsVisible()) return;
+  if (listenersDisposed || !currentBarIsVisible()) return;
   const menu = refreshMenu();
   if (!menu) {
     void refreshTaskbarStatus();
@@ -172,6 +177,7 @@ async function showRefreshMenu(event) {
   }
 
   cancelRefreshMenuClose();
+  cancelRefreshMenuRecovery();
   const request = ++refreshMenuRequest;
   refreshMenuDesiredOpen = true;
   menu.hidden = true;
@@ -179,6 +185,7 @@ async function showRefreshMenu(event) {
 
   try {
     const nativeOpened = await setNativeMenuOpen(true);
+    if (listenersDisposed) return;
     if (!nativeOpened) throw new Error("native menu state is unavailable");
     if (!currentBarIsVisible()) {
       hideRefreshMenu();
@@ -188,12 +195,7 @@ async function showRefreshMenu(event) {
     if (request !== refreshMenuRequest || refreshMenuState !== MENU_STATES.OPENING) {
       if (!refreshMenuDesiredOpen) {
         setRefreshMenuState(MENU_STATES.CLOSING);
-        await setNativeMenuOpen(false).catch(() => false);
-        if (!refreshMenuDesiredOpen) {
-          setRefreshMenuState(MENU_STATES.CLOSED);
-          syncNativeTooltip();
-          scheduleTaskbarContentWidthSync();
-        }
+        await closeRefreshMenu(refreshMenuRequest);
       }
       return;
     }
@@ -206,18 +208,18 @@ async function showRefreshMenu(event) {
     setRefreshMenuState(MENU_STATES.OPEN);
     emitSafely(REFRESH_MENU_OPENED_EVENT, { tool: CURRENT_TOOL ?? "all" });
   } catch {
-    if (request !== refreshMenuRequest) return;
+    if (listenersDisposed || request !== refreshMenuRequest) return;
     refreshMenuDesiredOpen = false;
     menu.hidden = true;
-    await setNativeMenuOpen(false).catch(() => false);
-    setRefreshMenuState(MENU_STATES.CLOSED);
-    syncNativeTooltip();
-    scheduleTaskbarContentWidthSync();
+    setRefreshMenuState(MENU_STATES.CLOSING);
+    await closeRefreshMenu(request);
   }
 }
 
 function hideRefreshMenu() {
+  if (listenersDisposed) return;
   cancelRefreshMenuClose();
+  cancelRefreshMenuRecovery();
   const menu = refreshMenu();
   if (menu) menu.hidden = true;
   const shouldCloseNative = refreshMenuState !== MENU_STATES.CLOSED;
@@ -225,17 +227,54 @@ function hideRefreshMenu() {
   refreshMenuDesiredOpen = false;
   if (shouldCloseNative) {
     setRefreshMenuState(MENU_STATES.CLOSING);
-    void setNativeMenuOpen(false)
-      .then(() => {
-        if (request !== refreshMenuRequest || refreshMenuDesiredOpen) return;
-        setRefreshMenuState(MENU_STATES.CLOSED);
-        syncNativeTooltip();
-        scheduleTaskbarContentWidthSync();
-      })
-      .catch(() => {});
+    void closeRefreshMenu(request);
   } else {
     setRefreshMenuState(MENU_STATES.CLOSED);
     scheduleTaskbarContentWidthSync();
+  }
+}
+
+function cancelRefreshMenuRecovery() {
+  if (refreshMenuRecoveryTimer != null) clearTimeout(refreshMenuRecoveryTimer);
+  refreshMenuRecoveryTimer = null;
+  refreshMenuRecoveryAt = 0;
+}
+
+async function closeRefreshMenu(request, retries = MENU_CLOSE_MAX_RETRIES) {
+  const current = () => !listenersDisposed && request === refreshMenuRequest && !refreshMenuDesiredOpen;
+  if (!current() || refreshMenuCloseInFlight === request) return;
+  refreshMenuCloseInFlight = request;
+  try {
+    const closed = await setNativeMenuOpen(false);
+    if (!current()) return;
+    if (!closed) throw new Error("native menu state is unavailable");
+    cancelRefreshMenuRecovery();
+    setRefreshMenuState(MENU_STATES.CLOSED);
+    syncNativeTooltip();
+    scheduleTaskbarContentWidthSync();
+  } catch {
+    if (!current()) return;
+    // Keep native ownership truthful until a close is acknowledged.
+    const delay = retries > 0 ? MENU_CLOSE_RETRY_DELAY_MS : MENU_CLOSE_RECOVERY_DELAY_MS;
+    refreshMenuRecoveryAt = Date.now() + delay;
+    if (retries > 0) {
+      const timer = setTimeout(() => {
+        if (!current() || refreshMenuRecoveryTimer !== timer) return;
+        refreshMenuRecoveryTimer = null;
+        void closeRefreshMenu(request, retries - 1);
+      }, delay);
+      refreshMenuRecoveryTimer = timer;
+      refreshMenuRecoveryTimer?.unref?.();
+    }
+  } finally {
+    if (refreshMenuCloseInFlight === request) refreshMenuCloseInFlight = null;
+  }
+}
+
+function retryRefreshMenuClose() {
+  if (!listenersDisposed && refreshMenuState === MENU_STATES.CLOSING && !refreshMenuDesiredOpen
+      && refreshMenuRecoveryTimer == null && Date.now() >= refreshMenuRecoveryAt) {
+    void closeRefreshMenu(refreshMenuRequest);
   }
 }
 
@@ -246,7 +285,7 @@ function setRefreshMenuState(state) {
 }
 
 async function setNativeMenuOpen(open) {
-  if (!CURRENT_TOOL || !tauriApi().core?.invoke) return false;
+  if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return false;
   await invoke("set_taskbar_menu_open", { tool: CURRENT_TOOL, open });
   return true;
 }
@@ -258,6 +297,7 @@ function cancelRefreshMenuClose() {
 }
 
 function scheduleRefreshMenuClose() {
+  if (listenersDisposed) return;
   cancelRefreshMenuClose();
   refreshMenuCloseTimer = setTimeout(() => {
     refreshMenuCloseTimer = null;
@@ -544,6 +584,8 @@ let currentBarView = null;
 const systemTextScale = createTextScaleState(() => renderBar());
 
 function renderBar() {
+  if (listenersDisposed) return;
+  retryRefreshMenuClose();
   const root = document.querySelector("#bar");
   if (!root) return;
 
@@ -648,10 +690,11 @@ function setDragging(payload) {
 }
 
 async function loadSettings() {
+  if (listenersDisposed) return;
   const requestGeneration = settingsEventGeneration;
   try {
     const loaded = await invoke("get_settings");
-    if (settingsEventGeneration !== requestGeneration) return;
+    if (listenersDisposed || settingsEventGeneration !== requestGeneration) return;
     if (acceptSettingsSnapshot(loaded)) {
       settings = { ...DEFAULT_SETTINGS, ...loaded };
       applyTheme(settings);
@@ -659,7 +702,7 @@ async function loadSettings() {
       applyTranslations(settings);
     }
   } catch {
-    if (settingsEventGeneration !== requestGeneration || settingsAuthority.current !== null) return;
+    if (listenersDisposed || settingsEventGeneration !== requestGeneration || settingsAuthority.current !== null) return;
     settings = { ...DEFAULT_SETTINGS };
     applyTheme(settings);
     applyFont(settings);
@@ -668,6 +711,7 @@ async function loadSettings() {
 }
 
 async function loadTaskbarOrientation() {
+  if (listenersDisposed) return;
   const root = document.querySelector("#bar");
   if (!root) return;
 
@@ -679,11 +723,11 @@ async function loadTaskbarOrientation() {
 
   try {
     const orientation = await invoke("get_taskbar_orientation", { tool: CURRENT_TOOL });
-    if (taskbarOrientationRequest !== requestGeneration) return;
+    if (listenersDisposed || taskbarOrientationRequest !== requestGeneration) return;
     root.dataset.taskbarOrientation = orientation === "vertical" ? "vertical" : "horizontal";
     scheduleTaskbarContentWidthSync();
   } catch {
-    if (taskbarOrientationRequest !== requestGeneration) return;
+    if (listenersDisposed || taskbarOrientationRequest !== requestGeneration) return;
     root.dataset.taskbarOrientation = "horizontal";
     scheduleTaskbarContentWidthSync();
   }
@@ -692,6 +736,7 @@ async function loadTaskbarOrientation() {
 function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
+    if (listenersDisposed) return;
     void systemTextScale.load(invoke);
     void loadSettings().then(renderBar);
     void loadStatus();
@@ -711,7 +756,16 @@ function unlistenSafely(unlisten) {
 
 function cleanupListeners() {
   if (listenersDisposed) return;
+  if (refreshMenuState !== MENU_STATES.CLOSED) hideRefreshMenu();
   listenersDisposed = true;
+  statusRequests.dispose();
+  cancelRefreshMenuClose();
+  cancelRefreshMenuRecovery();
+  refreshMenuRequest += 1;
+  refreshMenuDesiredOpen = false;
+  refreshMenuState = MENU_STATES.CLOSED;
+  const menu = refreshMenu();
+  if (menu) menu.hidden = true;
   stopTooltipClock();
   systemTextScale.dispose();
   listenerLifecycleGeneration += 1;
@@ -766,11 +820,12 @@ function registerListenerAttempt(listen, eventName, handler) {
 }
 
 async function listenWithRetry(listen, eventName, handler) {
+  const activeHandler = event => { if (!listenersDisposed) handler(event); };
   for (const delay of LISTENER_RETRY_DELAYS_MS) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     if (listenersDisposed) return false;
     try {
-      const unlisten = await registerListenerAttempt(listen, eventName, handler);
+      const unlisten = await registerListenerAttempt(listen, eventName, activeHandler);
       if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
       return true;
     } catch {
@@ -835,27 +890,7 @@ function bindEvents() {
 }
 
 async function loadStatus() {
-  const requestGeneration = statusEventGeneration;
-  const healthRequestGeneration = collectionHealthEventGeneration;
-  try {
-    const loaded =
-      (await withTimeout(invoke("get_status"), STARTUP_STATUS_TIMEOUT_MS)) || [];
-    try {
-      const health = await invoke("get_collection_health");
-      if (collectionHealthEventGeneration === healthRequestGeneration) {
-        collectionHealth = health && typeof health === "object" ? health : {};
-      }
-    } catch {
-      // Health is supplemental; keep rendering the last valid usage snapshot.
-    }
-    if (statusEventGeneration !== requestGeneration) return;
-    statuses = loaded;
-  } catch {
-    if (statusEventGeneration !== requestGeneration) return;
-    statuses = [];
-  }
-  startupStatusLoading = false;
-  renderBar();
+  return statusRequests.load();
 }
 
 async function bootstrap() {

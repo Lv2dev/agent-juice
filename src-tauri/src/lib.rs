@@ -283,6 +283,7 @@ fn spawn_single_instance_listener(app: tauri::AppHandle, event: single_instance:
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CollectionErrorKind {
+    PolicyCancelled,
     Deadline,
     Transport,
     Parse,
@@ -319,6 +320,7 @@ struct CollectionHealthSnapshot {
 
 #[derive(Clone)]
 struct CachedStatusAttempt {
+    generation: u64,
     attempted_at: DateTime<Utc>,
     last_good: Option<AgentStatus>,
     error: Option<CollectionErrorKind>,
@@ -501,8 +503,13 @@ static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static CURSOR_ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static CURSOR_ACTIVITY_GENERATION: AtomicU64 = AtomicU64::new(0);
-static LAST_LOCAL_ACTIVITY: Lazy<Mutex<Option<activity::ActivitySnapshot>>> =
-    Lazy::new(|| Mutex::new(None));
+#[derive(Clone)]
+struct CollectedActivity {
+    snapshot: activity::ActivitySnapshot,
+    codex_generation: Option<u64>,
+}
+
+static LAST_LOCAL_ACTIVITY: Lazy<Mutex<Option<CollectedActivity>>> = Lazy::new(|| Mutex::new(None));
 
 struct ForceRefreshGuard;
 
@@ -960,16 +967,18 @@ async fn collect_representatives_off_thread(settings: Settings, force: bool) -> 
 async fn collect_activity_off_thread(
     settings: Settings,
     force_codex: bool,
-) -> Result<activity::ActivitySnapshot, String> {
+) -> Result<CollectedActivity, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (local, codex) = std::thread::scope(|scope| {
             let codex_worker = settings.show_codex.then(|| {
                 scope.spawn(|| {
-                    codex_activity::collect(
+                    let generation = collector::codex_collection_generation();
+                    let view = codex_activity::collect(
                         force_codex,
                         std::time::Instant::now()
                             + std::time::Duration::from_secs(CODEX_ACTIVITY_TIMEOUT_SECS),
-                    )
+                    );
+                    (generation, view)
                 })
             });
             let local = activity::refresh(settings.show_claude, settings.show_grok);
@@ -977,7 +986,22 @@ async fn collect_activity_off_thread(
             (local, codex)
         });
         let local = local?;
-        let local = activity::merge_codex_activity(local, codex.as_ref(), settings.show_codex);
+        let generation = codex.as_ref().and_then(|(generation, _)| *generation);
+        let codex = codex
+            .as_ref()
+            .filter(|(generation, _)| {
+                generation.is_some() && *generation == collector::codex_collection_generation()
+            })
+            .map(|(_, view)| view);
+        let local = activity::merge_codex_activity(local, codex, settings.show_codex);
+        let local = CollectedActivity {
+            snapshot: local,
+            codex_generation: generation,
+        };
+        let local = CollectedActivity {
+            snapshot: current_activity_snapshot(&local, settings.show_codex),
+            ..local
+        };
         *LAST_LOCAL_ACTIVITY
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(local.clone());
@@ -991,18 +1015,49 @@ async fn collect_activity_off_thread(
         } else {
             None
         };
-        Ok(activity::merge_cursor_activity(
-            local,
-            cursor.as_ref(),
-            settings.show_cursor,
-        ))
+        let snapshot =
+            activity::merge_cursor_activity(local.snapshot, cursor.as_ref(), settings.show_cursor);
+        Ok(CollectedActivity {
+            snapshot,
+            codex_generation: generation,
+        })
     })
     .await
     .map_err(|err| format!("activity collection task failed: {err}"))?
     .map_err(|err: anyhow::Error| err.to_string())
 }
 
+fn current_activity_snapshot(
+    result: &CollectedActivity,
+    codex_enabled: bool,
+) -> activity::ActivitySnapshot {
+    current_activity_snapshot_with_policy(
+        result,
+        codex_enabled,
+        collector::codex_collection_generation,
+    )
+}
+
+fn current_activity_snapshot_with_policy(
+    result: &CollectedActivity,
+    codex_enabled: bool,
+    current_generation: impl Fn() -> Option<u64>,
+) -> activity::ActivitySnapshot {
+    let snapshot = result.snapshot.clone();
+    if codex_enabled
+        && result.codex_generation.is_some()
+        && result.codex_generation == current_generation()
+    {
+        snapshot
+    } else {
+        activity::merge_codex_activity(snapshot, None, codex_enabled)
+    }
+}
+
 fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings, force_codex: bool) {
+    if !force_codex && !automatic_collection_allowed(&app) {
+        return;
+    }
     let Some(guard) = try_begin_activity_refresh() else {
         return;
     };
@@ -1010,11 +1065,20 @@ fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings, force_codex
         let _guard = guard;
         let started = std::time::Instant::now();
         for pass in 0..ACTIVITY_BACKFILL_MAX_PASSES {
+            if !force_codex && !automatic_collection_allowed(&app) {
+                break;
+            }
             match collect_activity_off_thread(settings.clone(), force_codex && pass == 0).await {
                 Ok(snapshot) => {
-                    let backfill_pending = snapshot.local_backfill_pending;
+                    let backfill_pending = snapshot.snapshot.local_backfill_pending;
                     if !CURSOR_ACTIVITY_REFRESH_IN_FLIGHT.load(Ordering::Acquire) {
-                        let _ = app.emit("activity-updated", snapshot);
+                        let _ = with_taskbar_settings_read(|_| {
+                            let settings = Settings::try_load()?;
+                            let snapshot =
+                                current_activity_snapshot(&snapshot, settings.show_codex);
+                            let _ = app.emit("activity-updated", snapshot);
+                            Ok(())
+                        });
                     }
                     if !backfill_pending {
                         break;
@@ -1036,22 +1100,32 @@ fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings, force_codex
 }
 
 fn spawn_cursor_activity_refresh(app: tauri::AppHandle, settings: Settings, force: bool) {
-    if !settings.show_cursor {
+    if !settings.show_cursor || (!force && !automatic_collection_allowed(&app)) {
         return;
     }
+    let Some((settings, settings_generation)) = current_cursor_activity_request(Settings::try_load)
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
     let Some((guard, generation)) = try_begin_cursor_activity_refresh() else {
         return;
     };
-    let settings_generation = TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire);
     tauri::async_runtime::spawn(async move {
         let _guard = guard;
         let weeks = settings.activity_weeks;
+        let activity_monitor = app
+            .try_state::<system_activity::SystemActivityMonitor>()
+            .map(|monitor| monitor.inner().clone());
         let result = tauri::async_runtime::spawn_blocking(move || {
             let started = std::time::Instant::now();
             let mut force_current = force;
             let mut latest = None;
             for _ in 0..CURSOR_ACTIVITY_MAX_PASSES {
-                if started.elapsed() >= std::time::Duration::from_secs(CURSOR_ACTIVITY_MAX_SECS) {
+                if (!force && !system_activity_allows_automatic(activity_monitor.as_ref()))
+                    || started.elapsed() >= std::time::Duration::from_secs(CURSOR_ACTIVITY_MAX_SECS)
+                {
                     break;
                 }
                 let deadline = std::time::Instant::now()
@@ -1064,6 +1138,8 @@ fn spawn_cursor_activity_refresh(app: tauri::AppHandle, settings: Settings, forc
                     || {
                         TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == settings_generation
                             && CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) == generation
+                            && (force
+                                || system_activity_allows_automatic(activity_monitor.as_ref()))
                     },
                 )?;
                 force_current = false;
@@ -1126,20 +1202,48 @@ fn spawn_cursor_activity_refresh(app: tauri::AppHandle, settings: Settings, forc
                 None
             }
         };
-        let mut snapshot =
-            activity::merge_cursor_activity(local, cursor.as_ref(), current_settings.show_cursor);
+        let mut snapshot = activity::merge_cursor_activity(
+            current_activity_snapshot(&local, current_settings.show_codex),
+            cursor.as_ref(),
+            current_settings.show_cursor,
+        );
         if cursor.is_none() {
             snapshot.cursor_partial = true;
             snapshot.cursor_backfill_pending = false;
-            snapshot.partial = snapshot.local_partial || snapshot.cursor_partial;
-            snapshot.backfill_pending = snapshot.local_backfill_pending;
+            snapshot.partial =
+                snapshot.local_partial || snapshot.codex_partial || snapshot.cursor_partial;
+            snapshot.backfill_pending =
+                snapshot.local_backfill_pending || snapshot.codex_backfill_pending;
         }
-        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == settings_generation
-            && CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) == generation
-        {
+        let _ = with_taskbar_settings_read(|current_generation| {
+            if current_generation != settings_generation
+                || CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) != generation
+            {
+                return Ok(());
+            }
+            let settings = Settings::try_load()?;
+            let result = CollectedActivity {
+                snapshot,
+                codex_generation: local.codex_generation,
+            };
+            let snapshot = current_activity_snapshot(&result, settings.show_codex);
             let _ = app.emit("activity-updated", snapshot);
-        }
+            Ok(())
+        });
     });
+}
+
+fn current_cursor_activity_request(
+    load_settings: impl FnOnce() -> anyhow::Result<Settings>,
+) -> anyhow::Result<Option<(Settings, u64)>> {
+    with_taskbar_settings_read(|generation| {
+        let settings = load_settings()?;
+        anyhow::ensure!(
+            TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation,
+            "settings changed while scheduling activity"
+        );
+        Ok(settings.show_cursor.then_some((settings, generation)))
+    })
 }
 
 async fn collect_representatives_off_thread_with_options(
@@ -1274,7 +1378,9 @@ fn collect_representatives_with_options_and_late_app(
                         Settings::try_load,
                         combined_collection_last_result,
                         &CURSOR_USAGE_CACHE,
-                        |snapshot| emit_validated_collection_snapshot(&app, &snapshot),
+                        |snapshot, settings| {
+                            emit_validated_collection_snapshot(&app, &snapshot, settings)
+                        },
                     );
                 });
             })
@@ -1339,7 +1445,7 @@ fn collect_representatives_with_options_and_late_app(
                 Settings::try_load,
                 combined_collection_last_result,
                 &CURSOR_USAGE_CACHE,
-                |snapshot| emit_validated_collection_snapshot(&app, &snapshot),
+                |snapshot, settings| emit_validated_collection_snapshot(&app, &snapshot, settings),
             );
         }
     }
@@ -1478,7 +1584,7 @@ fn publish_late_cursor_result(
     load_current_settings: impl FnOnce() -> anyhow::Result<Settings>,
     current_snapshot: impl FnOnce() -> Vec<AgentStatus>,
     cursor_cache: &Mutex<Option<CursorCachedStatusAttempt>>,
-    publish: impl FnOnce(Vec<AgentStatus>),
+    publish: impl FnOnce(Vec<AgentStatus>, &Settings),
 ) -> anyhow::Result<()> {
     if !result.attempted {
         return Ok(());
@@ -1494,7 +1600,7 @@ fn publish_late_cursor_result(
         let snapshot = filter_current_cursor_samples(snapshot, cursor_cache);
         let snapshot = filter_enabled_statuses(latest_per_tool(&snapshot), &settings);
         if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation {
-            publish(snapshot);
+            publish(snapshot, &settings);
         }
         Ok(())
     })
@@ -1799,8 +1905,36 @@ fn cached_status_attempt(
     force: bool,
     collect: impl FnOnce() -> Result<AgentStatus, CollectionErrorKind>,
 ) -> Option<AgentStatus> {
+    cached_status_attempt_with_policy(
+        cache,
+        now,
+        minimum_interval_secs,
+        force,
+        || Some(0),
+        collect,
+    )
+}
+
+fn cached_status_attempt_with_policy(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    now: DateTime<Utc>,
+    minimum_interval_secs: i64,
+    force: bool,
+    current_generation: impl Fn() -> Option<u64>,
+    collect: impl FnOnce() -> Result<AgentStatus, CollectionErrorKind>,
+) -> Option<AgentStatus> {
+    let generation = current_generation()?;
     {
-        let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+        let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+        if current_generation() != Some(generation) {
+            return None;
+        }
+        if cache
+            .as_ref()
+            .is_some_and(|cached| cached.generation != generation)
+        {
+            *cache = None;
+        }
         if let Some(cached) = cache.as_ref() {
             let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
             let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
@@ -1809,7 +1943,12 @@ fn cached_status_attempt(
                 && now >= cached.attempted_at
                 && (retry_backoff_active || success_cache_fresh)
             {
-                return cached.last_good.clone();
+                let status = cached.last_good.clone();
+                return if current_generation() == Some(generation) {
+                    status
+                } else {
+                    None
+                };
             }
         }
     }
@@ -1826,7 +1965,23 @@ fn cached_status_attempt(
         .is_some_and(|cached| cached.error == Some(CollectionErrorKind::LoginRequired));
     drop(cache_guard);
 
+    if current_generation() != Some(generation) {
+        return None;
+    }
     let outcome = collect();
+    let mut cache_guard = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if current_generation() != Some(generation) {
+        return None;
+    }
+    if matches!(&outcome, Err(CollectionErrorKind::PolicyCancelled)) {
+        if cache_guard
+            .as_ref()
+            .is_some_and(|cached| cached.generation == generation)
+        {
+            *cache_guard = None;
+        }
+        return None;
+    }
     let (last_good, error, consecutive_failures, retry_secs) = match outcome {
         Ok(status) => (Some(status), None, 0, minimum_interval_secs.max(1)),
         Err(error) => {
@@ -1852,14 +2007,18 @@ fn cached_status_attempt(
         }
     };
     let retry_at = now + chrono::Duration::seconds(retry_secs);
-    let mut cache_guard = cache.lock().unwrap_or_else(|err| err.into_inner());
     *cache_guard = Some(CachedStatusAttempt {
+        generation,
         attempted_at: now,
         last_good: last_good.clone(),
         error,
         retry_at,
         consecutive_failures,
     });
+    if current_generation() != Some(generation) {
+        *cache_guard = None;
+        return None;
+    }
     last_good
 }
 
@@ -1888,6 +2047,9 @@ fn collection_retry_delay_secs(
 }
 
 fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
+    if error.is::<collector::CollectionPolicyCancelled>() {
+        return CollectionErrorKind::PolicyCancelled;
+    }
     if error.is::<collector::ClaudeUsageRateLimited>() {
         return CollectionErrorKind::RateLimited;
     }
@@ -1914,10 +2076,26 @@ fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
 }
 
 fn cached_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> CollectionHealth {
+    cached_collection_health_for_policy(cache, Some(0))
+}
+
+fn cached_collection_health_for_policy(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    generation: Option<u64>,
+) -> CollectionHealth {
     let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if generation.is_none()
+        || cache
+            .as_ref()
+            .is_some_and(|cached| Some(cached.generation) != generation)
+    {
+        return CollectionHealth::Unavailable;
+    }
     match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
         Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
-        Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(CollectionErrorKind::Unavailable | CollectionErrorKind::PolicyCancelled) => {
+            CollectionHealth::Unavailable
+        }
         Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
         Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
         Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
@@ -1943,7 +2121,9 @@ fn cursor_collection_health() -> CollectionHealth {
         .unwrap_or_else(|err| err.into_inner());
     match cache.as_ref().and_then(|attempt| attempt.error.as_ref()) {
         Some(CollectionErrorKind::LoginRequired) => CollectionHealth::LoginRequired,
-        Some(CollectionErrorKind::Unavailable) => CollectionHealth::Unavailable,
+        Some(CollectionErrorKind::Unavailable | CollectionErrorKind::PolicyCancelled) => {
+            CollectionHealth::Unavailable
+        }
         Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
         Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
         Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
@@ -1964,22 +2144,46 @@ fn cursor_collection_health() -> CollectionHealth {
 }
 
 fn collection_health_snapshot() -> CollectionHealthSnapshot {
+    antigravity::with_current_snapshot(|status, error| {
+        collection_health_snapshot_with_antigravity(antigravity_collection_health(
+            status.is_some(),
+            error,
+        ))
+    })
+}
+
+fn antigravity_collection_health(
+    has_status: bool,
+    error: Option<antigravity::Error>,
+) -> CollectionHealth {
+    match error {
+        Some(antigravity::Error::AppRequired) => CollectionHealth::AppRequired,
+        Some(antigravity::Error::LoginRequired | antigravity::Error::CliLoginRequired) => {
+            CollectionHealth::LoginRequired
+        }
+        Some(antigravity::Error::Unavailable | antigravity::Error::CliUnavailable) => {
+            CollectionHealth::TransientError
+        }
+        None if has_status => CollectionHealth::Ready,
+        None => CollectionHealth::Unavailable,
+    }
+}
+
+fn collection_health_snapshot_with_antigravity(
+    antigravity: CollectionHealth,
+) -> CollectionHealthSnapshot {
     CollectionHealthSnapshot {
         claude: claude_collection_health(&CLAUDE_USAGE_CACHE),
-        codex: cached_collection_health(&CODEX_ACCOUNT_CACHE),
-        grok: cached_collection_health(&GROK_BILLING_CACHE),
+        codex: cached_collection_health_for_policy(
+            &CODEX_ACCOUNT_CACHE,
+            collector::codex_collection_generation(),
+        ),
+        grok: cached_collection_health_for_policy(
+            &GROK_BILLING_CACHE,
+            collector::grok_collection_generation(),
+        ),
         cursor: cursor_collection_health(),
-        antigravity: match antigravity::last_error() {
-            Some(antigravity::Error::AppRequired) => CollectionHealth::AppRequired,
-            Some(antigravity::Error::LoginRequired | antigravity::Error::CliLoginRequired) => {
-                CollectionHealth::LoginRequired
-            }
-            Some(antigravity::Error::Unavailable | antigravity::Error::CliUnavailable) => {
-                CollectionHealth::TransientError
-            }
-            None if antigravity::cached().is_some() => CollectionHealth::Ready,
-            None => CollectionHealth::Unavailable,
-        },
+        antigravity,
     }
 }
 
@@ -2003,17 +2207,21 @@ fn consume_current_collection_snapshot<T>(
     load_current_settings: impl FnOnce() -> anyhow::Result<Settings>,
     current_snapshot: impl FnOnce() -> Vec<AgentStatus>,
     cursor_cache: &Mutex<Option<CursorCachedStatusAttempt>>,
-    consume: impl FnOnce(Vec<AgentStatus>) -> T,
+    consume: impl FnOnce(Vec<AgentStatus>, Option<antigravity::Error>) -> T,
 ) -> anyhow::Result<T> {
     with_taskbar_settings_read(|generation| {
         let settings = load_current_settings()?;
         let snapshot = filter_current_cursor_samples(current_snapshot(), cursor_cache);
+        let snapshot = filter_current_broker_samples(snapshot);
         let snapshot = filter_enabled_statuses(latest_per_tool(&snapshot), &settings);
         anyhow::ensure!(
             TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation,
             "settings changed while publishing collection"
         );
-        Ok(consume(snapshot))
+        Ok(antigravity::with_current_snapshot(|current, error| {
+            let snapshot = replace_antigravity_sample(snapshot, current, settings.show_antigravity);
+            consume(snapshot, error)
+        }))
     })
 }
 
@@ -2022,7 +2230,7 @@ fn current_collection_snapshot() -> anyhow::Result<Vec<AgentStatus>> {
         Settings::try_load,
         combined_collection_last_result,
         &CURSOR_USAGE_CACHE,
-        |snapshot| snapshot,
+        |snapshot, _| snapshot,
     )
 }
 
@@ -2031,14 +2239,112 @@ fn emit_collection_snapshot(app: &tauri::AppHandle) {
         Settings::try_load,
         combined_collection_last_result,
         &CURSOR_USAGE_CACHE,
-        |snapshot| emit_validated_collection_snapshot(app, &snapshot),
+        |snapshot, error| emit_collection_snapshot_with_antigravity(app, &snapshot, error),
     );
 }
 
-fn emit_validated_collection_snapshot(app: &tauri::AppHandle, statuses: &[AgentStatus]) {
+fn emit_validated_collection_snapshot(
+    app: &tauri::AppHandle,
+    statuses: &[AgentStatus],
+    settings: &Settings,
+) {
     let statuses = filter_current_cursor_samples(statuses.to_vec(), &CURSOR_USAGE_CACHE);
-    let _ = app.emit("collection-health-updated", collection_health_snapshot());
-    let _ = app.emit("status-updated", &statuses);
+    let statuses = filter_current_broker_samples(statuses);
+    antigravity::with_current_snapshot(|current, error| {
+        let statuses = replace_antigravity_sample(statuses, current, settings.show_antigravity);
+        emit_collection_snapshot_with_antigravity(app, &statuses, error);
+    });
+}
+
+fn replace_antigravity_sample(
+    mut statuses: Vec<AgentStatus>,
+    current: Option<AgentStatus>,
+    enabled: bool,
+) -> Vec<AgentStatus> {
+    statuses.retain(|status| status.tool != Tool::Antigravity);
+    if enabled {
+        statuses.extend(current);
+    }
+    statuses
+}
+
+fn filter_current_broker_samples(mut statuses: Vec<AgentStatus>) -> Vec<AgentStatus> {
+    statuses.retain(|status| match (&status.tool, status.session_id.as_str()) {
+        (Tool::Codex, "app-server-account") => codex_account_sample_is_current(
+            status,
+            &CODEX_ACCOUNT_CACHE,
+            collector::codex_collection_generation,
+        ),
+        (Tool::Codex, _) if !status.approx => codex_account_sample_is_current(
+            status,
+            &CODEX_ACCOUNT_CACHE,
+            collector::codex_collection_generation,
+        ),
+        (Tool::Grok, "grok-acp-billing") => broker_sample_is_current(
+            status,
+            &GROK_BILLING_CACHE,
+            collector::grok_collection_generation,
+        ),
+        _ => true,
+    });
+    statuses
+}
+
+fn codex_account_sample_is_current(
+    status: &AgentStatus,
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    current_generation: impl Fn() -> Option<u64>,
+) -> bool {
+    let cached = cache.lock().unwrap_or_else(|err| err.into_inner());
+    cached.as_ref().is_some_and(|cached| {
+        Some(cached.generation) == current_generation()
+            && cached.last_good.as_ref().is_some_and(|current| {
+                if status.session_id == "app-server-account" {
+                    let mut sample = status.clone();
+                    sample.session.active = current.session.active;
+                    sample == *current
+                } else {
+                    let mut sample = status.clone();
+                    merge_authoritative_limit(&mut sample.primary, current.primary.clone());
+                    merge_authoritative_limit(&mut sample.secondary, current.secondary.clone());
+                    sample.primary == status.primary && sample.secondary == status.secondary
+                }
+            })
+    })
+}
+
+fn broker_sample_is_current(
+    status: &AgentStatus,
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    current_generation: impl Fn() -> Option<u64>,
+) -> bool {
+    let cached = cache.lock().unwrap_or_else(|err| err.into_inner());
+    cached.as_ref().is_some_and(|cached| {
+        Some(cached.generation) == current_generation()
+            && cached.last_good.as_ref().is_some_and(|current| {
+                let mut sample = status.clone();
+                sample.session.active = current.session.active;
+                sample == *current
+            })
+    })
+}
+
+fn emit_collection_snapshot_with_antigravity(
+    app: &tauri::AppHandle,
+    statuses: &[AgentStatus],
+    error: Option<antigravity::Error>,
+) {
+    let health = antigravity_collection_health(
+        statuses
+            .iter()
+            .any(|status| status.tool == Tool::Antigravity),
+        error,
+    );
+    let _ = app.emit(
+        "collection-health-updated",
+        collection_health_snapshot_with_antigravity(health),
+    );
+    let _ = app.emit("status-updated", statuses);
 }
 
 fn remaining_refresh_budget(
@@ -2083,11 +2389,12 @@ fn collect_codex_account_status(
     deadline: std::time::Instant,
     reserve: std::time::Duration,
 ) -> Option<AgentStatus> {
-    let mut status = cached_status_attempt(
+    let mut status = cached_status_attempt_with_policy(
         &CODEX_ACCOUNT_CACHE,
         now,
         CODEX_ACCOUNT_CACHE_MIN_SECS,
         force,
+        collector::codex_collection_generation,
         || {
             let timeout = remaining_refresh_budget_with_reserve(
                 deadline,
@@ -2264,11 +2571,12 @@ fn collect_grok_billing_status(
     force: bool,
     deadline: std::time::Instant,
 ) -> Option<AgentStatus> {
-    let mut status = cached_status_attempt(
+    let mut status = cached_status_attempt_with_policy(
         &GROK_BILLING_CACHE,
         now,
         GROK_BILLING_CACHE_MIN_SECS,
         force,
+        collector::grok_collection_generation,
         || {
             let timeout = remaining_refresh_budget(
                 deadline,
@@ -5035,6 +5343,9 @@ fn try_setup_taskbar_dock(app: &tauri::App, settings: &Settings) -> anyhow::Resu
 
 #[tauri::command]
 async fn get_status(app: tauri::AppHandle) -> Result<Vec<AgentStatus>, String> {
+    if !automatic_collection_allowed(&app) {
+        return current_collection_snapshot().map_err(|err| err.to_string());
+    }
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
     collect_representatives_off_thread_with_options(
         settings,
@@ -5057,16 +5368,39 @@ fn get_collection_health() -> CollectionHealthSnapshot {
 async fn get_activity(
     window: tauri::Window,
     app: tauri::AppHandle,
-) -> Result<activity::ActivitySnapshot, String> {
+) -> Result<Option<activity::ActivitySnapshot>, String> {
     ensure_panel_command(window.label())?;
     drop(window);
+    if !automatic_collection_allowed(&app) {
+        return Ok(None);
+    }
     let settings = Settings::try_load().map_err(|err| err.to_string())?;
     let snapshot = collect_activity_off_thread(settings.clone(), false).await?;
-    if snapshot.local_backfill_pending {
+    if snapshot.snapshot.local_backfill_pending {
         spawn_activity_refresh(app.clone(), settings.clone(), false);
     }
     spawn_cursor_activity_refresh(app, settings, false);
-    Ok(snapshot)
+    with_taskbar_settings_read(|_| {
+        let settings = Settings::try_load()?;
+        Ok(Some(current_activity_snapshot(
+            &snapshot,
+            settings.show_codex,
+        )))
+    })
+    .map_err(|err| err.to_string())
+}
+
+fn system_activity_allows_automatic(
+    monitor: Option<&system_activity::SystemActivityMonitor>,
+) -> bool {
+    monitor.is_none_or(system_activity::SystemActivityMonitor::allows_automatic_collection)
+}
+
+fn automatic_collection_allowed(app: &tauri::AppHandle) -> bool {
+    system_activity_allows_automatic(
+        app.try_state::<system_activity::SystemActivityMonitor>()
+            .as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -7574,7 +7908,7 @@ fn apply_collection_policy_from_settings(
     reconcile: impl FnOnce(bool) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     apply_collection_policy_from_settings_with_retirement(tool, settings, reconcile, || {
-        antigravity::set_enabled(false);
+        antigravity::suspend_for_settings_failure();
     })
 }
 
@@ -7925,6 +8259,7 @@ pub fn run() {
             spawn_antigravity_cli_reconcile();
             let (system_activity, system_activity_shutdown) =
                 system_activity::SystemActivityMonitor::start();
+            app.manage(system_activity.clone());
             app.manage(system_activity_shutdown);
             spawn_status_loop(app.handle().clone(), system_activity);
             spawn_taskbar_drag_loop(app.handle().clone());
@@ -7954,6 +8289,27 @@ mod tests {
         render::Palette,
         taskbar,
     };
+
+    #[test]
+    fn automatic_collection_tracks_shared_system_activity_and_recovery() {
+        let (monitor, sender) = super::system_activity::SystemActivityMonitor::from_test_snapshot(
+            super::system_activity::ActivitySnapshot::default(),
+        );
+        assert!(super::system_activity_allows_automatic(Some(&monitor)));
+        sender.send_replace(super::system_activity::ActivitySnapshot {
+            active: false,
+            generation: 1,
+        });
+        assert!(!super::system_activity_allows_automatic(Some(&monitor)));
+        sender.send_replace(super::system_activity::ActivitySnapshot {
+            active: true,
+            generation: 2,
+        });
+        assert!(super::system_activity_allows_automatic(Some(&monitor)));
+        drop(sender);
+        assert!(super::system_activity_allows_automatic(Some(&monitor)));
+        assert!(super::system_activity_allows_automatic(None));
+    }
 
     #[test]
     fn settings_edits_merge_only_changed_fields_into_the_latest_profile() {
@@ -11583,12 +11939,382 @@ mod tests {
     }
 
     #[test]
+    fn policy_status_cache_recovers_without_provider_failure_backoff() {
+        use chrono::{Duration, TimeZone, Utc};
+        use std::cell::Cell;
+        use std::sync::Mutex;
+        let now = Utc.with_ymd_and_hms(2026, 10, 13, 0, 0, 0).unwrap();
+        let cache = Mutex::new(None);
+        let generation = Cell::new(Some(1));
+        let fetch = |at, force, outcome| {
+            super::cached_status_attempt_with_policy(
+                &cache,
+                at,
+                30,
+                force,
+                || generation.get(),
+                || outcome,
+            )
+        };
+        assert_eq!(
+            fetch(now, false, Ok(status_for_signature("A")))
+                .unwrap()
+                .session_id,
+            "A"
+        );
+        assert!(fetch(
+            now + Duration::seconds(31),
+            false,
+            Err(super::CollectionErrorKind::PolicyCancelled)
+        )
+        .is_none());
+        assert!(cache.lock().unwrap().is_none());
+        generation.set(Some(5));
+        assert_eq!(
+            fetch(
+                now + Duration::seconds(32),
+                false,
+                Ok(status_for_signature("B"))
+            )
+            .unwrap()
+            .session_id,
+            "B"
+        );
+        let stored = cache.lock().unwrap();
+        let stored = stored.as_ref().unwrap();
+        assert_eq!(stored.generation, 5);
+        assert_eq!(stored.consecutive_failures, 0);
+        assert!(stored.error.is_none());
+    }
+
+    #[test]
+    fn policy_status_cache_rejects_old_success_and_error_after_epoch_changes() {
+        use chrono::{Duration, TimeZone, Utc};
+        use std::cell::Cell;
+        use std::sync::Mutex;
+        let now = Utc.with_ymd_and_hms(2026, 10, 13, 0, 0, 0).unwrap();
+        for outcome in [
+            Ok(status_for_signature("old")),
+            Err(super::CollectionErrorKind::Unavailable),
+        ] {
+            let cache = Mutex::new(None);
+            let generation = Cell::new(Some(1));
+            assert!(super::cached_status_attempt_with_policy(
+                &cache,
+                now,
+                30,
+                false,
+                || generation.get(),
+                || {
+                    generation.set(Some(5));
+                    outcome
+                }
+            )
+            .is_none());
+            assert!(cache.lock().unwrap().is_none());
+            assert_eq!(
+                super::cached_status_attempt_with_policy(
+                    &cache,
+                    now + Duration::seconds(1),
+                    30,
+                    false,
+                    || generation.get(),
+                    || Ok(status_for_signature("new"))
+                )
+                .unwrap()
+                .session_id,
+                "new"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_status_cache_does_not_reuse_last_good_or_cooldowns_across_epochs() {
+        use chrono::{Duration, TimeZone, Utc};
+        use std::cell::Cell;
+        use std::sync::Mutex;
+        let now = Utc.with_ymd_and_hms(2026, 10, 13, 0, 0, 0).unwrap();
+        let cache = Mutex::new(None);
+        let generation = Cell::new(Some(1));
+        let fetch = |at, force, outcome| {
+            super::cached_status_attempt_with_policy(
+                &cache,
+                at,
+                30,
+                force,
+                || generation.get(),
+                || outcome,
+            )
+        };
+        fetch(now, false, Ok(status_for_signature("old")));
+        fetch(now, true, Err(super::CollectionErrorKind::RateLimited));
+        generation.set(None);
+        assert!(super::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            30,
+            false,
+            || generation.get(),
+            || panic!("disabled policy must not collect")
+        )
+        .is_none());
+        generation.set(Some(5));
+        assert!(fetch(
+            now + Duration::seconds(1),
+            false,
+            Err(super::CollectionErrorKind::Transport)
+        )
+        .is_none());
+        let stored = cache.lock().unwrap().clone().unwrap();
+        assert!(stored.last_good.is_none());
+        assert_eq!(stored.consecutive_failures, 1);
+        assert_eq!(stored.retry_at, now + Duration::seconds(31));
+        assert!(super::cached_status_attempt_with_policy(
+            &cache,
+            now + Duration::seconds(2),
+            30,
+            false,
+            || generation.get(),
+            || panic!("same epoch transport cooldown stays active")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn policy_cancellation_has_its_own_internal_error_kind() {
+        assert_eq!(
+            super::classify_collection_error(&crate::collector::CollectionPolicyCancelled.into()),
+            super::CollectionErrorKind::PolicyCancelled
+        );
+    }
+
+    #[test]
+    fn broker_status_and_health_discard_copied_samples_from_retired_epochs() {
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let mut old = status_for_signature("app-server-account");
+        old.tool = Tool::Codex;
+        super::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            30,
+            false,
+            || Some(1),
+            || Ok(old.clone()),
+        );
+        assert!(super::broker_sample_is_current(&old, &cache, || Some(1)));
+        assert!(!super::broker_sample_is_current(&old, &cache, || Some(5)));
+        assert!(!super::broker_sample_is_current(&old, &cache, || None));
+        assert_eq!(
+            super::cached_collection_health_for_policy(&cache, Some(5)),
+            super::CollectionHealth::Unavailable
+        );
+        let mut new = old.clone();
+        new.primary = Some(AccountLimit {
+            label: "weekly".into(),
+            used_percent: Some(42.0),
+            resets_at: None,
+        });
+        super::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            30,
+            false,
+            || Some(5),
+            || Ok(new.clone()),
+        );
+        assert!(!super::broker_sample_is_current(&old, &cache, || Some(5)));
+        assert!(super::broker_sample_is_current(&new, &cache, || Some(5)));
+        assert_eq!(
+            super::cached_collection_health_for_policy(&cache, Some(5)),
+            super::CollectionHealth::Ready
+        );
+    }
+
+    #[test]
+    fn final_antigravity_projection_replaces_old_copies_and_preserves_other_tools() {
+        let codex = status_for_signature("unrelated-codex");
+        let mut old = status_for_signature("old-agy");
+        old.tool = Tool::Antigravity;
+        let mut new = old.clone();
+        new.session_id = "new-agy".into();
+        assert_eq!(
+            super::replace_antigravity_sample(Vec::new(), Some(new.clone()), true),
+            vec![new.clone()]
+        );
+        assert_eq!(
+            super::replace_antigravity_sample(
+                vec![codex.clone(), old.clone()],
+                Some(new.clone()),
+                true
+            ),
+            vec![codex.clone(), new]
+        );
+        assert_eq!(
+            super::replace_antigravity_sample(vec![codex.clone(), old.clone()], None, true),
+            vec![codex.clone()]
+        );
+        assert_eq!(
+            super::replace_antigravity_sample(vec![codex.clone(), old.clone()], Some(old), false),
+            vec![codex]
+        );
+        for error in [
+            crate::antigravity::Error::AppRequired,
+            crate::antigravity::Error::CliLoginRequired,
+            crate::antigravity::Error::Unavailable,
+        ] {
+            assert_ne!(
+                super::antigravity_collection_health(false, Some(error)),
+                super::CollectionHealth::Ready
+            );
+        }
+        assert_eq!(
+            super::antigravity_collection_health(true, None),
+            super::CollectionHealth::Ready
+        );
+    }
+
+    #[test]
+    fn final_codex_projection_checks_authoritative_rollout_hybrids_without_changing_session_identity(
+    ) {
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        let mut rollout = status_for_signature("local-rollout");
+        rollout.tool = Tool::Codex;
+        rollout.approx = true;
+        rollout.session.active = true;
+        rollout.session.context_used_percent = Some(25.0);
+        let mut account = rollout.clone();
+        account.session_id = "app-server-account".into();
+        account.approx = false;
+        account.primary = Some(AccountLimit {
+            label: "weekly".into(),
+            used_percent: Some(12.0),
+            resets_at: None,
+        });
+        super::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            30,
+            false,
+            || Some(1),
+            || Ok(account.clone()),
+        );
+        let hybrid =
+            super::merge_codex_account_status(Some(rollout.clone()), Some(account.clone()))
+                .unwrap();
+        assert_eq!(hybrid.session_id, "local-rollout");
+        assert_eq!(hybrid.session.context_used_percent, Some(25.0));
+        assert!(!hybrid.approx);
+        assert!(super::codex_account_sample_is_current(
+            &hybrid,
+            &cache,
+            || Some(1)
+        ));
+        assert!(!super::codex_account_sample_is_current(
+            &hybrid,
+            &cache,
+            || Some(5)
+        ));
+        account.primary.as_mut().unwrap().used_percent = Some(90.0);
+        super::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            30,
+            false,
+            || Some(5),
+            || Ok(account.clone()),
+        );
+        assert!(!super::codex_account_sample_is_current(
+            &hybrid,
+            &cache,
+            || Some(5)
+        ));
+        let current =
+            super::merge_codex_account_status(Some(rollout.clone()), Some(account)).unwrap();
+        assert!(super::codex_account_sample_is_current(
+            &current,
+            &cache,
+            || Some(5)
+        ));
+        assert_eq!(
+            super::filter_current_broker_samples(vec![rollout.clone()]),
+            vec![rollout]
+        );
+    }
+
+    #[test]
+    fn activity_final_projection_strips_retired_codex_only_and_keeps_local_and_cursor_data() {
+        let snapshot: crate::activity::ActivitySnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version":"usage_activity.v3", "generated_at":"2026-10-13T00:00:00Z",
+            "timezone_offset_minutes":540, "partial":true, "backfill_pending":true,
+            "local_partial":true, "local_backfill_pending":true,
+            "codex_account_scope":true, "cursor_account_scope":true,
+            "days":[{"date":"2026-10-13","claude_tokens":11,"codex_tokens":111,"grok_tokens":22,"cursor_tokens":33}]
+        })).unwrap();
+        let result = super::CollectedActivity {
+            snapshot: snapshot.clone(),
+            codex_generation: Some(1),
+        };
+        assert_eq!(
+            super::current_activity_snapshot_with_policy(&result, true, || Some(1)),
+            snapshot
+        );
+        for (enabled, generation) in [(true, Some(5)), (true, None), (false, Some(1))] {
+            let current =
+                super::current_activity_snapshot_with_policy(&result, enabled, || generation);
+            assert_eq!(current.days[0].codex_tokens, 0);
+            assert_eq!(current.days[0].claude_tokens, 11);
+            assert_eq!(current.days[0].grok_tokens, 22);
+            assert_eq!(current.days[0].cursor_tokens, 33);
+            assert!(
+                current.local_backfill_pending
+                    && current.local_partial
+                    && current.cursor_account_scope
+            );
+            assert_eq!(current.codex_partial, enabled);
+            assert_eq!(current.codex_account_scope, enabled);
+            assert!(serde_json::to_value(&current)
+                .unwrap()
+                .get("codex_generation")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn cursor_activity_scheduling_pairs_current_settings_with_their_generation() {
+        for enabled in [false, true] {
+            let admission = super::current_cursor_activity_request(|| {
+                assert!(matches!(
+                    super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                Ok(Settings {
+                    show_cursor: enabled,
+                    activity_weeks: 12,
+                    ..Settings::default()
+                })
+            })
+            .unwrap();
+            assert_eq!(admission.is_some(), enabled);
+            if let Some((settings, _)) = admission {
+                assert_eq!(settings.activity_weeks, 12);
+            }
+        }
+        assert!(super::current_cursor_activity_request(|| anyhow::bail!(
+            "synthetic settings error"
+        ))
+        .is_err());
+    }
+
+    #[test]
     fn collection_health_prioritizes_login_failure_over_last_good_status() {
         use chrono::{TimeZone, Utc};
         use std::sync::Mutex;
 
         let now = Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap();
         let cache = Mutex::new(Some(super::CachedStatusAttempt {
+            generation: 0,
             attempted_at: now,
             last_good: Some(status_for_signature("last-good")),
             error: Some(super::CollectionErrorKind::LoginRequired),
@@ -11609,6 +12335,7 @@ mod tests {
 
         let now = Utc.with_ymd_and_hms(2026, 8, 14, 0, 0, 0).unwrap();
         let cache = Mutex::new(Some(super::CachedStatusAttempt {
+            generation: 0,
             attempted_at: now,
             last_good: None,
             error: Some(super::CollectionErrorKind::LoginRequired),
@@ -13969,7 +14696,7 @@ mod tests {
                         || Ok(worker_settings.lock().unwrap().clone()),
                         || worker_coordinator.last_result(),
                         &cache,
-                        |snapshot| {
+                        |snapshot, _| {
                             assert!(matches!(
                                 super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
                                 Err(std::sync::TryLockError::WouldBlock)
@@ -14043,21 +14770,21 @@ mod tests {
             || Ok(current_settings.clone()),
             || latest.clone(),
             &cache,
-            |snapshot| first_emitted = Some(snapshot),
+            |snapshot, _| first_emitted = Some(snapshot),
         )
         .unwrap();
         let reply = super::consume_current_collection_snapshot(
             || Ok(current_settings.clone()),
             || latest.clone(),
             &cache,
-            |snapshot| snapshot,
+            |snapshot, _| snapshot,
         )
         .unwrap();
         let followup = super::consume_current_collection_snapshot(
             || Ok(current_settings),
             || latest.clone(),
             &cache,
-            |snapshot| {
+            |snapshot, _| {
                 assert!(matches!(
                     super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
                     Err(std::sync::TryLockError::WouldBlock)
@@ -14085,7 +14812,7 @@ mod tests {
             },
             || vec![grok],
             &cache,
-            |snapshot| snapshot,
+            |snapshot, _| snapshot,
         )
         .unwrap();
         assert!(snapshot.is_empty());
@@ -14093,7 +14820,7 @@ mod tests {
             || anyhow::bail!("synthetic settings read failure"),
             || panic!("unreadable settings must not read collection"),
             &cache,
-            |_| panic!("unreadable settings must not publish"),
+            |_, _| panic!("unreadable settings must not publish"),
         );
         assert!(error.is_err());
         let error = super::consume_current_collection_snapshot(
@@ -14103,7 +14830,7 @@ mod tests {
                 Vec::new()
             },
             &cache,
-            |_| panic!("changed generation must not publish"),
+            |_, _| panic!("changed generation must not publish"),
         );
         assert!(error.is_err());
     }
@@ -14140,7 +14867,7 @@ mod tests {
                         },
                         || panic!("retired callbacks must not read coordinator state"),
                         &std::sync::Mutex::new(None),
-                        |_| panic!("retired callbacks must not publish a snapshot"),
+                        |_, _| panic!("retired callbacks must not publish a snapshot"),
                     ));
                 },
             );
@@ -14173,7 +14900,7 @@ mod tests {
                         Vec::new()
                     },
                     &std::sync::Mutex::new(None),
-                    |_| panic!("a changed settings generation must retire the snapshot"),
+                    |_, _| panic!("a changed settings generation must retire the snapshot"),
                 )
                 .unwrap();
             },
@@ -14231,7 +14958,7 @@ mod tests {
                         || Ok(settings),
                         || vec![grok.clone(), fresh.clone()],
                         &cache,
-                        |snapshot| published = Some(snapshot),
+                        |snapshot, _| published = Some(snapshot),
                     )
                     .unwrap();
                 },
