@@ -845,6 +845,7 @@ test("bar right click waits for native resize before showing the refresh menu", 
   };
   const menu = {
     hidden: true,
+    getBoundingClientRect: () => ({ width: 82, height: 32 }),
     style: {
       props: {},
       setProperty(name, value) {
@@ -937,12 +938,12 @@ test("bar right click waits for native resize before showing the refresh menu", 
     tooltipCallsBeforeMenu,
   );
 
-  resolveMenuOpen();
+  resolveMenuOpen({ open: true, revision: "1" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(menu.hidden, false);
   assert.equal(root.dataset.menuState, "open");
   assert.equal(menu.style.getPropertyValue("--menu-x"), "120px");
-  assert.equal(menu.style.getPropertyValue("--menu-y"), "8px");
+  assert.equal(menu.style.getPropertyValue("--menu-y"), "4px");
   assert.equal(
     invocations.filter((item) => item.command === "refresh_status").length,
     0
@@ -956,7 +957,7 @@ test("bar right click waits for native resize before showing the refresh menu", 
     tooltipCallsBeforeMenu,
   );
 
-  resolveMenuClose();
+  resolveMenuClose({ open: false, revision: "2" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(root.dataset.menuState, "closed");
   assert.equal(
@@ -981,6 +982,7 @@ test("bar refresh menu rolls back when native resize fails", async () => {
   const root = { dataset: {} };
   const menu = {
     hidden: true,
+    getBoundingClientRect: () => ({ width: 82, height: 32 }),
     style: { setProperty() {} },
     contains() { return false; },
   };
@@ -998,6 +1000,7 @@ test("bar refresh menu rolls back when native resize fails", async () => {
           if (command === "set_taskbar_menu_open") {
             menuStates.push(args.open);
             if (args.open) throw new Error("resize failed");
+            return { open: false, revision: "2" };
           }
           return null;
         },
@@ -1033,6 +1036,7 @@ test("bar refresh menu tolerates transient window leave and closes after a grace
   const root = { dataset: {} };
   const menu = {
     hidden: true,
+    getBoundingClientRect: () => ({ width: 82, height: 32 }),
     style: {
       setProperty() {},
       getPropertyValue() {
@@ -1054,9 +1058,10 @@ test("bar refresh menu tolerates transient window leave and closes after a grace
     innerHeight: 40,
     __TAURI__: {
       core: {
-        async invoke(command) {
+        async invoke(command, args) {
           if (command === "get_settings") return {};
           if (command === "get_status") return [];
+          if (command === "set_taskbar_menu_open") return { open: args.open, revision: args.open ? "1" : "2" };
           return null;
         },
       },
@@ -1112,6 +1117,7 @@ test("bar refresh menu closes when another tool bar opens its menu", async () =>
   const root = { dataset: {} };
   const menu = {
     hidden: true,
+    getBoundingClientRect: () => ({ width: 82, height: 32 }),
     style: {
       setProperty() {},
       getPropertyValue() {
@@ -1133,9 +1139,10 @@ test("bar refresh menu closes when another tool bar opens its menu", async () =>
     innerHeight: 40,
     __TAURI__: {
       core: {
-        async invoke(command) {
+        async invoke(command, args) {
           if (command === "get_settings") return {};
           if (command === "get_status") return [];
+          if (command === "set_taskbar_menu_open") return { open: args.open, revision: args.open ? "1" : "2" };
           return null;
         },
       },
@@ -1957,7 +1964,8 @@ test("bar bounds pending listeners, cleans late registrations, and preserves new
     windowListeners.beforeunload?.();
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(attempts.has("collection-health-updated"));
-    assert.equal(normalUnlistenCalls, 6);
+    assert.ok(attempts.has("taskbar-menu-state-updated"));
+    assert.equal(normalUnlistenCalls, 7);
 
     for (const resolve of pendingListenerResolvers.slice(1)) {
       resolve(() => {

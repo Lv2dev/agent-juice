@@ -11,7 +11,9 @@ const body = name => source.match(new RegExp(`(?:async )?function ${name}\\b[\\s
 
 function fixture(tool, { delayedOpen = false, failedClose = false } = {}) {
   let resolveOpen;
-  const menu = { hidden: true, style: { setProperty() {} } };
+  let revision = 0n;
+  const menu = { hidden: true, style: { setProperty() {} },
+    getBoundingClientRect: () => ({ width: 82, height: 32 }) };
   const root = { dataset: {}, style: { setProperty() {} } };
   const items = Object.fromEntries(tools.map(name => [name, { hidden: true }]));
   const calls = [];
@@ -23,30 +25,33 @@ function fixture(tool, { delayedOpen = false, failedClose = false } = {}) {
     stopTooltipClock() {}, refreshTaskbarStatus() {}, emitSafely() {},
     setNativeMenuOpen(open) {
       calls.push(open);
-      if (open && delayedOpen) return new Promise(resolve => { resolveOpen = resolve; });
-      return !open && failedClose ? Promise.reject(new Error('synthetic close failure')) : Promise.resolve(true);
+      const state = { open, revision: ++revision };
+      if (open && delayedOpen) return new Promise(resolve => { resolveOpen = () => resolve(state); });
+      return !open && failedClose ? Promise.reject(new Error('synthetic close failure')) : Promise.resolve(state);
     },
   });
   for (const name of ['refreshMenu', 'clampMenuPosition', 'showRefreshMenu', 'hideRefreshMenu', 'setRefreshMenuState', 'renderBar']) assert(body(name), name);
   vm.runInContext(`
     const CURRENT_TOOL=${JSON.stringify(tool)}, PREVIEW=false, TOOLS=${JSON.stringify(tools)};
-    const MENU_WIDTH=88,MENU_HEIGHT=28,MENU_MARGIN=4,REFRESH_MENU_OPENED_EVENT='opened';
+    const MENU_MARGIN=4,REFRESH_MENU_OPENED_EVENT='opened';
     const MENU_CLOSE_RETRY_DELAY_MS=250,MENU_CLOSE_MAX_RETRIES=3,MENU_CLOSE_RECOVERY_DELAY_MS=5000;
     const MENU_STATES={CLOSED:'closed',OPENING:'opening',OPEN:'open',CLOSING:'closing'};
-    let refreshMenuState='closed',refreshMenuRequest=0,refreshMenuDesiredOpen=false;
+    let refreshMenuState='closed',refreshMenuRequest=0,refreshMenuDesiredOpen=false,refreshMenuAnchor=null;
+    let refreshMenuNativeState=null;
+    let nativeMenuListenerReady=true;
     let refreshMenuRecoveryTimer=null,refreshMenuCloseInFlight=null,refreshMenuRecoveryAt=0;
     let currentBarView=null,pendingNativeTooltip=null,lastNativeTooltip='';
     let statuses=[],collectionHealth={},startupStatusLoading=false,listenersDisposed=false;
     const systemTextScale={factor:1};
     let settings={...DEFAULT_SETTINGS,${tools.map(name => `show_${name}:true`).join(',')}};
     ${body('currentBarIsVisible')}
-    ${['refreshMenu', 'clampMenuPosition', 'showRefreshMenu', 'hideRefreshMenu', 'cancelRefreshMenuRecovery', 'closeRefreshMenu', 'retryRefreshMenuClose', 'setRefreshMenuState', 'renderBar'].map(body).join('\n')}
+    ${['refreshMenu', 'clampMenuPosition', 'positionRefreshMenu', 'showRefreshMenu', 'hideRefreshMenu', 'cancelRefreshMenuRecovery', 'closeRefreshMenu', 'retryRefreshMenuClose', 'setRefreshMenuState', 'rememberNativeMenuState', 'finishRefreshMenuClosed', 'renderBar'].map(body).join('\n')}
     globalThis.show=()=>showRefreshMenu({clientX:10,clientY:10});
     globalThis.visibility=(name,value)=>{settings['taskbar_show_'+name]=value;renderBar();};
     globalThis.inspect=()=>({state:refreshMenuState,desired:refreshMenuDesiredOpen,hidden:menu.hidden});
     renderBar();
   `, context);
-  return { context, calls, items, resolveOpen: () => resolveOpen(true) };
+  return { context, calls, items, resolveOpen: () => resolveOpen() };
 }
 
 test('hidden taskbar tools invalidate delayed menu opens and remain closed after re-enabling', async () => {

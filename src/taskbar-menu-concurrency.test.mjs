@@ -32,9 +32,13 @@ test('menu cleanup rejects retired revisions before changing the slot', () => {
 
 test('native planning defers menu cleanup until successful revision-guarded commit', () => {
   const apply = body('apply_taskbar_dock_with_snapshot');
-  const planning = apply.split('let _layout_guard =')[0];
+  const planning = body('plan_taskbar_dock');
   assert.doesNotMatch(planning, /set_taskbar_menu_state\(|close_taskbar_menu_layout_if_current\(/);
   assert.equal(planning.match(/queue_menu_cleanup\(tool\)/g)?.length, 3);
   assert.match(planning, /taskbar_menu_layout_snapshot[\s\S]*?TaskbarMenuWrite \{ revision \}/);
-  assert.match(apply, /validate_taskbar_content_layout_plan[\s\S]*?for action in actions[\s\S]*?apply_taskbar_overlay[\s\S]*?for \(tool, write\) in menu_cleanup[\s\S]*?close_taskbar_menu_layout_if_current/);
+  assert.match(planning, /Ok\(TaskbarDockPlan \{[\s\S]*?menu_cleanup,/);
+  const beforeCommit = apply.split('let commit =')[0];
+  assert.match(beforeCommit, /menu_cleanup,[\s\S]*?plan_taskbar_dock\(manager, settings, snapshot\)\?;[\s\S]*?let _layout_guard = try_taskbar_layout_gate/);
+  assert.doesNotMatch(beforeCommit, /set_taskbar_menu_state\(|close_taskbar_menu_layout_if_current\(/);
+  assert.match(apply, /let commit = \|\|[\s\S]*?validate_taskbar_content_layout_plan[\s\S]*?for action in actions[\s\S]*?hide_window\(hwnd\)\?[\s\S]*?apply_taskbar_overlay\(hwnd, rect\)\?[\s\S]*?for \(tool, write\) in menu_cleanup[\s\S]*?close_taskbar_menu_layout_if_current/);
 });

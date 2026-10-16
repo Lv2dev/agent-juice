@@ -167,6 +167,8 @@ test("bar pending menu opening cannot resurrect local state after owned teardown
     }
     return null;
   });
+  h.bar.bind();
+  await settle();
   const pending = h.bar.showMenu({clientX: 10, clientY: 10});
   h.bar.cleanup(); response.resolve(true); await pending; await settle();
   assert.deepEqual(menuCalls, [true, false]);

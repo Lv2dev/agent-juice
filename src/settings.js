@@ -267,6 +267,27 @@ function settingsInputFromForm() {
   return input;
 }
 
+function settingsEditTopology(settings) {
+  const empty = { monitor_keys: [], monitor_modes: [] };
+  const topology = settings?.taskbar_topology;
+  if (!topology || typeof topology !== "object" || Array.isArray(topology)) return empty;
+  const keys = topology.monitor_keys;
+  const modes = topology.monitor_modes === undefined ? [] : topology.monitor_modes;
+  if (!Array.isArray(keys) || !Array.isArray(modes)
+    || [...keys].some((key) => typeof key !== "string" || key.trim().length === 0)
+    || new Set(keys).size !== keys.length) return empty;
+  if (modes.length > 0 && (modes.length !== keys.length || [...modes].some((mode, index) => (
+    !mode || typeof mode !== "object" || Array.isArray(mode) || mode.monitor_key !== keys[index]
+    || !Number.isInteger(mode.width) || mode.width <= 0 || mode.width > 2147483647
+    || !Number.isInteger(mode.height) || mode.height <= 0 || mode.height > 2147483647
+    || !Number.isInteger(mode.dpi) || mode.dpi <= 0 || mode.dpi > 4294967295
+  )))) return empty;
+  return {
+    monitor_keys: [...keys],
+    monitor_modes: modes.map(({ monitor_key, width, height, dpi }) => ({ monitor_key, width, height, dpi })),
+  };
+}
+
 function syncRangeFromNumberEditor(editor, commit = false) {
   const fieldName = editor?.dataset?.rangeNumberFor;
   const field = fieldName ? form?.elements?.namedItem(fieldName) : null;
@@ -551,11 +572,7 @@ function fillForm(settings) {
   renderUpdateStatus(currentUpdateStatus);
   editSession = {
     baseline: settingsInputFromForm(),
-    topology: {
-      monitor_keys: [...(settings?.taskbar_layout_profiles?.at(-1)?.monitor_keys ?? [])],
-      monitor_modes: (settings?.taskbar_layout_profiles?.at(-1)?.monitor_modes ?? [])
-        .map((mode) => ({ ...mode })),
-    },
+    topology: settingsEditTopology(settings),
   };
   isHydrating = false;
   publishPreview(settings);

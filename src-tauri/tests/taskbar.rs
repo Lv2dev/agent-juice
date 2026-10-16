@@ -867,7 +867,7 @@ fn coverage_ignores_nvidia_geforce_overlay_without_ignoring_real_fullscreen_wind
 }
 
 #[test]
-fn taskbar_target_selection_prefers_pointer_monitor_then_saved_key_then_primary() {
+fn taskbar_drag_target_prefers_pointer_then_saved_key_without_display_fallback() {
     let primary_monitor = DockRect {
         x: 0,
         y: 0,
@@ -921,6 +921,23 @@ fn taskbar_target_selection_prefers_pointer_monitor_then_saved_key_then_primary(
             .unwrap()
             .key,
         primary.key
+    );
+    assert!(taskbar_target_for_point_or_key(&targets[..1], (2200, 700), &secondary.key).is_none());
+    assert_eq!(
+        taskbar_target_for_point_or_key(&targets[..1], (100, 700), &secondary.key)
+            .unwrap()
+            .key,
+        primary.key,
+    );
+    let arrived = taskbar_target_for_point_or_key(&targets, (2500, 700), &primary.key).unwrap();
+    let preferred = arrived.key.clone();
+    assert_eq!(preferred, secondary.key);
+    assert!(taskbar_target_for_point_or_key(&targets[..1], (2500, 700), &preferred).is_none());
+    assert_eq!(
+        taskbar_target_for_point_or_key(&targets, (2500, 700), &preferred)
+            .unwrap()
+            .key,
+        secondary.key
     );
 }
 

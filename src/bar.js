@@ -44,6 +44,7 @@ let contentWidthSyncTimer = null;
 let lastRequestedContentWidth = "";
 let contentWidthRetryKey = "";
 let contentWidthRetryCount = 0;
+let taskbarDragActive = false;
 const TOOLS = ["claude", "codex", "grok", "cursor", "antigravity"];
 const PREVIEW = new URLSearchParams(window.location?.search ?? "").get("preview") === "1";
 
@@ -54,8 +55,6 @@ function currentWindowTool() {
 }
 
 let CURRENT_TOOL = currentWindowTool();
-const MENU_WIDTH = 88;
-const MENU_HEIGHT = 28;
 const MENU_MARGIN = 4;
 const MENU_CLOSE_GRACE_MS = 120;
 const MENU_CLOSE_RETRY_DELAY_MS = 250;
@@ -75,6 +74,10 @@ let refreshMenuRecoveryAt = 0;
 let refreshMenuState = MENU_STATES.CLOSED;
 let refreshMenuRequest = 0;
 let refreshMenuDesiredOpen = false;
+let refreshMenuAnchor = null;
+let refreshMenuNativeState = null;
+let nativeMenuListenerReady = false;
+let nativeMenuRegistration = null;
 let refreshStatusInFlight = null;
 let taskbarOrientationRequest = 0;
 
@@ -163,15 +166,38 @@ function currentBarIsVisible() {
 }
 
 function clampMenuPosition(value, size, max) {
-  const coordinate = Number.isFinite(value) ? value : MENU_MARGIN;
-  const upper = Math.max(MENU_MARGIN, max - size - MENU_MARGIN);
-  return Math.max(MENU_MARGIN, Math.min(coordinate, upper));
+  const extent = Math.max(0, Number(max) || 0);
+  const margin = Math.min(MENU_MARGIN, Math.max(0, (extent - size) / 2));
+  const coordinate = Number.isFinite(value) ? value : margin;
+  const upper = Math.max(margin, extent - size - margin);
+  return Math.max(margin, Math.min(coordinate, upper));
+}
+
+function positionRefreshMenu(menu) {
+  // Measure and position in one task, without painting the unpositioned menu.
+  const previousVisibility = menu.style.visibility;
+  menu.style.visibility = "hidden";
+  menu.style.setProperty("--menu-x", "0px");
+  menu.style.setProperty("--menu-y", "0px");
+  menu.hidden = false;
+  try {
+    const { width, height } = menu.getBoundingClientRect();
+    if (!(width > 0 && height > 0)) return false;
+    const x = clampMenuPosition(refreshMenuAnchor?.x, width, window.innerWidth ?? document.documentElement?.clientWidth);
+    const y = clampMenuPosition(refreshMenuAnchor?.y, height, window.innerHeight ?? document.documentElement?.clientHeight);
+    menu.style.setProperty("--menu-x", `${x}px`);
+    menu.style.setProperty("--menu-y", `${y}px`);
+    return true;
+  } finally {
+    menu.style.visibility = previousVisibility ?? "";
+  }
 }
 
 async function showRefreshMenu(event) {
   if (listenersDisposed || !currentBarIsVisible()) return;
   const menu = refreshMenu();
-  if (!menu) {
+  if (!menu || !nativeMenuListenerReady) {
+    void ensureNativeMenuListener();
     void refreshTaskbarStatus();
     return;
   }
@@ -184,14 +210,15 @@ async function showRefreshMenu(event) {
   setRefreshMenuState(MENU_STATES.OPENING);
 
   try {
-    const nativeOpened = await setNativeMenuOpen(true);
+    const nativeState = await setNativeMenuOpen(true);
     if (listenersDisposed) return;
-    if (!nativeOpened) throw new Error("native menu state is unavailable");
+    if (!nativeState) throw new Error("native menu state is unavailable");
     if (!currentBarIsVisible()) {
       hideRefreshMenu();
       setRefreshMenuState(MENU_STATES.CLOSED);
       return;
     }
+
     if (request !== refreshMenuRequest || refreshMenuState !== MENU_STATES.OPENING) {
       if (!refreshMenuDesiredOpen) {
         setRefreshMenuState(MENU_STATES.CLOSING);
@@ -199,12 +226,15 @@ async function showRefreshMenu(event) {
       }
       return;
     }
+    rememberNativeMenuState(nativeState);
+    // The ACK snapshot may predate an already-received native event.
+    if (!refreshMenuDesiredOpen || !refreshMenuNativeState.open) {
+      finishRefreshMenuClosed();
+      return;
+    }
 
-    const x = clampMenuPosition(event?.clientX, MENU_WIDTH, window.innerWidth ?? MENU_WIDTH);
-    const y = clampMenuPosition(event?.clientY, MENU_HEIGHT, window.innerHeight ?? MENU_HEIGHT);
-    menu.style?.setProperty("--menu-x", `${x}px`);
-    menu.style?.setProperty("--menu-y", `${y}px`);
-    menu.hidden = false;
+    refreshMenuAnchor = { x: event?.clientX, y: event?.clientY };
+    if (!positionRefreshMenu(menu)) throw new Error("menu layout is unavailable");
     setRefreshMenuState(MENU_STATES.OPEN);
     emitSafely(REFRESH_MENU_OPENED_EVENT, { tool: CURRENT_TOOL ?? "all" });
   } catch {
@@ -245,13 +275,12 @@ async function closeRefreshMenu(request, retries = MENU_CLOSE_MAX_RETRIES) {
   if (!current() || refreshMenuCloseInFlight === request) return;
   refreshMenuCloseInFlight = request;
   try {
-    const closed = await setNativeMenuOpen(false);
+    const nativeState = await setNativeMenuOpen(false);
     if (!current()) return;
-    if (!closed) throw new Error("native menu state is unavailable");
-    cancelRefreshMenuRecovery();
-    setRefreshMenuState(MENU_STATES.CLOSED);
-    syncNativeTooltip();
-    scheduleTaskbarContentWidthSync();
+    if (!nativeState) throw new Error("native menu state is unavailable");
+    rememberNativeMenuState(nativeState);
+    if (refreshMenuNativeState.open) throw new Error("native menu remains open");
+    finishRefreshMenuClosed();
   } catch {
     if (!current()) return;
     // Keep native ownership truthful until a close is acknowledged.
@@ -285,9 +314,46 @@ function setRefreshMenuState(state) {
 }
 
 async function setNativeMenuOpen(open) {
-  if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return false;
-  await invoke("set_taskbar_menu_open", { tool: CURRENT_TOOL, open });
-  return true;
+  if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return null;
+  return parseNativeMenuState(await invoke("set_taskbar_menu_open", { tool: CURRENT_TOOL, open }));
+}
+
+function parseNativeMenuState(value) {
+  if (typeof value?.open !== "boolean" || typeof value.revision !== "string"
+      || !/^(0|[1-9]\d{0,19})$/.test(value.revision)) return null;
+  const revision = BigInt(value.revision);
+  return revision <= 18446744073709551615n ? { open: value.open, revision } : null;
+}
+
+function rememberNativeMenuState(state) {
+  if (!refreshMenuNativeState || state.revision > refreshMenuNativeState.revision
+      || (state.revision === refreshMenuNativeState.revision && !state.open)) {
+    refreshMenuNativeState = state;
+  }
+}
+
+function finishRefreshMenuClosed() {
+  cancelRefreshMenuClose();
+  cancelRefreshMenuRecovery();
+  refreshMenuDesiredOpen = false;
+  refreshMenuAnchor = null;
+  const menu = refreshMenu();
+  if (menu) menu.hidden = true;
+  setRefreshMenuState(MENU_STATES.CLOSED);
+  syncNativeTooltip();
+  scheduleTaskbarContentWidthSync();
+}
+
+function acceptNativeMenuState(payload) {
+  if (listenersDisposed) return;
+  const state = parseNativeMenuState(payload);
+  if (!state || (refreshMenuNativeState && state.revision <= refreshMenuNativeState.revision)) return;
+  rememberNativeMenuState(state);
+  // A close predating the pending open must be compared with its ACK first.
+  if (!state.open && refreshMenuState !== MENU_STATES.OPENING) {
+    refreshMenuRequest += 1;
+    finishRefreshMenuClosed();
+  }
 }
 
 function cancelRefreshMenuClose() {
@@ -450,7 +516,7 @@ function fitRingNumbers() {
 }
 
 function scheduleTaskbarContentWidthSync() {
-  if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return;
+  if (listenersDisposed || taskbarDragActive || !CURRENT_TOOL || !tauriApi().core?.invoke) return;
   const root = document.querySelector("#bar");
   const item = toolElement(CURRENT_TOOL);
   if (
@@ -467,7 +533,7 @@ function scheduleTaskbarContentWidthSync() {
   contentWidthSyncTimer = setTimeout(() => {
     contentWidthSyncTimer = null;
     if (
-      listenersDisposed || item.hidden ||
+      listenersDisposed || taskbarDragActive || item.hidden ||
       refreshMenuState !== MENU_STATES.CLOSED
     ) {
       return;
@@ -478,7 +544,12 @@ function scheduleTaskbarContentWidthSync() {
     const rect = item.getBoundingClientRect?.() ?? {};
     const rectLength = Number(vertical ? rect.height : rect.width) || 0;
     const scrollLength = Number(vertical ? item.scrollHeight : item.scrollWidth) || 0;
-    const width = Math.ceil(Math.max(rectLength, scrollLength));
+    const shellStyle = window.getComputedStyle?.(root);
+    const shellEdges = vertical
+      ? ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]
+      : ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"];
+    const shellLength = shellEdges.reduce((sum, edge) => sum + (Number.parseFloat(shellStyle?.[edge]) || 0), 0);
+    const width = Math.ceil(Math.max(rectLength, scrollLength) + shellLength);
     if (!Number.isFinite(width) || width < 1 || width > 2304) return;
     const mode = root.dataset.mode;
     const devicePixelRatio = Number(window.devicePixelRatio) || 1;
@@ -501,7 +572,7 @@ function scheduleTaskbarContentWidthSync() {
         if (
           contentWidthRetryKey !== requestKey ||
           contentWidthRetryCount >= CONTENT_WIDTH_MAX_RETRIES ||
-          listenersDisposed
+          listenersDisposed || taskbarDragActive
         ) {
           return;
         }
@@ -520,8 +591,7 @@ function observeTaskbarContentSize() {
   const item = toolElement(CURRENT_TOOL);
   const remeasure = () => {
     lastRequestedContentWidth = "";
-    if (systemTextScale.factor > 1) renderBar();
-    else scheduleTaskbarContentWidthSync();
+    renderBar();
   };
   const Observer = window.ResizeObserver;
   if (Observer && item) {
@@ -662,6 +732,8 @@ function renderBar() {
     if (CURRENT_TOOL && tool.tool !== CURRENT_TOOL) continue;
     renderTool(tool, vm.limitOrder);
   }
+  const menu = refreshMenu();
+  if (refreshMenuState === MENU_STATES.OPEN && menu && !menu.hidden) positionRefreshMenu(menu);
   scheduleTaskbarContentWidthSync();
   if (PREVIEW) {
     clearTimeout(contentWidthSyncTimer);
@@ -675,9 +747,16 @@ function renderBar() {
 }
 
 function setDragging(payload) {
+  if (listenersDisposed) return;
   const root = document.querySelector("#bar");
   if (!root) return;
 
+  const wasDragging = taskbarDragActive;
+  taskbarDragActive = typeof payload === "boolean" ? payload : payload?.dragging === true;
+  if (taskbarDragActive) {
+    clearTimeout(contentWidthSyncTimer);
+    contentWidthSyncTimer = null;
+  }
   const isDragging =
     typeof payload === "boolean"
       ? payload
@@ -686,6 +765,12 @@ function setDragging(payload) {
     root.dataset.dragging = "true";
   } else {
     delete root.dataset.dragging;
+  }
+  if (wasDragging && !taskbarDragActive) {
+    lastRequestedContentWidth = "";
+    contentWidthRetryKey = "";
+    contentWidthRetryCount = 0;
+    renderBar();
   }
 }
 
@@ -725,11 +810,11 @@ async function loadTaskbarOrientation() {
     const orientation = await invoke("get_taskbar_orientation", { tool: CURRENT_TOOL });
     if (listenersDisposed || taskbarOrientationRequest !== requestGeneration) return;
     root.dataset.taskbarOrientation = orientation === "vertical" ? "vertical" : "horizontal";
-    scheduleTaskbarContentWidthSync();
+    renderBar();
   } catch {
     if (listenersDisposed || taskbarOrientationRequest !== requestGeneration) return;
     root.dataset.taskbarOrientation = "horizontal";
-    scheduleTaskbarContentWidthSync();
+    renderBar();
   }
 }
 
@@ -737,6 +822,7 @@ function scheduleSnapshotFallback() {
   if (snapshotFallbackTimer || listenersDisposed) return;
   snapshotFallbackTimer = setInterval(() => {
     if (listenersDisposed) return;
+    void ensureNativeMenuListener();
     void systemTextScale.load(invoke);
     void loadSettings().then(renderBar);
     void loadStatus();
@@ -758,11 +844,13 @@ function cleanupListeners() {
   if (listenersDisposed) return;
   if (refreshMenuState !== MENU_STATES.CLOSED) hideRefreshMenu();
   listenersDisposed = true;
+  nativeMenuListenerReady = false;
   statusRequests.dispose();
   cancelRefreshMenuClose();
   cancelRefreshMenuRecovery();
   refreshMenuRequest += 1;
   refreshMenuDesiredOpen = false;
+  refreshMenuAnchor = null;
   refreshMenuState = MENU_STATES.CLOSED;
   const menu = refreshMenu();
   if (menu) menu.hidden = true;
@@ -836,9 +924,23 @@ async function listenWithRetry(listen, eventName, handler) {
   return false;
 }
 
+function ensureNativeMenuListener() {
+  if (listenersDisposed || nativeMenuListenerReady || nativeMenuRegistration) return nativeMenuRegistration;
+  const currentWindow = tauriApi().window?.getCurrentWindow?.();
+  const listen = typeof currentWindow?.listen === "function"
+    ? currentWindow.listen.bind(currentWindow) : tauriApi().event?.listen;
+  if (!listen) return null;
+  const registration = listenWithRetry(listen, "taskbar-menu-state-updated", event => acceptNativeMenuState(event.payload))
+    .then(ready => { if (!listenersDisposed) nativeMenuListenerReady = ready; })
+    .finally(() => { if (nativeMenuRegistration === registration) nativeMenuRegistration = null; });
+  nativeMenuRegistration = registration;
+  return registration;
+}
+
 function bindEvents() {
   observeTaskbarContentSize();
   const currentWindow = tauriApi().window?.getCurrentWindow?.();
+  void ensureNativeMenuListener();
   if (typeof currentWindow?.listen === "function") {
     void listenWithRetry(currentWindow.listen.bind(currentWindow), "tauri://scale-change", () => {
       lastRequestedContentWidth = "";
@@ -882,9 +984,10 @@ function bindEvents() {
     void listenWithRetry(listen, "taskbar-topology-updated", (event) => {
       const root = document.querySelector("#bar");
       if (!root) return;
+      taskbarOrientationRequest += 1;
       root.dataset.taskbarOrientation = event.payload === "vertical" ? "vertical" : "horizontal";
       lastRequestedContentWidth = "";
-      scheduleTaskbarContentWidthSync();
+      renderBar();
     });
   }
 }

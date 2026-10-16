@@ -226,6 +226,7 @@ p {
 
 .bar-context-menu {
   position: absolute;
+  display: grid;
   left: var(--menu-x);
   top: var(--menu-y);
   z-index: 8;
@@ -251,6 +252,7 @@ p {
   font: inherit;
   font-size: calc(11px * var(--system-text-scale, 1));
   font-weight: 560;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -928,10 +930,12 @@ p {
 .bar-shell[data-taskbar-orientation="vertical"] {
   padding: 8px 0;
   grid-auto-flow: row;
-  grid-auto-rows: minmax(0, 1fr);
+  grid-auto-rows: max-content;
+  align-content: start;
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-tool {
+  height: max-content;
   padding: 6px 0;
   flex-direction: column;
   justify-content: flex-start;
@@ -968,14 +972,16 @@ p {
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-quad {
+  height: max-content;
   flex-direction: column;
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-context-menu button {
   min-width: 24px;
   width: 24px;
-  height: 74px;
-  padding: 7px 0;
+  height: max-content;
+  min-height: 74px;
+  padding: 3px 0;
   writing-mode: vertical-rl;
 }
 
@@ -1044,7 +1050,8 @@ html[data-text-scale="enlarged"] .bar-context-menu button {
   height: auto;
   min-height: 24px;
   line-height: 1.2;
-  padding-block: 2px;
+  padding-block: 0;
+  padding-inline: 7px;
 }
 
 @media (prefers-reduced-motion: reduce) {

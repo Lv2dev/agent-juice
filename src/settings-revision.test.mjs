@@ -47,6 +47,7 @@ function formContext(invoke, loaded = initial) {
       this.entries = [...fields].filter(([, field]) => field.type !== "checkbox" || field.checked)
         .map(([name, field]) => [name, field.type === "checkbox" ? "on" : field.value]);
     }
+    get(name) { return this.entries.find(([key]) => key === name)?.[1] ?? null; }
     [Symbol.iterator]() { return this.entries[Symbol.iterator](); }
   }
   const context = vm.createContext({ form, FormData: FormDataMock, formStateFromSettings, payloadFromEntries, invoke, createSettingsAuthority,
@@ -110,9 +111,28 @@ test("settings metadata stays flat and all backend publication sites read curren
   const source = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(source, /#\[serde\(flatten\)\]\s*settings: Settings,\s*settings_revision: String/);
   assert.equal([...source.matchAll(/app\.emit\("settings-updated"/g)].length, 1);
-  assert.match(source, /async fn get_settings\(\) -> Result<SettingsSnapshot, String>/);
+  assert.match(source, /async fn get_settings\(app: tauri::AppHandle\) -> Result<SettingsSnapshot, String>/);
+  assert.match(between(source, "async fn get_settings(", "fn get_system_text_scale("), /spawn_blocking\(move \|\| current_settings_snapshot\(&app\)\)/);
   assert.match(between(source, "fn with_current_settings_snapshot<T>(", "fn current_settings_snapshot("), /with_taskbar_settings_read[\s\S]*Settings::try_load\(\)[\s\S]*reader\(&snapshot\)/);
   assert.match(between(source, "async fn save_settings(", "fn preserve_taskbar_leading_edges("), /publish_current_settings\(&app\)[\s\S]*settings_apply_report\(published/);
+});
+
+test("backend snapshots publish current stable topology separately and revise topology-only changes", () => {
+  const source = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.match(between(source, "struct SettingsSnapshot {", "struct SettingsPublicationState {"),
+    /#\[serde\(flatten\)\]\s*settings: Settings,\s*settings_revision: String,\s*taskbar_topology: TaskbarTopology/);
+  const publication = between(source, "fn with_current_settings_snapshot<T>(", "fn current_settings_snapshot(");
+  assert.match(publication, /stable_taskbar_topology\(app\)/);
+  assert.match(publication, /if topology == observed\s*\{\s*topology\s*\}\s*else\s*\{\s*TaskbarTopology::default\(\)\s*\}/);
+  assert.match(publication, /settings_snapshot_in_state\([\s\S]*generation,\s*topology,/);
+  assert.doesNotMatch(publication, /taskbar_layout_profiles/);
+  const revision = between(source, "fn settings_snapshot_in_state(", "fn with_current_settings_snapshot<T>(");
+  assert.match(revision, /state\.taskbar_topology != taskbar_topology/);
+  assert.match(revision, /state\.taskbar_topology = taskbar_topology\.clone\(\)/);
+  assert.match(revision, /Ok\(SettingsSnapshot \{[\s\S]*taskbar_topology,/);
+  assert.match(between(source, "fn current_settings_snapshot(", "fn publish_current_settings("), /with_current_settings_snapshot\(app,/);
+  assert.match(between(source, "fn publish_current_settings(", "struct SaveSettingsResult {"), /with_current_settings_snapshot\(app,[\s\S]*app\.emit\("settings-updated", snapshot\)/);
+  assert.match(between(source, "struct SaveSettingsResult {", "fn settings_apply_report("), /settings: SettingsSnapshot/);
 });
 
 test("dirty form keeps input while tracking a newer event and chooses it over an old save reply", async () => {
