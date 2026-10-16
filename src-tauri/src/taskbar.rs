@@ -1535,7 +1535,11 @@ pub fn taskbar_target_for_point_or_key<'a>(
                 .iter()
                 .find(|target| point_inside_dock_rect(target.rect, point))
         })
-        .or_else(|| taskbar_target_by_key_or_primary(targets, preferred_key))
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !preferred_key.is_empty() && target.key == preferred_key)
+        })
 }
 
 fn point_inside_dock_rect(rect: DockRect, point: (i32, i32)) -> bool {

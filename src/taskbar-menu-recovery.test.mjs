@@ -31,9 +31,11 @@ function deferred() {
 
 function fixture(invoke = async () => null) {
   const calls = [], timers = new Map();
+  let menuRevision = 0n;
   let clock = 1_700_000_000_000;
   const root = { dataset: {}, style: { setProperty() {} } };
-  const menu = { hidden: true, style: { setProperty() {} } };
+  const menu = { hidden: true, style: { setProperty() {} },
+    getBoundingClientRect: () => ({ width: 82, height: 32 }) };
   const item = { hidden: false, scrollWidth: 120, scrollHeight: 48,
     getBoundingClientRect: () => ({ width: 120, height: 48 }) };
   class FakeDate extends Date {
@@ -49,7 +51,11 @@ function fixture(invoke = async () => null) {
     },
     window: { location: { search: "?tool=codex" }, innerWidth: 400, innerHeight: 48,
       devicePixelRatio: 1, __TAURI__: { core: {
-        invoke(command, args) { calls.push({ command, args }); return invoke(command, args); },
+        invoke(command, args) {
+          calls.push({ command, args });
+          const reply = command === "set_taskbar_menu_open" ? { open: args.open, revision: String(++menuRevision) } : null;
+          return Promise.resolve(invoke(command, args)).then(result => result ?? reply);
+        },
       } } },
     setTimeout(callback, delay) {
       const timer = { callback, delay, due: clock + delay, unref() {} };
@@ -74,6 +80,8 @@ function fixture(invoke = async () => null) {
     ${body("renderBar")}
     ${body("unlistenSafely")}
     ${body("cleanupListeners")}
+    // This fragment starts after a successful listener subscription.
+    nativeMenuListenerReady = true;
     pendingNativeTooltip = {tool: CURRENT_TOOL, text: "fixture usage"};
     globalThis.menuApi = {
       show: () => showRefreshMenu({clientX: 10, clientY: 10}),

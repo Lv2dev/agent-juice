@@ -1739,7 +1739,7 @@ test("manual refresh remains available while the periodic loop gates inactive Wi
 
 test("taskbar movement is persisted only by the native drag loop final save", () => {
   assert.doesNotMatch(rustLib, /WindowEvent::Moved/);
-  assert.match(rustLib, /save_taskbar_drag_target\(&app, tool, &monitor_key, rect\)/);
+  assert.match(rustLib, /save_taskbar_drag_target\(\s*&app,\s*tool,\s*&monitor_key,\s*rect,\s*generation,\s*\)/);
   assert.match(rustLib, /taskbar_physical_length_for_window\(logical_length, taskbar\.hwnd\)/);
 });
 
@@ -1854,7 +1854,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.37"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.38"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {

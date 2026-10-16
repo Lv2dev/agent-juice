@@ -462,12 +462,16 @@ export function barViewModel(
   const merged = { ...DEFAULT_SETTINGS, ...settings };
   const textScale = normalizeTextScale(options.textScale);
   const baseRingSize = numberRangeSetting(merged.ring_size_px, 36, 20, 44);
+  const baseThickness = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10);
+  const baseGap = numberRangeSetting(merged.ring_gap_px, 6, 2, 14);
   const crossAxis = Number(options.crossAxisSize);
-  const available = Number.isFinite(crossAxis) && crossAxis >= 20 ? crossAxis : 48;
-  const indicatorScale = textScale > 1 ? Math.min(textScale, available / baseRingSize) : 1;
+  const available = Number.isFinite(crossAxis) && crossAxis > 0 ? crossAxis : 48;
+  const footprint = normalizeIndicatorStyle(merged.indicator_style) === "bar"
+    ? Math.max(baseRingSize, 2 * baseThickness + baseGap) : baseRingSize;
+  const indicatorScale = Math.min(textScale, available / footprint);
   const ringSizePx = baseRingSize * indicatorScale;
-  const ringThicknessPx = numberRangeSetting(merged.ring_thickness_px, 4, 1, 10) * indicatorScale;
-  const ringGapPx = numberRangeSetting(merged.ring_gap_px, 6, 2, 14) * indicatorScale;
+  const ringThicknessPx = baseThickness * indicatorScale;
+  const ringGapPx = baseGap * indicatorScale;
   const ringCenterSizePx = numberRangeSetting(merged.ring_center_size_px, 16, 4, 32) * indicatorScale;
   const svgGeometry = ringSvgGeometry(
     ringSizePx,

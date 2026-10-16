@@ -1036,7 +1036,9 @@ fn normalize_taskbar_layout_profile(
         || profile.codex.is_some()
         || profile.grok.is_some()
         || profile.cursor.is_some()
-        || profile.antigravity.is_some())
+        || profile.antigravity.is_some()
+        || profile.presentation.is_some()
+        || profile.appearance.is_some())
     .then_some(profile)
 }
 
@@ -2707,6 +2709,52 @@ mod parser_tests {
             settings.taskbar_show_cursor,
             settings.taskbar_show_antigravity,
         ]
+    }
+
+    #[test]
+    fn g3250_scoped_only_profiles_survive_normalized_file_round_trip_but_empty_ones_do_not() {
+        let root = temp_root("scoped-only-profile");
+        let path = root.join("settings.json");
+        let mut settings = Settings {
+            codex_taskbar_monitor_key: "office".into(),
+            ..Settings::default()
+        };
+        for (index, (presentation, appearance)) in
+            [(true, false), (false, true), (true, true), (false, false)]
+                .into_iter()
+                .enumerate()
+        {
+            let topology = super::TaskbarTopology::from(vec![format!("laptop-{index}")]);
+            let profile = TaskbarLayoutProfile {
+                topology,
+                claude: None,
+                codex: None,
+                grok: None,
+                cursor: None,
+                antigravity: None,
+                presentation: presentation
+                    .then(|| super::TaskbarPresentationProfile::from_settings(&settings)),
+                appearance: appearance
+                    .then(|| super::TaskbarAppearanceProfile::from_settings(&settings)),
+            };
+            assert_eq!(
+                settings.upsert_taskbar_layout_profile(profile),
+                presentation || appearance
+            );
+        }
+        settings.save_to(&path).unwrap();
+        let loaded = Settings::try_load_from(&path).unwrap();
+        assert_eq!(loaded.taskbar_layout_profiles.len(), 3);
+        assert_eq!(
+            loaded.taskbar_layout_profiles,
+            settings.taskbar_layout_profiles
+        );
+        assert_eq!(loaded.codex_taskbar_monitor_key, "office");
+        let mut invalid = loaded.taskbar_layout_profiles[0].clone();
+        invalid.topology = super::TaskbarTopology::default();
+        assert!(super::normalize_taskbar_layout_profile(invalid).is_none());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&root).unwrap();
     }
 
     fn tool_activation(settings: &Settings) -> [bool; 5] {

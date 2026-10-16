@@ -722,6 +722,9 @@ test("settings form auto-saves changed values without a submit button", async ()
   eventHandlers["settings-updated"]?.({ payload: {
     ...persistedSettings, theme: "system", bar_mode: "full", indicator_style: "ring", bar_content_gap_px: 14,
     font_mode: "pretendard", bar_text_font_size_px: 14,
+    taskbar_topology: { monitor_keys: ["monitor-a"], monitor_modes: [
+      { monitor_key: "monitor-a", width: 3840, height: 2160, dpi: 144 },
+    ] },
     taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"], monitor_modes: [
       { monitor_key: "monitor-a", width: 3840, height: 2160, dpi: 144 },
     ] }],
@@ -734,6 +737,9 @@ test("settings form auto-saves changed values without a submit button", async ()
   eventHandlers["settings-updated"]?.({ payload: {
     ...persistedSettings, bar_mode: "compact", indicator_style: "bar", bar_content_gap_px: 3.1,
     font_mode: "system", bar_text_font_size_px: 12,
+    taskbar_topology: { monitor_keys: ["monitor-a"], monitor_modes: [
+      { monitor_key: "monitor-a", width: 1920, height: 1080, dpi: 96 },
+    ] },
     taskbar_layout_profiles: [{ monitor_keys: ["monitor-a"], monitor_modes: [
       { monitor_key: "monitor-a", width: 1920, height: 1080, dpi: 96 },
     ] }],
@@ -770,13 +776,13 @@ test("settings form auto-saves changed values without a submit button", async ()
     monitor_modes: [{ monitor_key: "monitor-a", width: 1920, height: 1080, dpi: 96 }],
   };
   for (const language of ["ko", "en"]) {
-    persistedSettings = { ...persistedSettings, language, bar_mode: "full", taskbar_layout_profiles: [beforeTopology] };
+    persistedSettings = { ...persistedSettings, language, bar_mode: "full", taskbar_topology: beforeTopology, taskbar_layout_profiles: [beforeTopology] };
     eventHandlers["settings-updated"]({ payload: persistedSettings });
     const beforeSaves = saveRequests.length;
     nextSaveError = language === "ko" ? displayConflict : new Error(displayConflict);
     fields.bar_mode.value = "compact";
     listeners.change({ target: fields.bar_mode });
-    persistedSettings = { ...persistedSettings, taskbar_layout_profiles: [afterTopology] };
+    persistedSettings = { ...persistedSettings, taskbar_topology: afterTopology, taskbar_layout_profiles: [afterTopology] };
     eventHandlers["settings-updated"]({ payload: persistedSettings });
     assert.equal(fields.bar_mode.value, "compact", "a display event must not silently overwrite dirty input");
     await new Promise(resolve => setTimeout(resolve, 180));
