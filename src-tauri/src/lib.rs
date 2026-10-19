@@ -5234,7 +5234,12 @@ fn taskbar_dock_snapshot<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     settings: &Settings,
 ) -> anyhow::Result<TaskbarDockSnapshot> {
-    let taskbars = taskbar::shell_taskbar_windows()?;
+    let expected_keys = TASKBAR_TOOLS
+        .iter()
+        .filter(|tool| taskbar_dock_width(settings, tool).is_some())
+        .map(|tool| taskbar_monitor_key(settings, tool).to_string())
+        .collect::<Vec<_>>();
+    let taskbars = taskbar::shell_taskbar_windows_for_keys(&expected_keys)?;
     let mut monitor_states = std::collections::HashMap::new();
     let should_scan_coverage = should_scan_taskbar_coverage(settings, taskbar_bars_paused(manager));
 
@@ -5272,6 +5277,88 @@ fn taskbar_dock_snapshot<R: tauri::Runtime>(
     Ok(TaskbarDockSnapshot {
         taskbars,
         monitor_states,
+    })
+}
+
+#[cfg(windows)]
+fn taskbar_hide_only_plan(
+    settings: &Settings,
+    paused: bool,
+    mut window: impl FnMut(&str) -> Option<TaskbarWindowHandle>,
+    mut coverage: impl FnMut(TaskbarWindowHandle) -> (bool, bool),
+) -> Vec<(&'static str, TaskbarWindowHandle)> {
+    TASKBAR_TOOLS
+        .iter()
+        .filter_map(|tool| {
+            let handle = window(tool)?;
+            if paused
+                || settings.taskbar_bars_paused
+                || !taskbar_tool_enabled(settings, tool)
+                || !taskbar_target_initialized(settings, tool)
+            {
+                return Some((*tool, handle));
+            }
+            let (fullscreen, maximized) =
+                if settings.fullscreen_hide_on || settings.maximized_hide_on {
+                    coverage(handle)
+                } else {
+                    (false, false)
+                };
+            (!should_show_taskbar_bar_with_pause(settings, tool, fullscreen, maximized, false))
+                .then_some((*tool, handle))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn apply_taskbar_hide_only<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    settings: &Settings,
+    expected_generation: u64,
+) -> anyhow::Result<()> {
+    with_taskbar_settings_read(|generation| {
+        anyhow::ensure!(
+            generation == expected_generation,
+            "taskbar settings changed before hide planning"
+        );
+        // An uncertain Shell inventory may block placement, never hide-only policy.
+        let actions = taskbar_hide_only_plan(
+            settings,
+            taskbar_bars_paused(manager),
+            |tool| taskbar_window_handle(manager, tool),
+            |handle| {
+                let hwnd = windows::Win32::Foundation::HWND(handle.raw as *mut core::ffi::c_void);
+                taskbar::window_monitor_rect(hwnd)
+                    .map(|monitor| {
+                        taskbar_hide_window_state_for_monitor(manager, settings, monitor)
+                    })
+                    .unwrap_or_default()
+            },
+        );
+        let _layout_guard = try_taskbar_layout_gate(&TASKBAR_LAYOUT_GATE)?;
+        anyhow::ensure!(
+            !taskbar_drag_active(manager)
+                && TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == expected_generation,
+            "taskbar layout changed before hide commit"
+        );
+        for (tool, handle) in actions {
+            anyhow::ensure!(
+                taskbar_window_handle(manager, tool) == Some(handle),
+                "taskbar window changed before hide commit"
+            );
+            let cleanup = taskbar_menu_layout_snapshot(manager, tool)
+                .map(|(revision, _)| TaskbarMenuWrite { revision });
+            let hwnd = windows::Win32::Foundation::HWND(handle.raw as *mut core::ffi::c_void);
+            anyhow::ensure!(
+                taskbar::window_is_valid(hwnd),
+                "taskbar window was destroyed"
+            );
+            taskbar::hide_window(hwnd)?;
+            if let Some(write) = cleanup {
+                close_taskbar_menu_layout_if_current(manager, tool, write);
+            }
+        }
+        Ok(())
     })
 }
 
@@ -7966,6 +8053,11 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                             }
                             Err(err) => {
                                 last_signature = None;
+                                if let Err(hide_err) =
+                                    apply_taskbar_hide_only(&app, &settings, settings_generation)
+                                {
+                                    eprintln!("[taskbar] hide-only update failed: {hide_err}");
+                                }
                                 eprintln!("[taskbar] pending target initialization failed: {err}");
                                 std::thread::sleep(std::time::Duration::from_millis(500));
                                 continue;
@@ -7982,6 +8074,11 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                         Err(err) => {
                             last_signature = None;
                             topology_stability.observe(TaskbarTopology::default());
+                            if let Err(hide_err) =
+                                apply_taskbar_hide_only(&app, &settings, settings_generation)
+                            {
+                                eprintln!("[taskbar] hide-only update failed: {hide_err}");
+                            }
                             eprintln!("[taskbar] inspect dock state failed: {err}");
                             std::thread::sleep(std::time::Duration::from_millis(500));
                             continue;
@@ -7997,6 +8094,11 @@ fn spawn_taskbar_visibility_loop(app: tauri::AppHandle) {
                     let settled_topology = topology_stability.observe(profile_topology.clone());
                     if !topology_stability.allows_native_layout(&profile_topology) {
                         last_signature = None;
+                        if let Err(hide_err) =
+                            apply_taskbar_hide_only(&app, &settings, settings_generation)
+                        {
+                            eprintln!("[taskbar] hide-only update failed: {hide_err}");
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         continue;
                     }
@@ -9785,6 +9887,93 @@ mod tests {
         assert_eq!(stability.observe(office.clone()), None);
         assert_eq!(stability.observe(office.clone()), None);
         assert_eq!(stability.observe(office.clone()), Some(office));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3254_hidden_shell_inventory_does_not_block_window_policy_hides() {
+        let settings = Settings {
+            show_claude: true,
+            taskbar_show_claude: true,
+            claude_taskbar_target_initialized: true,
+            claude_taskbar_monitor_key: "monitor-path:primary".into(),
+            fullscreen_hide_on: true,
+            maximized_hide_on: true,
+            ..Settings::default()
+        };
+        let before = serde_json::to_value(&settings).unwrap();
+        let handle = super::TaskbarWindowHandle {
+            raw: 1,
+            generation: 1,
+        };
+        // A connected secondary Shell host is absent for multiple observer ticks.
+        // Hide-only planning reads the bar's current monitor, not a primary fallback.
+        for _ in 0..8 {
+            for (coverage, hide) in [
+                ((false, false), false),
+                ((true, false), true),
+                ((false, false), false),
+                ((false, true), true),
+            ] {
+                let plan = super::taskbar_hide_only_plan(
+                    &settings,
+                    false,
+                    |tool| (tool == "claude").then_some(handle),
+                    |actual| {
+                        assert_eq!(actual, handle);
+                        coverage
+                    },
+                );
+                assert_eq!(
+                    plan,
+                    if hide {
+                        vec![("claude", handle)]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+        assert_eq!(serde_json::to_value(&settings).unwrap(), before);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn g3254_hide_only_policy_needs_no_shell_snapshot_or_coverage_for_disabled_tools() {
+        let initial = Settings {
+            show_claude: true,
+            taskbar_show_claude: true,
+            claude_taskbar_target_initialized: true,
+            ..Settings::default()
+        };
+        let handle = super::TaskbarWindowHandle {
+            raw: 1,
+            generation: 1,
+        };
+        for cause in 0..5 {
+            let mut settings = initial.clone();
+            match cause {
+                0 => settings.show_claude = false,
+                1 => settings.taskbar_show_claude = false,
+                2 => settings.claude_taskbar_target_initialized = false,
+                3 => settings.taskbar_bars_paused = true,
+                _ => {}
+            }
+            let plan = super::taskbar_hide_only_plan(
+                &settings,
+                cause == 4,
+                |tool| (tool == "claude").then_some(handle),
+                |_| panic!("policy hides must not depend on monitor queries"),
+            );
+            assert_eq!(plan, vec![("claude", handle)]);
+        }
+        let plan = super::taskbar_hide_only_plan(
+            &initial,
+            false,
+            |_| None,
+            |_| panic!("missing windows must not trigger coverage queries"),
+        );
+        assert!(plan.is_empty());
     }
 
     #[cfg(windows)]

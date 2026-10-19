@@ -22,8 +22,8 @@ use windows::{
         Foundation::{HWND, LPARAM, RECT, WPARAM},
         Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
         Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITORINFOEXW,
-            MONITOR_DEFAULTTONEAREST,
+            EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFO,
+            MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
         },
         System::Threading::GetCurrentThreadId,
         UI::{
@@ -974,6 +974,24 @@ fn window_is_cloaked(hwnd: HWND) -> bool {
 }
 
 #[cfg(windows)]
+pub fn window_monitor_rect(hwnd: HWND) -> Option<DockRect> {
+    unsafe {
+        if !window_is_valid(hwnd) {
+            return None;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if monitor.0.is_null() || !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        rect_to_dock(info.rcMonitor)
+    }
+}
+
+#[cfg(windows)]
 fn coverage_candidate_for_window(hwnd: HWND) -> Option<WindowCoverageCandidate> {
     unsafe {
         if hwnd.0.is_null() {
@@ -1656,7 +1674,146 @@ fn finish_shell_taskbar_enumeration(
 }
 
 #[cfg(windows)]
+struct ConnectedMonitorSnapshot {
+    keys: Vec<String>,
+    path_keys_complete: bool,
+}
+
+#[cfg(windows)]
+fn connected_monitor_snapshot() -> anyhow::Result<ConnectedMonitorSnapshot> {
+    unsafe extern "system" fn collect(
+        monitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        let results = &mut *(data.0 as *mut Vec<anyhow::Result<(Vec<String>, bool)>>);
+        let read = || -> anyhow::Result<(Vec<String>, bool)> {
+            let mut info = MONITORINFOEXW {
+                monitorInfo: MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            anyhow::ensure!(
+                GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool(),
+                "connected monitor information unavailable"
+            );
+            let rect = rect_to_dock(info.monitorInfo.rcMonitor)
+                .ok_or_else(|| anyhow::anyhow!("invalid connected monitor rectangle"))?;
+            let len = info
+                .szDevice
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(info.szDevice.len());
+            let device = String::from_utf16_lossy(&info.szDevice[..len]);
+            anyhow::ensure!(!device.is_empty(), "connected monitor device unavailable");
+            let mut keys = vec![
+                taskbar_monitor_device_key(&device),
+                taskbar_monitor_key(rect),
+            ];
+            let path = displayconfig_monitor_path(&device);
+            if let Some(path) = path.as_ref() {
+                keys.push(taskbar_monitor_path_key(path));
+            }
+            Ok((keys, path.is_some()))
+        };
+        results.push(read());
+        BOOL(1)
+    }
+
+    let mut results: Vec<anyhow::Result<(Vec<String>, bool)>> = Vec::new();
+    anyhow::ensure!(
+        unsafe {
+            EnumDisplayMonitors(
+                None,
+                None,
+                Some(collect),
+                LPARAM(&mut results as *mut _ as isize),
+            )
+            .as_bool()
+        },
+        "connected monitor enumeration failed"
+    );
+    let mut snapshot = ConnectedMonitorSnapshot {
+        keys: Vec::new(),
+        path_keys_complete: true,
+    };
+    for result in results {
+        let (keys, complete) = result?;
+        snapshot.keys.extend(keys);
+        snapshot.path_keys_complete &= complete;
+    }
+    anyhow::ensure!(
+        !snapshot.keys.is_empty(),
+        "connected monitor enumeration is empty"
+    );
+    Ok(snapshot)
+}
+
+#[cfg(windows)]
+static SHELL_TASKBAR_KNOWN_KEYS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[cfg(windows)]
+fn shell_taskbar_matches_key(taskbar: &ShellTaskbarWindow, key: &str) -> bool {
+    taskbar.key == key || taskbar.device_key == key || taskbar.legacy_key == key
+}
+
+#[cfg(windows)]
+fn accept_shell_taskbar_snapshot(
+    known_keys: &mut Vec<String>,
+    taskbars: &[ShellTaskbarWindow],
+    read_connected: impl FnOnce() -> anyhow::Result<ConnectedMonitorSnapshot>,
+) -> anyhow::Result<()> {
+    let missing = known_keys
+        .iter()
+        .filter(|key| {
+            !taskbars
+                .iter()
+                .any(|taskbar| shell_taskbar_matches_key(taskbar, key))
+        })
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let connected = read_connected()?;
+        anyhow::ensure!(
+            !connected.keys.is_empty(),
+            "connected monitor enumeration is empty"
+        );
+        for key in missing {
+            anyhow::ensure!(
+                !connected.keys.contains(key),
+                "taskbar monitor is still connected; waiting for Shell"
+            );
+            anyhow::ensure!(
+                !key.starts_with("monitor-path:") || connected.path_keys_complete,
+                "monitor identity is unavailable; deferring taskbar fallback"
+            );
+        }
+    }
+    *known_keys = taskbars.iter().map(|taskbar| taskbar.key.clone()).collect();
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn shell_taskbar_windows() -> anyhow::Result<Vec<ShellTaskbarWindow>> {
+    shell_taskbar_windows_for_keys(&[])
+}
+
+#[cfg(windows)]
+pub fn shell_taskbar_windows_for_keys(
+    expected_keys: &[String],
+) -> anyhow::Result<Vec<ShellTaskbarWindow>> {
+    // Keep every caller on the last complete Shell inventory until a separate
+    // display query confirms removal. Repeated Shell omissions are not hotplug.
+    let mut known_keys = SHELL_TASKBAR_KNOWN_KEYS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    for key in expected_keys.iter().filter(|key| !key.is_empty()) {
+        if !known_keys.contains(key) {
+            known_keys.push(key.clone());
+        }
+    }
     let mut taskbars: Vec<anyhow::Result<ShellTaskbarWindow>> = Vec::new();
     let enumeration_result = unsafe {
         EnumWindows(
@@ -1670,12 +1827,13 @@ pub fn shell_taskbar_windows() -> anyhow::Result<Vec<ShellTaskbarWindow>> {
         taskbars.push(shell_taskbar_window()?);
     }
     taskbars.sort_by_key(|taskbar| (!taskbar.primary, taskbar.left, taskbar.top));
+    accept_shell_taskbar_snapshot(&mut known_keys, &taskbars, connected_monitor_snapshot)?;
     Ok(taskbars)
 }
 
 #[cfg(windows)]
 pub fn shell_taskbar_window_for_key(preferred_key: &str) -> anyhow::Result<ShellTaskbarWindow> {
-    let taskbars = shell_taskbar_windows()?;
+    let taskbars = shell_taskbar_windows_for_keys(&[preferred_key.to_string()])?;
     taskbars
         .iter()
         .find(|taskbar| {
@@ -1880,6 +2038,134 @@ mod shell_enumeration_tests {
         assert!(finish_shell_taskbar_enumeration(Vec::new(), Ok(()))
             .unwrap()
             .is_empty());
+    }
+
+    fn connected(keys: &[&str], complete: bool) -> ConnectedMonitorSnapshot {
+        ConnectedMonitorSnapshot {
+            keys: keys.iter().map(|key| (*key).into()).collect(),
+            path_keys_complete: complete,
+        }
+    }
+
+    #[test]
+    fn g3253_a_long_shell_gap_does_not_remove_a_still_connected_monitor() {
+        let original = vec![
+            "monitor-path:primary".into(),
+            "monitor-path:secondary".into(),
+        ];
+        let mut known = original.clone();
+        for _ in 0..8 {
+            assert!(accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+                Ok(connected(
+                    &["monitor-path:primary", "monitor-path:secondary"],
+                    true,
+                ))
+            })
+            .is_err());
+            assert_eq!(known, original);
+        }
+    }
+
+    #[test]
+    fn g3253_unknown_display_paths_and_read_failures_do_not_confirm_a_disconnect() {
+        for read in [
+            Ok(connected(&["device:primary", "device:secondary"], false)),
+            Ok(connected(&[], true)),
+            Err(anyhow::anyhow!("monitor enumeration failed")),
+        ] {
+            let original = vec!["monitor-path:secondary".into()];
+            let mut known = original.clone();
+            assert!(accept_shell_taskbar_snapshot(&mut known, &[sample()], || read).is_err());
+            assert_eq!(known, original);
+        }
+    }
+
+    #[test]
+    fn g3253_a_confirmed_disconnect_allows_fallback_and_reconnection() {
+        let mut known = vec![
+            "monitor-path:primary".into(),
+            "monitor-path:secondary".into(),
+        ];
+        accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+            Ok(connected(&["monitor-path:primary"], true))
+        })
+        .unwrap();
+        assert_eq!(known, ["monitor-path:primary"]);
+        let mut secondary = sample();
+        secondary.key = "monitor-path:secondary".into();
+        accept_shell_taskbar_snapshot(&mut known, &[sample(), secondary], || {
+            panic!("unchanged or added Shell targets do not need an extra display query")
+        })
+        .unwrap();
+        assert_eq!(known, ["monitor-path:primary", "monitor-path:secondary"]);
+    }
+
+    #[test]
+    fn g3253_monitor_aliases_do_not_trigger_a_disconnect_query() {
+        for key in ["device:primary", "monitor:0,0,1920,1080"] {
+            let mut known = vec![key.into()];
+            accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+                panic!("the existing monitor matches its saved alias")
+            })
+            .unwrap();
+            assert_eq!(known, ["monitor-path:primary"]);
+        }
+    }
+
+    #[test]
+    fn g3253_a_shell_identity_downgrade_does_not_select_a_new_profile() {
+        let mut known = vec!["monitor-path:primary".into()];
+        let mut transitional = sample();
+        transitional.key = transitional.device_key.clone();
+        assert!(
+            accept_shell_taskbar_snapshot(&mut known, &[transitional], || {
+                Ok(connected(&["device:primary"], false))
+            })
+            .is_err()
+        );
+        assert_eq!(known, ["monitor-path:primary"]);
+        accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+            panic!("the restored stable identity needs no disconnect query")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn g3253_first_snapshot_checks_the_requested_monitor_before_fallback() {
+        let mut known = vec!["monitor-path:secondary".into()];
+        assert!(accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+            Ok(connected(
+                &["monitor-path:primary", "monitor-path:secondary"],
+                true,
+            ))
+        })
+        .is_err());
+        assert_eq!(known, ["monitor-path:secondary"]);
+        accept_shell_taskbar_snapshot(&mut known, &[sample()], || {
+            Ok(connected(&["monitor-path:primary"], true))
+        })
+        .unwrap();
+        assert_eq!(known, ["monitor-path:primary"]);
+    }
+
+    #[test]
+    #[ignore = "read-only smoke against the current Windows display and Shell inventory"]
+    fn g3253_real_monitor_inventory_read_only() {
+        let monitors = connected_monitor_snapshot().unwrap();
+        let taskbars = shell_taskbar_windows().unwrap();
+        assert!(!monitors.keys.is_empty());
+        assert!(!taskbars.is_empty());
+        for taskbar in &taskbars {
+            assert!(monitors.keys.contains(&taskbar.device_key));
+            if monitors.path_keys_complete {
+                assert!(monitors.keys.contains(&taskbar.key));
+            }
+        }
+        println!(
+            "Read-only native smoke: {} Shell windows, identity-complete={}",
+            taskbars.len(),
+            monitors.path_keys_complete
+        );
     }
 }
 
