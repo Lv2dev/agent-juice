@@ -102,8 +102,9 @@ struct TaskbarDraggingPayload {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum UpdateInstallEvent {
+    Checking,
     Started {
-        version: String,
+        status: update::UpdateCheckResult,
     },
     Progress {
         downloaded_bytes: u64,
@@ -111,6 +112,13 @@ enum UpdateInstallEvent {
     },
     Verifying,
     Installing,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum UpdateInstallOutcome {
+    Current { status: update::UpdateCheckResult },
+    Installing { status: update::UpdateCheckResult },
 }
 
 #[derive(Default)]
@@ -5782,16 +5790,14 @@ async fn await_update_download<T, E>(
 async fn install_update(
     window: tauri::Window,
     app: tauri::AppHandle,
-    expected_version: String,
     on_event: tauri::ipc::Channel<UpdateInstallEvent>,
-) -> Result<(), String> {
+) -> Result<UpdateInstallOutcome, String> {
     ensure_panel_command(window.label())?;
     drop(window);
-    let expected = update::release_info_for_version(&expected_version)
-        .map_err(|_| "invalid expected update version".to_string())?;
     let _guard = UPDATE_OPERATION_GATE
         .try_lock()
         .map_err(|_| "update operation already in progress".to_string())?;
+    let _ = on_event.send(UpdateInstallEvent::Checking);
     let updater = updater_with_timeout(&app, UPDATE_DOWNLOAD_TIMEOUT_SECS)?;
     let available = tokio::time::timeout(
         std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS),
@@ -5799,19 +5805,25 @@ async fn install_update(
     )
     .await
     .map_err(|_| "update check timed out".to_string())?
-    .map_err(|_| "update check failed".to_string())?
-    .ok_or_else(|| "update is no longer available".to_string())?;
-    let actual = update::release_info_for_version(&available.version)
-        .map_err(|_| "invalid available update version".to_string())?;
-    if actual.version != expected.version {
-        return Err("available update changed; check again".to_string());
-    }
-    if !update::is_updater_asset_url_allowed(available.download_url.as_str(), &actual.version) {
-        return Err("update download URL is not allowed".to_string());
-    }
+    .map_err(|_| "update check failed".to_string())?;
+    let Some(available) = available else {
+        let status = update::record_update_check(env!("CARGO_PKG_VERSION"), None)
+            .map_err(|_| "update state save failed".to_string())?;
+        let _ = app.emit("update-status", &status);
+        return Ok(UpdateInstallOutcome::Current { status });
+    };
+    let actual = update::validate_install_release(
+        env!("CARGO_PKG_VERSION"),
+        &available.version,
+        available.download_url.as_str(),
+    )
+    .map_err(|_| "update release validation failed".to_string())?;
+    let status = update::record_update_check(env!("CARGO_PKG_VERSION"), Some(&actual.version))
+        .map_err(|_| "update state save failed".to_string())?;
+    let _ = app.emit("update-status", &status);
 
     let _ = on_event.send(UpdateInstallEvent::Started {
-        version: actual.version.clone(),
+        status: status.clone(),
     });
     let downloaded = std::sync::Arc::new(AtomicU64::new(0));
     let progress_downloaded = downloaded.clone();
@@ -5872,7 +5884,7 @@ async fn install_update(
 
     let _ = on_event.send(UpdateInstallEvent::Installing);
     exit_after_update_cleanup(app);
-    Ok(())
+    Ok(UpdateInstallOutcome::Installing { status })
 }
 
 #[tauri::command]
@@ -8680,6 +8692,40 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::{update, UpdateInstallOutcome};
+
+    #[test]
+    fn update_install_terminal_outcomes_include_the_authoritative_target() {
+        let status = update::UpdateCheckResult {
+            status: "update_available".into(),
+            current_version: "0.1.39".into(),
+            latest_version: Some("0.1.42".into()),
+            release_url: Some("https://github.com/Lv2dev/agent-juice/releases/tag/v0.1.42".into()),
+            checked_at: Some("2026-10-28T01:01:00Z".into()),
+            checked_now: true,
+            error: None,
+        };
+        let installing = serde_json::to_value(UpdateInstallOutcome::Installing {
+            status: status.clone(),
+        })
+        .unwrap();
+        assert_eq!(installing["outcome"], "installing");
+        assert_eq!(installing["status"]["latest_version"], "0.1.42");
+        assert_eq!(installing["status"]["checked_now"], true);
+        let current = serde_json::to_value(UpdateInstallOutcome::Current {
+            status: update::UpdateCheckResult {
+                status: "current".into(),
+                current_version: "0.1.42".into(),
+                release_url: None,
+                ..status
+            },
+        })
+        .unwrap();
+        assert_eq!(current["outcome"], "current");
+        assert_eq!(current["status"]["status"], "current");
+        assert_eq!(current["status"]["current_version"], "0.1.42");
+        assert_eq!(current["status"]["release_url"], serde_json::Value::Null);
+    }
     use crate::{
         config::{
             Settings, TaskbarLayoutProfile, TaskbarMonitorMode, TaskbarPlacement, TaskbarTopology,

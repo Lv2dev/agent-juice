@@ -130,6 +130,21 @@ pub fn is_updater_asset_url_allowed(url: &str, version: &str) -> bool {
     updater_asset_url_for_version(version).is_ok_and(|expected| url == expected)
 }
 
+pub fn validate_install_release(
+    current_version: &str,
+    available_version: &str,
+    download_url: &str,
+) -> anyhow::Result<ReleaseInfo> {
+    let release = release_info_for_version(available_version)?;
+    if !is_update_available(current_version, &release.version)? {
+        anyhow::bail!("update must be newer than the installed version");
+    }
+    if !is_updater_asset_url_allowed(download_url, &release.version) {
+        anyhow::bail!("update download URL is not allowed");
+    }
+    Ok(release)
+}
+
 pub fn update_package_size_is_allowed(downloaded: u64, content_length: Option<u64>) -> bool {
     downloaded <= MAX_UPDATE_PACKAGE_BYTES
         && content_length.is_none_or(|length| length <= MAX_UPDATE_PACKAGE_BYTES)
@@ -1284,6 +1299,45 @@ fn replace_existing_state_file(path: &Path, temp: &Path) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_release_uses_the_fresh_target_not_a_cached_version() {
+        let latest = "0.1.42";
+        let release = validate_install_release(
+            "0.1.39",
+            latest,
+            &updater_asset_url_for_version(latest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(release.version, latest);
+        assert_eq!(
+            release.url,
+            "https://github.com/Lv2dev/agent-juice/releases/tag/v0.1.42"
+        );
+    }
+
+    #[test]
+    fn install_release_rejects_equal_older_and_invalid_versions() {
+        for version in ["0.1.41", "0.1.40", "invalid", "0.1.42-beta", "0.1.42/other"] {
+            let url = format!("{RELEASES_URL}/download/v{version}/Juice_{version}_x64-setup.exe");
+            assert!(
+                validate_install_release("0.1.41", version, &url).is_err(),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_release_rejects_mismatched_and_untrusted_assets() {
+        for url in [
+            "http://github.com/Lv2dev/agent-juice/releases/download/v0.1.42/Juice_0.1.42_x64-setup.exe",
+            "https://example.com/Juice_0.1.42_x64-setup.exe",
+            "https://github.com/Lv2dev/agent-juice/releases/download/v0.1.41/Juice_0.1.41_x64-setup.exe",
+            "https://github.com/Lv2dev/agent-juice/releases/download/v0.1.42/Juice_0.1.42_x64-setup.exe?other=1",
+        ] {
+            assert!(validate_install_release("0.1.39", "0.1.42", url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn failed_state_replace_preserves_old_bytes_and_cleans_temp() {

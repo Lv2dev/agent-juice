@@ -293,7 +293,7 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 - 기본값은 켜짐이며 시작 15초 후, 마지막 성공 확인에서 24시간이 지난 경우에만 최신 정식 GitHub Release를 확인합니다.
 - 새 버전은 버전당 한 번 Windows 알림으로 안내하고 패널 위쪽에도 계속 확인 가능한 업데이트 띠를 표시합니다.
 - `업데이트 확인`은 24시간 캐시를 우회합니다. 자동 확인 실패는 조용히 넘어가고 수동 확인 실패만 패널에 표시합니다.
-- `업데이트 및 재시작`을 누르면 다운로드·서명 확인 진행 상태를 표시하며 공식 릴리즈의 설치 파일을 내려받고, 앱에 내장된 공개키와 설치 파일 버전을 검증한 뒤 passive 설치와 재시작을 수행합니다.
+- `업데이트 및 재시작`을 누르면 최신 정식 버전을 다시 확인합니다. 화면에 표시된 대상이 오래됐어도 새 대상을 표시하고 이어서 다운로드하며, 이미 최신이면 설치하지 않습니다. 다운로드·서명 확인 진행 상태를 표시하고, 앱에 내장된 공개키와 설치 파일 버전을 검증한 뒤 passive 설치와 재시작을 수행합니다.
 - 다운로드·서명·버전 검증 또는 업데이트 인계가 실패하면 현재 앱과 설정을 유지합니다. 설치가 끝나면 Juice가 설치된 버전을 다시 확인하고 앱을 재시작하며, 공식 Releases 페이지는 수동 설치가 필요한 경우를 위한 fallback으로 남습니다.
 - 앱 내 업데이터가 없는 v0.1.10 이하에서는 v0.1.11을 한 번 수동 설치해야 하며, 이후 정식 버전부터 원클릭 업데이트를 사용할 수 있습니다.
 - 확인 요청에는 GitHub token, Juice 계정, 사용량 데이터, 사용자 식별값, telemetry가 포함되지 않습니다.
@@ -638,7 +638,7 @@ Breathe runs only for live data. It stops for empty or stale values and becomes 
 - Enabled by default. Juice checks the latest stable GitHub Release 15 seconds after startup only when 24 hours have passed since the last successful check.
 - A new version produces one Windows notification per version and a persistent update band at the top of the panel.
 - `Check for updates` bypasses the 24-hour cache. Automatic failures stay quiet; manual failures are shown in the panel.
-- `Update and restart` shows download and signature-verification progress, fetches the installer from the official release, verifies its signature and embedded product version, and then performs a passive install and restart.
+- `Update and restart` checks the latest stable release again. If the displayed target is outdated, Juice refreshes it and continues downloading; if you are already up to date, nothing is installed. It shows download and signature-verification progress, verifies the installer signature and embedded product version, and then performs a passive install and restart.
 - If download, signature, version validation, or updater handoff fails, the current app and settings remain intact. After installation, Juice verifies the installed version again and restarts the app; the official Releases page remains available as a manual-install fallback.
 - Versions up to v0.1.10 do not contain the in-app updater, so v0.1.11 must be installed manually once. Later stable releases can then use one-click updates.
 - Requests include no GitHub token, Juice account, usage data, user identifier, or telemetry.

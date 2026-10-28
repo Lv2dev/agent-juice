@@ -611,7 +611,14 @@ async function loadSettings() {
   setStatus(t("status.settingsLoadFailed", currentLanguageSettings()), "error");
 }
 
-function renderUpdateStatus(result) {
+function renderUpdateStatus(result, fromInstall = false) {
+  if (updateInstallBusy && !fromInstall) return;
+  if (!fromInstall && result?.checked_at && currentUpdateStatus?.checked_at) {
+    const incoming = Date.parse(result.checked_at);
+    const current = Date.parse(currentUpdateStatus.checked_at);
+    if (Number.isFinite(incoming) && Number.isFinite(current)
+      && (incoming < current || (incoming === current && updateStatusEl?.dataset.state === "error"))) return;
+  }
   if (result && typeof result === "object") currentUpdateStatus = result;
   const state = currentUpdateStatus;
   const language = currentLanguageSettings();
@@ -679,6 +686,7 @@ function showUpdateProgress(percent, text, state = "progress") {
 
 function renderUpdateInstallEvent(event) {
   const language = currentLanguageSettings();
+  if (event?.event === "started") renderUpdateStatus(event.status, true);
   if (event?.event === "progress") {
     const downloaded = Number(event.downloaded_bytes) || 0;
     const total = Number(event.content_length) || 0;
@@ -691,7 +699,9 @@ function renderUpdateInstallEvent(event) {
     return;
   }
 
-  const key = event?.event === "installing"
+  const key = event?.event === "checking"
+    ? "status.updateChecking"
+    : event?.event === "installing"
     ? "status.updateInstalling"
     : event?.event === "verifying"
       ? "status.updateVerifying"
@@ -702,15 +712,14 @@ function renderUpdateInstallEvent(event) {
     updateStatusEl.textContent = t(key, language);
     updateStatusEl.dataset.state = event?.event ?? "preparing";
   }
-  const percent = event?.event === "installing" ? 100 : event?.event === "verifying" ? null : 0;
+  const percent = event?.event === "installing" ? 100 : ["checking", "verifying"].includes(event?.event) ? null : 0;
   showUpdateProgress(percent, t(key, language), event?.event ?? "preparing");
 }
 
 async function installAvailableUpdate() {
   if (updateInstallPromise) return updateInstallPromise;
-  const version = currentUpdateStatus?.latest_version;
   const Channel = tauriApi().core?.Channel;
-  if (!version || typeof Channel !== "function") {
+  if (typeof Channel !== "function") {
     const message = t("status.updateInstallFailed", currentLanguageSettings());
     if (updateStatusEl) {
       updateStatusEl.textContent = message;
@@ -722,7 +731,10 @@ async function installAvailableUpdate() {
   }
 
   const onEvent = new Channel();
-  onEvent.onmessage = renderUpdateInstallEvent;
+  let acceptingEvents = true;
+  onEvent.onmessage = (event) => {
+    if (acceptingEvents) renderUpdateInstallEvent(event);
+  };
   setUpdateInstallBusy(true);
   setUpdateFallbackVisible(false);
   renderUpdateInstallEvent({ event: "preparing" });
@@ -731,8 +743,17 @@ async function installAvailableUpdate() {
   const attempt = (async () => {
     await enqueueLatestSettingsSave({ failOnRollback: true });
     stage = "installing";
-    await invoke("install_update", { expectedVersion: version, onEvent });
-    handoffAccepted = true;
+    const result = await invoke("install_update", { onEvent });
+    if (result?.outcome === "current" && result.status?.status === "current") {
+      renderUpdateStatus(result.status, true);
+      for (const progress of updateInstallProgressEls) progress.hidden = true;
+    } else if (result?.outcome === "installing" && result.status?.status === "update_available") {
+      renderUpdateStatus(result.status, true);
+      renderUpdateInstallEvent({ event: "installing" });
+      handoffAccepted = true;
+    } else {
+      throw new Error("invalid update outcome");
+    }
   })();
   updateInstallPromise = attempt;
   try {
@@ -747,6 +768,7 @@ async function installAvailableUpdate() {
     showUpdateProgress(0, message, "error");
     setUpdateFallbackVisible(true);
   } finally {
+    acceptingEvents = false;
     if (updateInstallPromise === attempt) updateInstallPromise = null;
     if (!handoffAccepted) setUpdateInstallBusy(false);
   }
