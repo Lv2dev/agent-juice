@@ -1202,10 +1202,15 @@ impl CodexBrokerWorker {
             Err(error) => {
                 let transport_failed = matches!(error, SessionRequestError::Transport(_));
                 let error = error.into_message();
-                if transport_failed {
+                // Quota auth failures can pin old credentials; retry a fresh session after backoff.
+                let retire_session = transport_failed
+                    || (self.protocol == BrokerProtocol::Codex
+                        && method == "account/rateLimits/read"
+                        && text_requires_login(&error));
+                if retire_session {
                     self.session.take();
                 }
-                if !transport_failed {
+                if !retire_session {
                     self.consecutive_failures = 0;
                     self.retry_at = None;
                     self.retry_error = None;
@@ -3921,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_broker_preserves_authentication_errors_without_restarting_a_healthy_session() {
+    fn codex_broker_preserves_authentication_errors_during_reconnect_backoff() {
         let spawns = Arc::new(AtomicUsize::new(0));
         let broker = fake_persistent_broker(
             Arc::clone(&spawns),
@@ -3972,6 +3977,159 @@ mod tests {
         assert!(format!("{second:#}").contains("command unavailable"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         broker.shutdown_for_test();
+    }
+
+    #[test]
+    fn codex_rate_limit_auth_failure_recovers_on_a_fresh_session_after_backoff() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&spawns);
+        let factory: CodexCommandFactory = Arc::new(move || {
+            let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+            let mut command = test_process("collector::tests::fake_persistent_app_server_child");
+            command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+            if first {
+                command.env("AGENT_JUICE_FAKE_BROKER_AUTH_ERROR", "1");
+            }
+            Ok(command)
+        });
+        let policy = Arc::new(BrokerPolicy::new(true));
+        let generation = policy.admission().unwrap();
+        let mut worker = CodexBrokerWorker::new(
+            BrokerProtocol::Codex,
+            factory,
+            policy,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+        let first = worker.handle_request(
+            "account/rateLimits/read",
+            Instant::now() + Duration::from_secs(2),
+            generation,
+        );
+        let retired = worker.session.is_none();
+        let backed_off = worker.retry_at.is_some();
+        let immediate = worker.handle_request(
+            "account/rateLimits/read",
+            Instant::now() + Duration::from_secs(2),
+            generation,
+        );
+        let spawns_before_retry = spawns.load(Ordering::SeqCst);
+        // Expire the retry deadline directly so the test never waits on wall-clock timing.
+        worker.retry_at = Some(Instant::now());
+        let recovered = worker.handle_request(
+            "account/rateLimits/read",
+            Instant::now() + Duration::from_secs(2),
+            generation,
+        );
+        let shared = recovered.as_ref().ok().map(|_| {
+            worker.handle_request(
+                "account/usage/read",
+                Instant::now() + Duration::from_secs(2),
+                generation,
+            )
+        });
+        let recovery_backoff_cleared = worker.retry_at.is_none();
+        worker.reset();
+        assert!(first
+            .as_ref()
+            .is_err_and(|error| text_requires_login(error)));
+        assert!(immediate
+            .as_ref()
+            .is_err_and(|error| text_requires_login(error)));
+        assert_eq!(spawns_before_retry, 1);
+        assert!(
+            retired,
+            "a rate-limit authentication failure must release stale auth state"
+        );
+        assert!(
+            backed_off,
+            "authentication failure must not trigger a spawn loop"
+        );
+        let recovered: Value =
+            serde_json::from_str(&recovered.expect("new session should recover")).unwrap();
+        let shared: Value = serde_json::from_str(&shared.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            recovered.pointer("/result/fixturePid"),
+            shared.pointer("/result/fixturePid")
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        assert!(recovery_backoff_cleared);
+    }
+
+    #[test]
+    fn codex_quota_non_auth_error_keeps_the_healthy_connection() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let broker = fake_persistent_broker(
+            Arc::clone(&spawns),
+            |command| {
+                command.env("AGENT_JUICE_FAKE_BROKER_ERROR_ONCE", "1");
+            },
+            Duration::from_secs(60),
+        );
+        let first = broker.request("account/rateLimits/read", Duration::from_secs(2));
+        let recovered = broker.request("account/rateLimits/read", Duration::from_secs(2));
+        let shared = broker.request("account/usage/read", Duration::from_secs(2));
+        broker.shutdown_for_test();
+        assert!(first
+            .as_ref()
+            .is_err_and(|error| !error_requires_login(error)));
+        let recovered: Value = serde_json::from_str(&recovered.unwrap()).unwrap();
+        let shared: Value = serde_json::from_str(&shared.unwrap()).unwrap();
+        assert_eq!(
+            recovered.pointer("/result/fixturePid"),
+            shared.pointer("/result/fixturePid")
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn codex_repeated_quota_auth_failures_increase_and_cap_reconnect_backoff() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&spawns);
+        let factory: CodexCommandFactory = Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let mut command = test_process("collector::tests::fake_persistent_app_server_child");
+            command.env("AGENT_JUICE_FAKE_PERSISTENT_APP_SERVER", "1");
+            command.env("AGENT_JUICE_FAKE_BROKER_AUTH_ERROR", "1");
+            Ok(command)
+        });
+        let policy = Arc::new(BrokerPolicy::new(true));
+        let generation = policy.admission().unwrap();
+        let mut worker = CodexBrokerWorker::new(
+            BrokerProtocol::Codex,
+            factory,
+            policy,
+            CODEX_BROKER_MIN_BACKOFF,
+            CODEX_BROKER_MAX_BACKOFF,
+        );
+        for (index, seconds) in [30, 60, 120, 240, 300, 300].into_iter().enumerate() {
+            worker.retry_at = Some(Instant::now());
+            let began = Instant::now();
+            let error = worker.handle_request(
+                "account/rateLimits/read",
+                began + Duration::from_secs(2),
+                generation,
+            );
+            let ended = Instant::now();
+            assert!(error
+                .as_ref()
+                .is_err_and(|error| text_requires_login(error)));
+            assert!(worker.session.is_none());
+            assert_eq!(worker.consecutive_failures, (index + 1) as u32);
+            let retry = worker.retry_at.unwrap();
+            let expected = Duration::from_secs(seconds);
+            assert!(retry >= began + expected && retry <= ended + expected);
+            let blocked = worker.handle_request(
+                "account/rateLimits/read",
+                Instant::now() + Duration::from_secs(2),
+                generation,
+            );
+            assert!(blocked
+                .as_ref()
+                .is_err_and(|error| text_requires_login(error)));
+            assert_eq!(spawns.load(Ordering::SeqCst), index + 1);
+        }
+        worker.reset();
     }
 
     #[cfg(windows)]
