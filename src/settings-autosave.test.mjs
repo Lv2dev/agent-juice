@@ -331,14 +331,21 @@ test("settings form auto-saves changed values without a submit button", async ()
           if (command === "install_update") {
             installUpdateCalls += 1;
             installEventChannel = args.onEvent;
-            args.onEvent.onmessage?.({ event: "started", version: "0.1.12" });
+            args.onEvent.onmessage?.({ event: "checking" });
+            args.onEvent.onmessage?.({ event: "started", status: {
+              status: "update_available", current_version: "0.1.11", latest_version: "0.1.12",
+              release_url: "https://github.com/Lv2dev/agent-juice/releases/tag/v0.1.12",
+            } });
             args.onEvent.onmessage?.({
               event: "progress",
               downloaded_bytes: 50,
               content_length: 100,
             });
             return new Promise((resolve) => {
-              resolveInstallUpdate = resolve;
+              resolveInstallUpdate = () => resolve({ outcome: "installing", status: {
+                status: "update_available", current_version: "0.1.11", latest_version: "0.1.12",
+                release_url: "https://github.com/Lv2dev/agent-juice/releases/tag/v0.1.12",
+              } });
             });
           }
           return null;

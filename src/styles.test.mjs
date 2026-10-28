@@ -1285,7 +1285,8 @@ test("about and update sections keep product copy separate from guarded update c
   assert.match(settingsJs, /\[role="tab"\]\[data-settings-tab\]/);
   assert.match(settingsJs, /function actionFromEvent[\s\S]*closest\?\.\("\[data-action\]"\)/);
   assert.match(settingsJs, /new Channel\(\)/);
-  assert.match(settingsJs, /invoke\("install_update", \{ expectedVersion: version, onEvent \}\)/);
+  assert.match(settingsJs, /invoke\("install_update", \{ onEvent \}\)/);
+  assert.doesNotMatch(settingsJs, /expectedVersion/);
   assert.match(settingsJs, /invoke\("open_release_page", \{ url:/);
   assert.match(rustLib, /plugin\(tauri_plugin_notification::init\(\)\)/);
   assert.match(rustLib, /plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
@@ -1320,8 +1321,11 @@ test("updates use one signed HTTPS manifest without exposing updater capability 
   assert.match(cargoToml, /tauri-plugin-updater = "2\.10\.1"/);
   assert.doesNotMatch(rustUpdate, /api\.github\.com|curl\.exe|fetch_latest_release/);
   assert.match(rustLib, /UPDATE_OPERATION_GATE[\s\S]*available\.download\(/);
-  assert.match(rustLib, /available update changed; check again/);
-  assert.match(rustLib, /is_updater_asset_url_allowed/);
+  assert.match(rustLib, /UpdateInstallEvent::Checking/);
+  assert.match(rustLib, /validate_install_release/);
+  assert.match(rustUpdate, /is_updater_asset_url_allowed\(download_url, &release.version\)/);
+  assert.match(rustUpdate, /is_update_available\(current_version, &release.version\)/);
+  assert.doesNotMatch(rustLib, /available update changed; check again/);
   assert.match(rustLib, /update_package_size_is_allowed/);
   assert.match(rustLib, /prepare_verified_installer/);
   assert.match(rustLib, /spawn_update_helper/);
@@ -1854,7 +1858,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.41"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.42"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
