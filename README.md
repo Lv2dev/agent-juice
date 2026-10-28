@@ -349,7 +349,7 @@ Juice v1은 별도 Juice 서버로 PC 간 데이터를 동기화하지 않습니
 - Cursor 한도는 GUI 또는 Agent CLI의 local access token을 고정 Cursor Dashboard usage endpoint에만 전달합니다. refresh token은 사용·보관하지 않으며, credential 기반 조회가 불가능할 때만 Agent PTY `/usage`를 사용합니다.
 - Cursor 토큰 활동은 같은 account Dashboard의 event를 읽으며 계정 전체 범위입니다. Juice는 날짜별 네 token component 합계만 local cache에 남기고 email·model·conversation/request ID와 raw response를 저장하지 않습니다.
 - Codex 한도와 토큰 활동은 로그인된 공식 Desktop/CLI app-server의 persistent stdio connection으로 `account/rateLimits/read`와 `account/usage/read`를 직렬 조회합니다. 계정 token을 직접 읽지 않고 raw response도 저장하지 않습니다.
-- 정상 형식의 RPC 오류는 조회 실패로 알리되 연결을 유지합니다. 통신 단절·타임아웃·잘못된 프레임·초기화 실패에서는 기존 연결 정리와 재시도 제한을 적용합니다.
+- Codex 한도 조회가 인증 오류로 실패하면 잠시 대기한 뒤 다시 조회합니다. 실제 로그아웃 상태에서는 Codex에 다시 로그인해야 하며, 일시적인 통신 오류에도 재시도 대기가 적용됩니다.
 - 수집을 끄면 이전 활성화 상태에서 대기하던 조회도 취소합니다. 빠르게 다시 켜도 이전 종료 요청이 새 연결을 끊지 않습니다.
 - Antigravity CLI 계정 조회는 원문, email·text·token, 대화 본문을 저장하지 않습니다. 모델 토큰·턴 수가 `0`인 공식 읽기 전용 응답의 Gemini 한도와 초기화 시각만 사용하며, 로그인 정보는 CLI 내부에 맡깁니다. 이전 버전 statusline 자료와 복원 기록은 다른 수집값과 합치지 않습니다.
 - 업데이트 확인은 고정된 GitHub `latest.json` 주소로 표준 HTTPS 요청만 전송합니다. 사용자가 설치를 승인하면 해당 manifest가 지정한 서명된 설치 파일만 내려받으며, 계정 token, 사용량, PC 식별값은 보내지 않습니다.
@@ -694,7 +694,7 @@ Viewing one PC's usage from another PC belongs to a later multi-PC version.
 - Cursor limits send the GUI or Agent CLI local access token only to the fixed Cursor Dashboard usage endpoint. Juice never uses or retains the refresh token and invokes Agent PTY `/usage` only when credential-based lookup is unavailable.
 - Cursor token activity is account-wide. Juice stores only daily totals of the four token components and discards email, model, conversation/request IDs, and raw responses.
 - Codex limits and token activity serialize `account/rateLimits/read` and `account/usage/read` over one persistent stdio connection to the logged-in official Desktop/CLI app-server. Juice never reads the account token directly and never stores raw responses.
-- Valid RPC errors remain query failures without retiring the connection. Transport failures, timeouts, malformed frames, and initialization failures retain bounded cleanup and retry behavior.
+- If a Codex quota read fails with an authentication error, Juice waits before trying again. If you are actually signed out, sign in to Codex again. Temporary transport failures also remain subject to retry delays.
 - Disabling collection also cancels queued reads from the previous activation. Re-enabling quickly does not let an old cleanup request close the new connection.
 - Antigravity CLI account reads store no raw responses, email, text, token, or conversation content. Only Gemini quotas and reset times from a zero-token, zero-turn read-only response are used, and the CLI handles its own login. Old statusline snapshots and restoration records are not merged into another source.
 - Update checks send only a standard HTTPS request to the fixed GitHub `latest.json` endpoint. After user approval, Juice downloads only the signed installer named by that manifest. It sends no account token, usage data, or PC identifier.
