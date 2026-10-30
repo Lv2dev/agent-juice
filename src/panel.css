@@ -2329,6 +2329,12 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
 
 /* ---------- collection issue message ---------- */
 
+.tool-card[data-collection-issue="true"] .empty-hint {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+
 .tool-card[data-collection-issue="true"] .meta {
   grid-area: auto;
   grid-column: 1 / -1;

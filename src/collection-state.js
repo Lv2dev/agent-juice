@@ -1,6 +1,9 @@
 import { t } from "./i18n.js";
 
 export function collectionIssue(tool, health, language) {
+  if (tool === "cursor" && health === "credentials_error") {
+    return { short: t("collection.cursorCredentialsError", language), detail: t("collection.cursorCredentialsErrorDetail", language) };
+  }
   if (tool !== "claude") return null;
   return issueForHealth(health, language);
 }

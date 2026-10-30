@@ -243,7 +243,8 @@ Grok은 기존 사용자에게 빈 세 번째 바가 갑자기 생기지 않도�
 
 Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않도록 기본값이 **꺼짐**입니다. `표시줄` 탭에서 **Cursor 활성화**를 켜면 두 월간 풀과 Cursor 계정 토큰 활동을 함께 수집합니다.
 
-- Juice는 먼저 Cursor GUI `state.vscdb`의 필요한 `ItemTable` 키 두 개만 read-only snapshot으로 조회합니다. DB에 큰 `cursorDiskKV`가 있어 파일이 64MB 또는 1GB를 넘어도 전체 테이블을 메모리에 올리지 않습니다.
+- Juice는 먼저 Cursor GUI `state.vscdb`에서 토큰·계정·암호화 설정에 필요한 `ItemTable` 키만 read-only snapshot으로 조회합니다. DB에 큰 `cursorDiskKV`가 있어 파일이 64MB 또는 1GB를 넘어도 전체 테이블을 메모리에 올리지 않습니다.
+- Windows에서 Cursor가 `safeStorage`로 암호화한 로그인 토큰도 지원합니다. 같은 Windows 사용자의 DPAPI와 Cursor `Local State` 키로 메모리에서만 복호화하며, 저장된 암호문을 API에 보내지 않습니다. 유효한 GUI 로그인은 만료된 CLI 토큰보다 우선합니다. 복호화 실패는 `로그인 필요`와 구분해 표시합니다.
 - GUI credential을 사용할 수 없으면 Cursor Agent CLI의 bounded `auth.json` access token과 `cli-config.json` userId를 사용해 같은 Dashboard usage를 조회합니다. refresh token은 사용하거나 보관하지 않습니다.
 - Dashboard의 `Auto`는 **Cursor Models**, `API`는 **Other Models**로 표시합니다. GUI와 CLI는 같은 계정의 월간 풀 하나를 공유합니다.
 - Dashboard credential이 없는 구버전 CLI 환경에서만 `%LOCALAPPDATA%\cursor-agent`의 provider-specific runtime을 검증한 뒤 숨은 Windows ConPTY `/usage`를 최후 fallback으로 사용합니다. 일반 `agent` 명령은 사용하지 않습니다.
@@ -588,7 +589,8 @@ Enable **Antigravity** in the `Taskbar` tab to display **Gemini's five-hour and 
 
 Cursor defaults to **off** so existing users do not suddenly receive an empty fourth bar. Enabling **Cursor** in the `Taskbar` tab starts its two monthly pools and account token activity together.
 
-- Juice first opens Cursor GUI `state.vscdb` as a read-only snapshot and queries only the two required `ItemTable` keys. Large unrelated `cursorDiskKV` content does not cause the whole database to be loaded or rejected, even when the file exceeds 64 MB or 1 GB.
+- Juice first opens Cursor GUI `state.vscdb` as a read-only snapshot and queries only the required token, account, and encryption-setting `ItemTable` keys. Large unrelated `cursorDiskKV` content does not cause the whole database to be loaded or rejected, even when the file exceeds 64 MB or 1 GB.
+- On Windows, Juice also supports login tokens encrypted by Cursor's `safeStorage`. It decrypts them only in memory using the same Windows user's DPAPI and Cursor's `Local State` key, never sending the stored envelope to the API. Valid GUI credentials take precedence over expired CLI tokens. Decryption failures are displayed separately from sign-in requirements.
 - When GUI credentials are unavailable, Juice reads the bounded Cursor Agent CLI `auth.json` access token and `cli-config.json` userId and calls the same Dashboard usage endpoint. It never uses or retains the refresh token.
 - Dashboard Auto maps to **Cursor Models** and API maps to **Other Models**. GUI and CLI share the same monthly account pools.
 - Only legacy CLI environments without usable Dashboard credentials use hidden ConPTY `/usage` as the final fallback. Juice validates the provider-specific runtime and never invokes a generic `agent` command.
