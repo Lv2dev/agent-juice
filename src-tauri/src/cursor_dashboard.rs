@@ -469,6 +469,27 @@ fn query_value(
         .ok_or_else(|| DashboardError::login("Cursor login required"))
 }
 
+fn query_access_token(transaction: &Transaction<'_>) -> Result<Zeroizing<Vec<u8>>, DashboardError> {
+    if let Some(token) =
+        query_optional_value(transaction, ACCESS_TOKEN_KEY, MAX_STORED_TOKEN_BYTES)?
+    {
+        return Ok(Zeroizing::new(token));
+    }
+    // Distinguish a rejected stored value from logout without loading that value.
+    let oversized: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ItemTable WHERE key = ?1 AND length(value) > ?2)",
+            (ACCESS_TOKEN_KEY, MAX_STORED_TOKEN_BYTES as i64),
+            |row| row.get(0),
+        )
+        .map_err(|_| DashboardError::unavailable("Cursor state query failed"))?;
+    Err(if oversized {
+        DashboardError::credentials_decode()
+    } else {
+        DashboardError::login("Cursor login required")
+    })
+}
+
 fn query_optional_value(
     transaction: &Transaction<'_>,
     key: &str,
@@ -896,11 +917,7 @@ fn read_credentials_from(
     let transaction = connection
         .transaction()
         .map_err(|_| DashboardError::unavailable("Cursor state snapshot failed"))?;
-    let token = Zeroizing::new(query_value(
-        &transaction,
-        ACCESS_TOKEN_KEY,
-        MAX_STORED_TOKEN_BYTES,
-    )?);
+    let token = query_access_token(&transaction)?;
     let encryption_enabled = query_optional_value(&transaction, ENCRYPTION_ENABLED_KEY, 16)?
         .is_some_and(|value| value == b"true");
     let application = query_value(&transaction, APPLICATION_USER_KEY, MAX_APPLICATION_BYTES)?;
@@ -1438,6 +1455,45 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn oversized_stored_credentials_are_not_mistaken_for_missing_login() {
+        let db = fixture_path("oversized-envelope");
+        let connection = create_credentials_fixture(&db, false);
+        let stored = format!(
+            "{TOKEN_ENVELOPE_PREFIX}{}",
+            "A".repeat(MAX_STORED_TOKEN_BYTES + 1 - TOKEN_ENVELOPE_PREFIX.len())
+        );
+        connection
+            .execute(
+                "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+                (&stored, ACCESS_TOKEN_KEY),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let result = resolve_credential_sources(read_credentials_from(&db, deadline), || {
+            Err(DashboardError::login("Cursor login required"))
+        });
+        assert!(matches!(
+            result,
+            Err(DashboardError {
+                kind: DashboardErrorKind::CredentialsDecode,
+                ..
+            })
+        ));
+        connection
+            .execute("DELETE FROM ItemTable WHERE key = ?1", (ACCESS_TOKEN_KEY,))
+            .unwrap();
+        assert!(matches!(
+            read_credentials_from(&db, deadline),
+            Err(DashboardError {
+                kind: DashboardErrorKind::LoginRequired,
+                ..
+            })
+        ));
+        drop(connection);
+        std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
     }
 
     fn create_cli_credentials_fixture(
