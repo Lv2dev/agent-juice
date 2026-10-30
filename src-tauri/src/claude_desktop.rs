@@ -596,9 +596,7 @@ fn query_credentials_cached(
 }
 
 #[cfg(windows)]
-mod crypto;
-#[cfg(windows)]
-use crypto::{decrypt, unprotect};
+use crate::electron_windows::{decrypt, unprotect};
 #[cfg(not(windows))]
 fn decrypt(_: &[u8], _: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     Err(Error::Unavailable)

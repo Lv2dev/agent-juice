@@ -248,7 +248,7 @@ function renderTool(tool, now) {
   card.dataset.state = vm.state;
   // Collection issues replace the short meta with a sentence; give it its own full-width row.
   card.dataset.collectionIssue = String(
-    ["live", "stale"].includes(vm.state)
+    ["live", "stale", "empty"].includes(vm.state)
       && Boolean(panelCollectionIssue(tool, collectionHealth?.[tool], resolveLanguage(settings))),
   );
   card.style?.setProperty("--tool-brand", vm.brandColor);

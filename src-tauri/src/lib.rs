@@ -9,6 +9,8 @@ pub mod config;
 pub mod cursor_activity;
 pub mod cursor_dashboard;
 pub mod cursor_pty;
+#[cfg(windows)]
+mod electron_windows;
 pub(crate) mod http_transport;
 pub mod model;
 pub mod paths;
@@ -2799,9 +2801,9 @@ fn validate_cursor_dashboard_response<T>(
     // Revalidate failed responses too, before retaining last-good or starting a fallback.
     match current_scope() {
         Ok(current) if current == expected => response.map_err(|error| (error, Some(expected))),
-        Err(CollectionErrorKind::LoginRequired) => {
-            Err((CollectionErrorKind::LoginRequired, Some(expected)))
-        }
+        Err(
+            error @ (CollectionErrorKind::LoginRequired | CollectionErrorKind::CredentialsDecode),
+        ) => Err((error, Some(expected))),
         _ => Err((CollectionErrorKind::SourceChanged, Some(expected))),
     }
 }
@@ -2922,13 +2924,16 @@ fn resolve_cursor_dashboard_first(
 ) -> Result<(AgentStatus, CursorStatusSource), CollectionErrorKind> {
     match dashboard {
         Ok((status, scope)) => Ok((status, CursorStatusSource::Dashboard(scope))),
-        Err((error, None)) if previous_scope.is_some() => {
-            Err(if error == CollectionErrorKind::LoginRequired {
-                CollectionErrorKind::LoginRequired
+        Err((error, None)) if previous_scope.is_some() => Err(
+            if matches!(
+                error,
+                CollectionErrorKind::LoginRequired | CollectionErrorKind::CredentialsDecode
+            ) {
+                error
             } else {
                 CollectionErrorKind::SourceChanged
-            })
-        }
+            },
+        ),
         Err((CollectionErrorKind::LoginRequired, Some(_))) => {
             Err(CollectionErrorKind::LoginRequired)
         }
@@ -2967,6 +2972,9 @@ fn dashboard_collection_error(kind: cursor_dashboard::DashboardErrorKind) -> Col
         cursor_dashboard::DashboardErrorKind::LoginRequired => CollectionErrorKind::LoginRequired,
         cursor_dashboard::DashboardErrorKind::Unavailable => CollectionErrorKind::Unavailable,
         cursor_dashboard::DashboardErrorKind::ScopeChanged => CollectionErrorKind::SourceChanged,
+        cursor_dashboard::DashboardErrorKind::CredentialsDecode => {
+            CollectionErrorKind::CredentialsDecode
+        }
     }
 }
 
@@ -2981,6 +2989,11 @@ fn combine_cursor_collection_errors(
     }
     if matches!(dashboard, CollectionErrorKind::LoginRequired) {
         return CollectionErrorKind::LoginRequired;
+    }
+    if matches!(agent, CollectionErrorKind::CredentialsDecode)
+        || matches!(dashboard, CollectionErrorKind::CredentialsDecode)
+    {
+        return CollectionErrorKind::CredentialsDecode;
     }
     if matches!(
         agent,
@@ -11221,6 +11234,37 @@ mod tests {
             },
         );
         assert!(matches!(changed, Err((E::SourceChanged, _))));
+    }
+
+    #[test]
+    fn cursor_credential_decode_failure_survives_scope_checks_without_cli_fallback() {
+        use super::CollectionErrorKind as E;
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 7,
+            team_id: None,
+        };
+        let checked = super::validate_cursor_dashboard_response::<AgentStatus>(
+            scope,
+            Err(E::Transport),
+            || Err(E::CredentialsDecode),
+        );
+        assert!(matches!(checked, Err((E::CredentialsDecode, Some(actual))) if actual == scope));
+        for previous in [None, Some(scope)] {
+            let result = super::resolve_cursor_dashboard_first(
+                Err((E::CredentialsDecode, None)),
+                || panic!("decode failures must not start an unbound CLI"),
+                || panic!("decode failures must not revalidate a CLI fallback"),
+                previous,
+            );
+            assert!(matches!(result, Err(E::CredentialsDecode)));
+        }
+        let result = super::resolve_cursor_dashboard_first(
+            Err((E::Parse, Some(scope))),
+            || Ok(status_for_signature("fallback")),
+            || Err(E::CredentialsDecode),
+            Some(scope),
+        );
+        assert!(matches!(result, Err(E::CredentialsDecode)));
     }
 
     #[test]

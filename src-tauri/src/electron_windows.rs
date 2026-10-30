@@ -1,4 +1,3 @@
-use super::Error;
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -8,7 +7,12 @@ use windows::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub(super) fn unprotect(input: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+#[derive(Debug)]
+pub(crate) enum Error {
+    Unavailable,
+}
+
+pub(crate) fn unprotect(input: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     if input.is_empty() || input.len() > 4096 {
         return Err(Error::Unavailable);
     }
@@ -56,7 +60,7 @@ impl Drop for Key {
     }
 }
 
-pub(super) fn decrypt(key: &[u8], encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub(crate) fn decrypt(key: &[u8], encrypted: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     if key.len() != 32
         || encrypted.len() < 31
         || encrypted.len() > 1024 * 1024

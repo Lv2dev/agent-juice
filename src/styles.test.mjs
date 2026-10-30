@@ -1858,7 +1858,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.42"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.43"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1919,6 +1919,8 @@ test("Paper is a light-only panel skin stored separately from the theme", () => 
 });
 
 test("collection issue messages get a full-width row instead of the narrow meta column", () => {
+  assert.match(panelBlock('.tool-card[data-collection-issue="true"] .empty-hint'), /white-space: normal/);
+  assert.match(panelBlock('.tool-card[data-collection-issue="true"] .empty-hint'), /overflow-wrap: anywhere/);
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /grid-column: 1 \/ -1/);
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /white-space: normal/);
   assert.match(panelJs, /card\.dataset\.collectionIssue = String\(/);

@@ -1,5 +1,8 @@
 use crate::http_transport::{self, HttpErrorKind, HttpMethod};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +22,11 @@ const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 const APPLICATION_USER_KEY: &str =
     "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
+const TOKEN_ENVELOPE_PREFIX: &str = "cursor-safe-storage:v1:";
+const ENCRYPTION_ENABLED_KEY: &str = "cursor.storage.authTokenEncryptionAtRest";
+const MAX_STORED_TOKEN_BYTES: usize =
+    (MAX_TOKEN_BYTES + 31).div_ceil(3) * 4 + TOKEN_ENVELOPE_PREFIX.len();
+const MAX_LOCAL_STATE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_APPLICATION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CLI_AUTH_FILE_BYTES: u64 = 64 * 1024;
 const MAX_CLI_CONFIG_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -56,7 +64,7 @@ fn invalidate_scope(scope: AccountScope) {
 }
 
 pub struct DashboardCredentials {
-    access_token: String,
+    access_token: Zeroizing<String>,
     pub scope: AccountScope,
 }
 
@@ -104,6 +112,7 @@ pub enum DashboardErrorKind {
     Unavailable,
     Oversized,
     ScopeChanged,
+    CredentialsDecode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +144,13 @@ impl DashboardError {
 
     fn unavailable(context: &'static str) -> Self {
         Self::new(DashboardErrorKind::Unavailable, context)
+    }
+
+    fn credentials_decode() -> Self {
+        Self::new(
+            DashboardErrorKind::CredentialsDecode,
+            "Cursor stored credentials could not be decrypted",
+        )
     }
 }
 
@@ -449,6 +465,36 @@ fn query_value(
     key: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>, DashboardError> {
+    query_optional_value(transaction, key, max_bytes)?
+        .ok_or_else(|| DashboardError::login("Cursor login required"))
+}
+
+fn query_access_token(transaction: &Transaction<'_>) -> Result<Zeroizing<Vec<u8>>, DashboardError> {
+    if let Some(token) =
+        query_optional_value(transaction, ACCESS_TOKEN_KEY, MAX_STORED_TOKEN_BYTES)?
+    {
+        return Ok(Zeroizing::new(token));
+    }
+    // Distinguish a rejected stored value from logout without loading that value.
+    let oversized: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ItemTable WHERE key = ?1 AND length(value) > ?2)",
+            (ACCESS_TOKEN_KEY, MAX_STORED_TOKEN_BYTES as i64),
+            |row| row.get(0),
+        )
+        .map_err(|_| DashboardError::unavailable("Cursor state query failed"))?;
+    Err(if oversized {
+        DashboardError::credentials_decode()
+    } else {
+        DashboardError::login("Cursor login required")
+    })
+}
+
+fn query_optional_value(
+    transaction: &Transaction<'_>,
+    key: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, DashboardError> {
     transaction
         .query_row(
             "SELECT value FROM ItemTable WHERE key = ?1 AND length(value) <= ?2 LIMIT 1",
@@ -463,8 +509,7 @@ fn query_value(
             },
         )
         .optional()
-        .map_err(|_| DashboardError::unavailable("Cursor state query failed"))?
-        .ok_or_else(|| DashboardError::login("Cursor login required"))
+        .map_err(|_| DashboardError::unavailable("Cursor state query failed"))
 }
 
 fn positive_u64(value: Option<&Value>) -> Option<u64> {
@@ -476,18 +521,86 @@ fn positive_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 fn valid_access_token(value: &str) -> bool {
+    let unpadded = value.trim_end_matches('=');
     !value.is_empty()
+        && !unpadded.is_empty()
         && value.len() <= MAX_TOKEN_BYTES
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~'))
+        && unpadded.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~' | b'+' | b'/')
+        })
 }
 
-fn validate_access_token(value: String) -> Result<String, DashboardError> {
-    if !valid_access_token(&value) {
+fn decode_access_token(
+    stored: &[u8],
+    encryption_enabled: bool,
+    state_db: &Path,
+    deadline: Instant,
+) -> Result<Zeroizing<String>, DashboardError> {
+    let decode_error = DashboardError::credentials_decode;
+    let stored = std::str::from_utf8(stored).map_err(|_| decode_error())?;
+    // Cursor detects envelopes even if the write-encryption feature flag is now off.
+    if let Some(payload) = stored.strip_prefix(TOKEN_ENVELOPE_PREFIX) {
+        let encrypted = Zeroizing::new(STANDARD.decode(payload).map_err(|_| decode_error())?);
+        let decrypted = decrypt_gui_token(&encrypted, state_db, deadline)?;
+        let bearer = std::str::from_utf8(&decrypted).map_err(|_| decode_error())?;
+        if !valid_access_token(bearer) {
+            return Err(decode_error());
+        }
+        let bearer = Zeroizing::new(bearer.to_owned());
+        remaining(deadline, "Cursor credentials deadline exceeded")?;
+        return Ok(bearer);
+    }
+    if stored.starts_with("cursor-safe-storage:")
+        || (encryption_enabled && !valid_access_token(stored))
+    {
+        return Err(decode_error());
+    }
+    // Cursor can store plaintext when safeStorage is unavailable, even with the flag on.
+    if !valid_access_token(stored) {
         return Err(DashboardError::login("Cursor login required"));
     }
-    Ok(value)
+    Ok(Zeroizing::new(stored.to_owned()))
+}
+
+#[cfg(windows)]
+fn decrypt_gui_token(
+    encrypted: &[u8],
+    state_db: &Path,
+    deadline: Instant,
+) -> Result<Zeroizing<Vec<u8>>, DashboardError> {
+    let decode_error = DashboardError::credentials_decode;
+    if encrypted.len() > MAX_TOKEN_BYTES + 31 || !encrypted.starts_with(b"v10") {
+        return Err(decode_error());
+    }
+    let root = state_db
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(decode_error)?;
+    let local_state = Zeroizing::new(
+        read_bounded_credential_file(&root.join("Local State"), MAX_LOCAL_STATE_BYTES, deadline)
+            .map_err(|error| match error.kind {
+                DashboardErrorKind::Deadline | DashboardErrorKind::ScopeChanged => error,
+                _ => decode_error(),
+            })?,
+    );
+    let state: Value = serde_json::from_slice(&local_state).map_err(|_| decode_error())?;
+    let encoded_key = state
+        .pointer("/os_crypt/encrypted_key")
+        .and_then(Value::as_str)
+        .ok_or_else(decode_error)?;
+    if encoded_key.len() > 8 * 1024 {
+        return Err(decode_error());
+    }
+    let protected = Zeroizing::new(STANDARD.decode(encoded_key).map_err(|_| decode_error())?);
+    let protected = protected.strip_prefix(b"DPAPI").ok_or_else(decode_error)?;
+    let key = crate::electron_windows::unprotect(protected).map_err(|_| decode_error())?;
+    crate::electron_windows::decrypt(&key, encrypted).map_err(|_| decode_error())
+}
+
+#[cfg(not(windows))]
+fn decrypt_gui_token(_: &[u8], _: &Path, _: Instant) -> Result<Zeroizing<Vec<u8>>, DashboardError> {
+    Err(DashboardError::credentials_decode())
 }
 
 fn read_bounded_credential_file(
@@ -754,8 +867,9 @@ fn resolve_credential_sources(
 fn preferred_credential_error(gui: DashboardError, cli: DashboardError) -> DashboardError {
     fn priority(kind: DashboardErrorKind) -> u8 {
         match kind {
-            DashboardErrorKind::Deadline => 5,
-            DashboardErrorKind::ScopeChanged => 4,
+            DashboardErrorKind::Deadline => 7,
+            DashboardErrorKind::ScopeChanged => 6,
+            DashboardErrorKind::CredentialsDecode => 5,
             DashboardErrorKind::Parse | DashboardErrorKind::Oversized => 3,
             DashboardErrorKind::LoginRequired => 2,
             DashboardErrorKind::Unavailable => 1,
@@ -777,7 +891,7 @@ fn read_cli_credentials_from(
 ) -> Result<DashboardCredentials, DashboardError> {
     let mut snapshot = read_cli_credential_snapshot_from(auth_path, config_path, deadline)?;
     Ok(DashboardCredentials {
-        access_token: std::mem::take(&mut *snapshot.access_token),
+        access_token: std::mem::take(&mut snapshot.access_token),
         scope: snapshot.scope,
     })
 }
@@ -803,7 +917,9 @@ fn read_credentials_from(
     let transaction = connection
         .transaction()
         .map_err(|_| DashboardError::unavailable("Cursor state snapshot failed"))?;
-    let token = query_value(&transaction, ACCESS_TOKEN_KEY, MAX_TOKEN_BYTES)?;
+    let token = query_access_token(&transaction)?;
+    let encryption_enabled = query_optional_value(&transaction, ENCRYPTION_ENABLED_KEY, 16)?
+        .is_some_and(|value| value == b"true");
     let application = query_value(&transaction, APPLICATION_USER_KEY, MAX_APPLICATION_BYTES)?;
     transaction
         .commit()
@@ -813,9 +929,7 @@ fn read_credentials_from(
     state_files.revalidate(path)?;
     remaining(deadline, "Cursor credentials deadline exceeded")?;
 
-    let access_token = String::from_utf8(token)
-        .map_err(|_| DashboardError::login("Cursor login required"))
-        .and_then(validate_access_token)?;
+    let access_token = decode_access_token(&token, encryption_enabled, path, deadline)?;
     let application: Value = serde_json::from_slice(&application)
         .map_err(|_| DashboardError::parse("Cursor account identity was not recognized"))?;
     let user_id = positive_u64(application.get("dashboardUserId"))
@@ -854,7 +968,10 @@ fn post_json<Request: Serialize, Output: DeserializeOwned>(
     remaining(deadline, "Cursor Dashboard deadline exceeded")?;
     let body = serde_json::to_string(request)
         .map_err(|_| DashboardError::parse("Cursor Dashboard request was not recognized"))?;
-    let authorization = format!("Bearer {}", credentials.access_token());
+    if !valid_access_token(credentials.access_token()) {
+        return Err(DashboardError::credentials_decode());
+    }
+    let authorization = Zeroizing::new(format!("Bearer {}", credentials.access_token()));
     let response = http_transport::execute(
         HttpMethod::PostRead,
         &dashboard_url(method)?,
@@ -1119,6 +1236,264 @@ mod tests {
             )
             .unwrap();
         connection
+    }
+
+    #[cfg(windows)]
+    fn encrypted_credentials_fixture(name: &str) -> (PathBuf, PathBuf) {
+        use windows::{
+            core::PCWSTR,
+            Win32::{
+                Foundation::{LocalFree, HLOCAL},
+                Security::Cryptography::*,
+            },
+        };
+        let root = fixture_path(name).parent().unwrap().to_path_buf();
+        let db = root.join("User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let connection = create_credentials_fixture(&db, false);
+        // Synthetic AES-256-GCM vector: fixed key/nonce, never a user's credential.
+        connection.execute("UPDATE ItemTable SET value = ?1 WHERE key = ?2", (
+            "cursor-safe-storage:v1:djEwAwMDAwMDAwMDAwMDQ5fbdy9aO2wYJSIujiXUI9ABVEShbYuxbmWXYvOQJWSXdg==", ACCESS_TOKEN_KEY)).unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable(key, value) VALUES (?1, 'true')",
+                ("cursor.storage.authTokenEncryptionAtRest",),
+            )
+            .unwrap();
+        drop(connection);
+        let mut key = [7u8; 32];
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: 32,
+            pbData: key.as_mut_ptr(),
+        };
+        let mut output = CRYPT_INTEGER_BLOB::default();
+        let mut protected = b"DPAPI".to_vec();
+        unsafe {
+            CryptProtectData(
+                &input,
+                PCWSTR::null(),
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+            .unwrap();
+            protected.extend_from_slice(std::slice::from_raw_parts(
+                output.pbData,
+                output.cbData as usize,
+            ));
+            let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
+        }
+        let state = serde_json::json!({"os_crypt":{"encrypted_key":base64::engine::general_purpose::STANDARD.encode(protected)}});
+        std::fs::write(root.join("Local State"), state.to_string()).unwrap();
+        (root, db)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encrypted_gui_credentials_win_over_expired_cli_without_exposing_envelope() {
+        let (root, db) = encrypted_credentials_fixture("encrypted-gui");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let expired = identity_token("fixture-account-a", 1);
+        let (cli_root, auth, config) =
+            create_cli_credentials_fixture("expired-fallback", &expired, 42);
+        assert!(read_cli_credentials_from(&auth, &config, deadline).is_err());
+        let credentials = resolve_credential_sources(read_credentials_from(&db, deadline), || {
+            panic!("valid GUI credentials must bypass expired CLI credentials")
+        })
+        .unwrap();
+        assert!(credentials.access_token() == "fixture.bearer+/==");
+        assert_eq!(credentials.scope.user_id, 42);
+        assert!(std::fs::metadata(&db).unwrap().len() < 64 * 1024);
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "DELETE FROM ItemTable WHERE key = 'cursor.storage.authTokenEncryptionAtRest'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(read_credentials_from(&db, deadline).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(cli_root).unwrap();
+    }
+
+    #[test]
+    fn bearer_validation_accepts_rfc_characters_but_rejects_envelopes_and_injection() {
+        for token in ["fixture.bearer+/==", "a-b_c~d", "opaque"] {
+            assert!(valid_access_token(token));
+        }
+        for token in [
+            "",
+            "=",
+            "a=b",
+            "a b",
+            "a\r\nAuthorization:x",
+            "cursor-safe-storage:v1:AAAA",
+            "a:b",
+        ] {
+            assert!(!valid_access_token(token));
+        }
+        let db = fixture_path("plain-feature-flag");
+        let connection = create_credentials_fixture(&db, false);
+        connection
+            .execute(
+                "INSERT INTO ItemTable(key, value) VALUES (?1, 'true')",
+                (ENCRYPTION_ENABLED_KEY,),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE ItemTable SET value = 'fixture.bearer+/==' WHERE key = ?1",
+                (ACCESS_TOKEN_KEY,),
+            )
+            .unwrap();
+        drop(connection);
+        let credentials =
+            read_credentials_from(&db, Instant::now() + Duration::from_secs(2)).unwrap();
+        assert!(credentials.access_token() == "fixture.bearer+/==");
+        std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encrypted_gui_failures_remain_decode_errors_when_cli_is_expired() {
+        let (root, db) = encrypted_credentials_fixture("decode-errors");
+        let expired = identity_token("fixture-account-a", 1);
+        let (cli_root, auth, config) =
+            create_cli_credentials_fixture("decode-expired-cli", &expired, 42);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let connection = Connection::open(&db).unwrap();
+        for value in [
+            "cursor-safe-storage:v1:%%%",
+            "cursor-safe-storage:v2:AAAA",
+            "cursor-safe-storage:v1:djIwAwMDAwMDAwMDAwMDQ5fbdy9aO2wYJSIujiXUI9ABVEShbYuxbmWXYvOQJWSXdg==",
+            "cursor-safe-storage:v1:djEwAwMDAwMDAwMDAwMDQ5fbdy9aO2wYJSIujiXUI9ABVEShbYuxbmWXYvOQJWSXDA==",
+            "not:a:bearer",
+        ] {
+            connection.execute("UPDATE ItemTable SET value = ?1 WHERE key = ?2", (value, ACCESS_TOKEN_KEY)).unwrap();
+            let result = resolve_credential_sources(read_credentials_from(&db, deadline), || read_cli_credentials_from(&auth, &config, deadline));
+            assert!(matches!(result, Err(DashboardError { kind: DashboardErrorKind::CredentialsDecode, .. })));
+        }
+        connection
+            .execute("DELETE FROM ItemTable WHERE key = ?1", (ACCESS_TOKEN_KEY,))
+            .unwrap();
+        assert!(matches!(
+            read_credentials_from(&db, deadline),
+            Err(DashboardError {
+                kind: DashboardErrorKind::LoginRequired,
+                ..
+            })
+        ));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(cli_root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn encrypted_gui_rejects_missing_bad_and_oversized_local_state() {
+        let (root, db) = encrypted_credentials_fixture("local-state-errors");
+        let state_path = root.join("Local State");
+        let original = std::fs::read(&state_path).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        std::fs::remove_file(&state_path).unwrap();
+        assert!(matches!(
+            read_credentials_from(&db, deadline),
+            Err(DashboardError {
+                kind: DashboardErrorKind::CredentialsDecode,
+                ..
+            })
+        ));
+        for state in [
+            b"not-json".to_vec(),
+            br#"{"os_crypt":{"encrypted_key":"RFBBUEliYWQ="}}"#.to_vec(),
+            vec![b'x'; MAX_LOCAL_STATE_BYTES as usize + 1],
+        ] {
+            std::fs::write(&state_path, state).unwrap();
+            assert!(matches!(
+                read_credentials_from(&db, deadline),
+                Err(DashboardError {
+                    kind: DashboardErrorKind::CredentialsDecode,
+                    ..
+                })
+            ));
+        }
+        std::fs::write(&state_path, original).unwrap();
+        assert!(read_credentials_from(&db, deadline).is_ok());
+        assert!(matches!(
+            read_credentials_from(&db, Instant::now()),
+            Err(DashboardError {
+                kind: DashboardErrorKind::Deadline,
+                ..
+            })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dashboard_never_dispatches_an_encrypted_envelope_as_bearer() {
+        let credentials = DashboardCredentials {
+            access_token: Zeroizing::new("cursor-safe-storage:v1:AAAA".to_owned()),
+            scope: AccountScope {
+                user_id: 42,
+                team_id: None,
+            },
+        };
+        let result: Result<Value, _> = post_json(
+            &credentials,
+            "GetCurrentPeriodUsage",
+            &serde_json::json!({}),
+            Instant::now() + Duration::from_secs(2),
+            1024,
+        );
+        assert!(matches!(
+            result,
+            Err(DashboardError {
+                kind: DashboardErrorKind::CredentialsDecode,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn oversized_stored_credentials_are_not_mistaken_for_missing_login() {
+        let db = fixture_path("oversized-envelope");
+        let connection = create_credentials_fixture(&db, false);
+        let stored = format!(
+            "{TOKEN_ENVELOPE_PREFIX}{}",
+            "A".repeat(MAX_STORED_TOKEN_BYTES + 1 - TOKEN_ENVELOPE_PREFIX.len())
+        );
+        connection
+            .execute(
+                "UPDATE ItemTable SET value = ?1 WHERE key = ?2",
+                (&stored, ACCESS_TOKEN_KEY),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let result = resolve_credential_sources(read_credentials_from(&db, deadline), || {
+            Err(DashboardError::login("Cursor login required"))
+        });
+        assert!(matches!(
+            result,
+            Err(DashboardError {
+                kind: DashboardErrorKind::CredentialsDecode,
+                ..
+            })
+        ));
+        connection
+            .execute("DELETE FROM ItemTable WHERE key = ?1", (ACCESS_TOKEN_KEY,))
+            .unwrap();
+        assert!(matches!(
+            read_credentials_from(&db, deadline),
+            Err(DashboardError {
+                kind: DashboardErrorKind::LoginRequired,
+                ..
+            })
+        ));
+        drop(connection);
+        std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
     }
 
     fn create_cli_credentials_fixture(
@@ -1738,7 +2113,7 @@ mod tests {
     #[ignore = "uses the locally logged-in Cursor GUI account"]
     fn live_gui_credentials_and_current_period_round_trip() {
         let deadline = Instant::now() + Duration::from_secs(8);
-        let credentials = read_credentials(deadline).unwrap();
+        let credentials = read_credentials_from(&state_db_path().unwrap(), deadline).unwrap();
         let usage = current_period_usage(&credentials, deadline).unwrap();
         assert!((0.0..=100.0).contains(&usage.cursor_models_used_percent));
         assert!((0.0..=100.0).contains(&usage.other_models_used_percent));

@@ -1,11 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { barToolViewModel } from "./bar-state.js";
 import { viewModelForTool } from "./panel-state.js";
 import { collectionIssue } from "./collection-state.js";
 import { t } from "./i18n.js";
 
 const now = new Date("2026-09-28T03:00:00Z");
+
+test("Cursor bar markup includes the accessible collection issue output", async () => {
+  const html = await readFile(new URL("./bar.html", import.meta.url), "utf8");
+  const section = html.match(/<section\b[^>]*data-tool="cursor"[^>]*>([\s\S]*?)<\/section>/)?.[1];
+  assert.ok(section);
+  assert.match(section, /class="bar-issue" role="status" hidden/);
+});
+
+test("Cursor credential decoding errors are not signed-out states in bars and panels", () => {
+  for (const language of ["ko", "en"]) for (const bar_mode of ["full", "compact", "dual", "quad"]) {
+    const settings = { language, bar_mode };
+    const issue = collectionIssue("cursor", "credentials_error", language);
+    assert.ok(issue);
+    assert.notEqual(issue.short, t("state.loginRequired", language));
+    const bar = barToolViewModel([], "cursor", settings, now, { collectionHealth: { cursor: "credentials_error" } });
+    assert.equal(bar.collectionIssue, issue.short);
+    assert.notEqual(bar.state, "login_required");
+    assert.ok(bar.tooltip.includes(issue.detail));
+    assert.ok(bar.ariaLabel.includes(issue.short));
+    const panel = viewModelForTool([], "cursor", settings, now, { cursor: "credentials_error" });
+    assert.ok(panel.emptyHint.includes(issue.detail));
+    const login = barToolViewModel([], "cursor", settings, now, { collectionHealth: { cursor: "login_required" } });
+    assert.equal(login.state, "login_required");
+    assert.equal(login.collectionIssue, "");
+  }
+});
 const status = { tool: "claude", session_id: "claude-desktop-usage", captured_at: now.toISOString(), approx: false,
   session: { active: true }, primary: { used_percent: 30 }, secondary: { used_percent: 22 } };
 
