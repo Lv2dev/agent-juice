@@ -9,7 +9,7 @@ import { DEFAULT_SETTINGS, toolBrandColor, viewModelForTool } from "./panel-stat
 import { applyFont } from "./font.js";
 import { createTextScaleState, TEXT_SCALE_EVENT } from "./text-scale.js";
 import { applyTranslations, resolveLanguage, t } from "./i18n.js";
-import { panelCollectionIssue } from "./collection-state.js";
+import { collectionRetryState, panelCollectionIssue } from "./collection-state.js";
 import { applyPanelSkin, applyTheme } from "./theme.js";
 import { createBarPreview } from "./bar-preview.js";
 import { createSettingsAuthority } from "./settings-revision.js";
@@ -43,6 +43,9 @@ let activityLoadPromise = null;
 let panelVisible = false;
 let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
+let usageRefreshBusy = false;
+let usageRefreshPromise = null;
+let usageRefreshResult = null;
 const activeUnlisteners = new Set();
 const systemTextScale = createTextScaleState(() => {
   hideActivityTooltip();
@@ -57,7 +60,10 @@ const statusRequests = createStatusRequests({
   getStatusGeneration: () => statusEventGeneration,
   getHealthGeneration: () => collectionHealthEventGeneration,
   acceptStatus: renderStatuses,
-  acceptHealth: health => { collectionHealth = health && typeof health === "object" ? health : {}; },
+  acceptHealth: (health, renderCurrent) => {
+    collectionHealth = health && typeof health === "object" ? health : {};
+    if (renderCurrent) renderStatuses(lastStatuses);
+  },
 });
 
 function setPanelVisible(visible) {
@@ -130,6 +136,13 @@ function bindWindowControls() {
     const view = event.target?.closest?.("[data-panel-tab], [data-panel-goto]");
     if (view) {
       selectPanelView(view.dataset.panelTab ?? view.dataset.panelGoto);
+      return;
+    }
+
+    const refresh = event.target?.closest?.("[data-refresh-status]");
+    if (refresh) {
+      event.preventDefault();
+      if (!refresh.disabled) void refreshUsage();
       return;
     }
 
@@ -258,6 +271,68 @@ function renderTool(tool, now) {
   setText(card, ".pc", vm.pcId);
   setText(card, ".meta", vm.meta);
   setText(card, ".empty-hint", vm.emptyHint);
+  const retry = collectionRetryState(collectionHealth?.[tool], vm.state);
+  const retryRow = card.querySelector("[data-tool-retry]");
+  if (retryRow) retryRow.hidden = !retry.visible;
+  const button = card.querySelector("[data-retry-usage]");
+  if (button) {
+    button.disabled = usageRefreshBusy || retry.blocked;
+    button.setAttribute?.("aria-busy", String(usageRefreshBusy));
+    const name = tool === "antigravity" ? "Antigravity" : `${tool[0].toUpperCase()}${tool.slice(1)}`;
+    const label = t("action.retryToolUsage", settings).replace("{tool}", name);
+    button.setAttribute?.("aria-label", label);
+    button.title = retry.blocked ? t("collection.rateLimitedDetail", settings) : label;
+  }
+  setText(card, "[data-retry-label]", t(usageRefreshBusy ? "status.refreshingUsage" : retry.blocked ? "collection.rateLimited" : "action.retryUsage", settings));
+}
+
+function renderUsageRefreshControls() {
+  const button = document.querySelector("[data-overview-refresh]");
+  if (button) {
+    button.disabled = usageRefreshBusy || !TOOLS.some(toolEnabled);
+    button.setAttribute("aria-busy", String(usageRefreshBusy));
+    button.setAttribute("aria-label", t(usageRefreshBusy ? "status.refreshingUsage" : "action.refreshUsage", settings));
+    button.title = t(usageRefreshBusy ? "status.refreshingUsage" : "action.refreshUsage", settings);
+  }
+  const feedback = document.querySelector("[data-status-refresh-feedback]");
+  if (!feedback) return;
+  let key = null;
+  if (usageRefreshBusy) key = "status.refreshingUsage";
+  else if (usageRefreshResult === "error") key = "status.refreshUsageFailed";
+  else if (usageRefreshResult === "throttled") key = "status.refreshUsageRateLimited";
+  else if (usageRefreshResult === "complete") {
+    const issues = TOOLS.filter(toolEnabled).map(tool => collectionRetryState(
+      collectionHealth?.[tool], viewModelForTool(lastStatuses, tool, settings, new Date(), collectionHealth).state,
+    )).filter(retry => retry.visible);
+    key = issues.length === 0 ? "status.refreshedUsage"
+      : issues.every(retry => retry.blocked) ? "status.refreshUsageRateLimited" : "status.refreshedUsageWithIssues";
+  }
+  feedback.hidden = key === null;
+  feedback.textContent = key ? t(key, settings) : "";
+  feedback.dataset.state = usageRefreshResult === "error" ? "error" : "ready";
+}
+
+export function refreshUsage() {
+  if (listenersDisposed || !TOOLS.some(toolEnabled)) return Promise.resolve();
+  if (usageRefreshPromise) return usageRefreshPromise;
+  usageRefreshBusy = true;
+  usageRefreshResult = null;
+  renderStatuses(lastStatuses);
+  const request = statusRequests.refresh()
+    .then(result => {
+      if (!listenersDisposed && !result?.retired) {
+        usageRefreshResult = result?.ok ? "complete" : result?.throttled ? "throttled" : "error";
+      }
+    })
+    .catch(() => { if (!listenersDisposed) usageRefreshResult = "error"; })
+    .finally(() => {
+      if (usageRefreshPromise === request) usageRefreshPromise = null;
+      if (listenersDisposed) return;
+      usageRefreshBusy = false;
+      renderStatuses(lastStatuses);
+    });
+  usageRefreshPromise = request;
+  return request;
 }
 
 export function renderStatuses(statuses, now = new Date()) {
@@ -271,6 +346,7 @@ export function renderStatuses(statuses, now = new Date()) {
       settings,
     );
   }
+  renderUsageRefreshControls();
 }
 
 function activityLanguage() {

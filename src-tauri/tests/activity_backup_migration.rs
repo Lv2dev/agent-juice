@@ -345,7 +345,8 @@ fn aggregate_backup_is_not_replaced_by_incomplete_larger_history() {
             tool.event(50, Some("first"), false) + &tool.event(20, Some("unread"), false),
         )
         .unwrap();
-        let snapshot = fixture.refresh(1);
+        // Read exactly the first record; a byte budget no longer overshoots a line.
+        let snapshot = fixture.refresh(tool.event(50, Some("first"), false).len() as u64);
         assert_eq!(total(&snapshot), 50);
         assert!(snapshot.local_partial && snapshot.local_backfill_pending);
         fixture.assert_missing_history(30);
@@ -588,7 +589,7 @@ fn incomplete_stable_id_reread_does_not_union_with_anonymous_backup() {
                 + &tool.event(20, Some("stable-unread"), false),
         )
         .unwrap();
-        let partial = fixture.refresh(1);
+        let partial = fixture.refresh(tool.event(10, Some("stable-first"), false).len() as u64);
         assert_eq!(total(&partial), 10);
         assert!(partial.local_partial && partial.local_backfill_pending);
         let current = checkpoint(&fixture.cache(), "files");
@@ -796,7 +797,7 @@ fn partial_anonymous_reread_preserves_complete_stable_backup() {
             tool.event(10, None, false) + &tool.event(20, None, false),
         )
         .unwrap();
-        let partial = fixture.refresh(1);
+        let partial = fixture.refresh(tool.event(10, None, false).len() as u64);
         assert_eq!(total(&partial), 10);
         assert!(partial.local_backfill_pending);
         fixture.assert_missing_history(30);
@@ -948,7 +949,10 @@ fn retained_prefix_fixture(tool: Tool, stable: bool) -> Fixture {
         .unwrap()
         .set_modified(SystemTime::now() + Duration::from_secs(1))
         .unwrap();
-    let pending = fixture.refresh(1);
+    let pending = fixture.refresh(
+        tool.event(40, stable.then_some("prefix-third"), false)
+            .len() as u64,
+    );
     assert_eq!(total(&pending), 70);
     assert!(pending.local_partial && pending.local_backfill_pending);
     let current = checkpoint(&fixture.cache(), "files");

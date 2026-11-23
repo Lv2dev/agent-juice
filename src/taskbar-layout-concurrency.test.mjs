@@ -5,12 +5,13 @@ import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 const body = name => source.match(new RegExp(`(?:async )?fn ${name}\\b[\\s\\S]*?\\n}\\r?\\n`))?.[0] ?? '';
 
-test('content-width rollback owns a cache revision without holding a lock during native placement', () => {
+test('content-width rollback owns a cache revision with nonblocking transaction admission', () => {
   const update = body('set_taskbar_content_width');
   assert.match(update, /load_settings_with_generation\(\)[\s\S]*?TASKBAR_SETTINGS_GENERATION.load\(Ordering::Acquire\) != settings_generation[\s\S]*?let \(layout_revision, previous\) = taskbar_content_layout_snapshot/);
   assert.match(update, /begin_taskbar_content_layout\(&app, tool, layout_revision, next\)[\s\S]*?apply_taskbar_dock_for_generation[\s\S]*?rollback_taskbar_content_layout\(&app, tool, write\)/);
   assert.match(update, /TaskbarContentWidthDecision::AlreadyApplied\s*=>\s*\{[\s\S]*?acknowledge_taskbar_content_layout\(&app, tool, layout_revision\)[\s\S]*?return Ok\(false\)/);
   assert.doesNotMatch(update, /TASKBAR_CONTENT_LAYOUT_WRITE_GATE|\.lock\(\)/);
+  assert.match(update, /try_taskbar_layout_gate\(&TASKBAR_CONTENT_EDIT_GATE\)/);
 });
 
 test('profile and drag ratio writes invalidate old rollback revisions including identical values', () => {
@@ -24,7 +25,7 @@ test('profile and drag ratio writes invalidate old rollback revisions including 
 
 test('deferred settings saves cannot overwrite a newer layout ratio snapshot', () => {
   const save = body('save_settings');
-  assert.match(save, /with_taskbar_settings_read\(\|current_generation\|\s*\{[\s\S]*?current_generation == generation[\s\S]*?sync_taskbar_content_layout_ratios\(&app, &settings\);[\s\S]*?Ok\(\(\)\)/);
+  assert.match(save, /TASKBAR_CONTENT_EDIT_GATE[\s\S]*?try_update_taskbar_settings[\s\S]*?with_taskbar_settings_read\(\|current_generation\|\s*\{[\s\S]*?current_generation == snapshot.generation && !taskbar_drag_active\(&update_app\)[\s\S]*?sync_taskbar_content_layout_ratios\(&update_app, &snapshot.settings\);[\s\S]*?Ok\(\(\)\)/);
 });
 
 test('native layout commits validate content revisions after acquiring the native gate', () => {

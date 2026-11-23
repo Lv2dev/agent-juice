@@ -1,17 +1,17 @@
 //! Read-only Desktop quotas and the CLI's built-in zero-token quota command.
 use crate::model::{AccountLimit, AgentStatus, SessionInfo, Tool};
 use serde::Deserialize;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-pub const COLLECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+pub const COLLECTION_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Default)]
 struct Cache {
     enabled: bool,
     suspended: bool,
     generation: u64,
-    busy: bool,
+    active: Option<Arc<Flight>>,
     retry_at: Option<Instant>,
     last_started_at: Option<Instant>,
     force_retry_at: Option<Instant>,
@@ -22,7 +22,7 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
     enabled: false,
     suspended: false,
     generation: 0,
-    busy: false,
+    active: None,
     retry_at: None,
     last_started_at: None,
     force_retry_at: None,
@@ -43,8 +43,7 @@ impl Cache {
         }
         self.enabled = enabled;
         self.suspended = false;
-        self.generation = self.generation.wrapping_add(1);
-        self.result = None;
+        self.retire_result();
         true
     }
 
@@ -53,9 +52,29 @@ impl Cache {
             return false;
         }
         self.suspended = true;
+        self.retire_result();
+        true
+    }
+
+    fn retire_result(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.result = None;
-        true
+        if let Some(flight) = &self.active {
+            flight.ready.notify_all();
+        }
+    }
+
+    fn admits(&self, generation: u64) -> bool {
+        self.enabled && !self.suspended && self.generation == generation
+    }
+
+    fn throttled(&self, force: bool, now: Instant) -> bool {
+        let retry_at = if force {
+            self.force_retry_at
+        } else {
+            self.retry_at
+        };
+        retry_at.is_some_and(|at| now < at)
     }
 }
 
@@ -98,7 +117,7 @@ pub fn last_error() -> Option<Error> {
 /// Consumes quota and error from one current completion and source-liveness sample.
 ///
 /// The callback runs synchronously with CACHE locked through its return. It must
-/// not re-enter CACHE (including cached/last_error/refresh/setters), query the CLI
+/// not re-enter CACHE (including refresh_manual and the setters), query the CLI
 /// source again, or perform runtime/provider I/O. Keep it short and do not acquire
 /// locks that another CACHE caller can hold. Deferred work returned by the callback
 /// is not protected; final payload construction/consumption belongs inside it.
@@ -131,14 +150,77 @@ fn with_current_cache_snapshot<T>(
 }
 
 pub fn refresh(force: bool, deadline: Instant) -> Option<AgentStatus> {
-    refresh_cache(&CACHE, force, |admitted| {
+    refresh_cache(&CACHE, force, provider_fetch(deadline))
+}
+
+/// The outcome describes the selected attempt, not a snapshot for publication.
+/// Consume current quota and health through `with_current_snapshot`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ManualRefreshOutcome {
+    Completed(Arc<Result<AgentStatus, Error>>),
+    Throttled,
+    TimedOut,
+    Interrupted,
+}
+
+pub(crate) fn refresh_manual(deadline: Instant) -> ManualRefreshOutcome {
+    refresh_manual_cache(&CACHE, deadline, provider_fetch(deadline))
+}
+
+fn provider_fetch(
+    deadline: Instant,
+) -> impl FnOnce(&dyn Fn() -> bool) -> Result<AgentStatus, Error> {
+    move |admitted| {
         collect(
             &gethostname::gethostname().to_string_lossy(),
             &chrono::Utc::now().to_rfc3339(),
             deadline,
             admitted,
         )
-    })
+    }
+}
+
+struct Flight {
+    generation: u64,
+    started_at: Instant,
+    ready: Condvar,
+    outcome: OnceLock<(Instant, ManualRefreshOutcome)>,
+}
+
+impl Flight {
+    fn new(generation: u64, started_at: Instant) -> Self {
+        Self {
+            generation,
+            started_at,
+            ready: Condvar::new(),
+            outcome: OnceLock::new(),
+        }
+    }
+
+    fn wait(&self, state: &Mutex<Cache>, deadline: Instant) -> ManualRefreshOutcome {
+        // Use the cache lock for both wake conditions: completion and retirement.
+        let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if !cache.admits(self.generation) {
+                return ManualRefreshOutcome::Interrupted;
+            }
+            if let Some((completed_at, outcome)) = self.outcome.get() {
+                return if *completed_at < deadline {
+                    outcome.clone()
+                } else {
+                    ManualRefreshOutcome::TimedOut
+                };
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return ManualRefreshOutcome::TimedOut;
+            }
+            (cache, _) = self
+                .ready
+                .wait_timeout(cache, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 fn refresh_cache(
@@ -146,14 +228,13 @@ fn refresh_cache(
     force: bool,
     fetch: impl FnOnce(&dyn Fn() -> bool) -> Result<AgentStatus, Error>,
 ) -> Option<AgentStatus> {
-    let (generation, started_at) = {
+    let attempt = {
         let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
         if !cache.enabled || cache.suspended {
             return None;
         }
         let now = Instant::now();
-        let force_throttled = force && cache.force_retry_at.is_some_and(|at| now < at);
-        if cache.busy || force_throttled || (!force && cache.retry_at.is_some_and(|at| now < at)) {
+        if cache.active.is_some() || cache.throttled(force, now) {
             return cache
                 .result
                 .as_ref()
@@ -161,73 +242,135 @@ fn refresh_cache(
                 .filter(|status| crate::antigravity_cli::cached_source_alive(status))
                 .cloned();
         }
-        cache.busy = true;
-        cache.last_started_at = Some(now);
-        (cache.generation, now)
+        Attempt::start(state, &mut cache, now)
     };
-    let admitted = || {
-        let cache = state.lock().unwrap_or_else(|e| e.into_inner());
-        cache.enabled && !cache.suspended && cache.generation == generation
-    };
-    let result = fetch(&admitted);
-    let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
-    cache.busy = false;
-    let retired = cache.generation != generation;
-    cache.failures = if result.is_ok() {
-        0
-    } else {
-        cache.failures.saturating_add(1)
-    };
-    let delay = if result
-        .as_ref()
-        .is_ok_and(|status| status.session_id == crate::antigravity_cli::headless::SESSION_ID)
-    {
-        crate::antigravity_cli::headless::MIN_REFRESH_INTERVAL.as_secs()
-    } else if matches!(result, Err(Error::CliUnavailable)) {
-        300u64.saturating_mul(1 << cache.failures.saturating_sub(1).min(3))
-    } else if matches!(result, Err(Error::CliLoginRequired)) {
-        300
-    } else if matches!(result, Err(Error::Unavailable)) {
-        60u64.saturating_mul(1 << cache.failures.saturating_sub(1).min(4))
-    } else {
-        60
-    };
-    let completed_at = Instant::now();
-    let retry_at = completed_at + std::time::Duration::from_secs(delay);
-    // Retired account data stays discarded, but its external attempt still counts.
-    cache.retry_at = Some(if retired {
-        cache.retry_at.map_or(retry_at, |at| at.max(retry_at))
-    } else {
-        retry_at
-    });
-    cache.last_started_at = Some(started_at);
-    cache.force_retry_at = if retired
-        || matches!(result, Err(Error::CliLoginRequired | Error::CliUnavailable))
-        || result
+    attempt.run(fetch);
+    match attempt.flight.outcome.get() {
+        Some((_, ManualRefreshOutcome::Completed(result))) => result
             .as_ref()
-            .is_ok_and(|status| status.session_id == crate::antigravity_cli::headless::SESSION_ID)
-    {
-        Some(
-            if retired {
-                completed_at
-            } else {
-                cache.last_started_at.unwrap_or(started_at)
-            } + std::time::Duration::from_secs(30),
-        )
-    } else {
-        None
-    };
-    if retired {
-        return None;
+            .as_ref()
+            .ok()
+            .filter(|status| crate::antigravity_cli::cached_source_alive(status))
+            .cloned(),
+        _ => None,
     }
-    // No persisted or last-good account data across errors, closure or a toggle.
-    cache.result = Some(result);
-    cache
-        .result
-        .as_ref()
-        .and_then(|r| r.as_ref().ok())
-        .filter(|status| crate::antigravity_cli::cached_source_alive(status))
-        .cloned()
+}
+
+fn refresh_manual_cache(
+    state: &Mutex<Cache>,
+    deadline: Instant,
+    fetch: impl FnOnce(&dyn Fn() -> bool) -> Result<AgentStatus, Error>,
+) -> ManualRefreshOutcome {
+    let attempt = {
+        let mut cache = state.lock().unwrap_or_else(|e| e.into_inner());
+        if !cache.enabled || cache.suspended {
+            return ManualRefreshOutcome::Interrupted;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return ManualRefreshOutcome::TimedOut;
+        }
+        if let Some(flight) = cache.active.clone() {
+            drop(cache);
+            return flight.wait(state, deadline);
+        }
+        if cache.throttled(true, now) {
+            return ManualRefreshOutcome::Throttled;
+        }
+        Attempt::start(state, &mut cache, now)
+    };
+    attempt.run(fetch);
+    attempt.flight.wait(state, deadline)
+}
+
+struct Attempt<'a> {
+    state: &'a Mutex<Cache>,
+    flight: Arc<Flight>,
+}
+
+impl<'a> Attempt<'a> {
+    fn start(state: &'a Mutex<Cache>, cache: &mut Cache, now: Instant) -> Self {
+        let flight = Arc::new(Flight::new(cache.generation, now));
+        cache.active = Some(flight.clone());
+        cache.last_started_at = Some(now);
+        Self { state, flight }
+    }
+
+    fn run(&self, fetch: impl FnOnce(&dyn Fn() -> bool) -> Result<AgentStatus, Error>) {
+        let admitted = || {
+            let cache = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            cache.admits(self.flight.generation)
+        };
+        self.finish(Some(fetch(&admitted)));
+    }
+
+    fn finish(&self, result: Option<Result<AgentStatus, Error>>) {
+        let mut cache = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let retired = !cache.admits(self.flight.generation);
+        let interrupted = result.is_none();
+        let headless = matches!(&result, Some(Ok(status))
+            if status.session_id == crate::antigravity_cli::headless::SESSION_ID);
+        cache.failures = if matches!(&result, Some(Ok(_))) {
+            0
+        } else {
+            cache.failures.saturating_add(1)
+        };
+        let delay = match &result {
+            // A panicking attempt may already have reached the CLI.
+            _ if headless || interrupted => crate::antigravity_cli::headless::MIN_REFRESH_INTERVAL,
+            Some(Err(Error::CliUnavailable)) => {
+                Duration::from_secs(300u64 << cache.failures.saturating_sub(1).min(3))
+            }
+            Some(Err(Error::CliLoginRequired)) => Duration::from_secs(300),
+            Some(Err(Error::Unavailable)) => {
+                Duration::from_secs(60u64 << cache.failures.saturating_sub(1).min(4))
+            }
+            _ => Duration::from_secs(60),
+        };
+        let completed_at = Instant::now();
+        let retry_at = completed_at + delay;
+        let started_at = self.flight.started_at;
+        // Retired account data stays discarded, but its external attempt still counts.
+        cache.retry_at = Some(if retired || interrupted {
+            cache.retry_at.map_or(retry_at, |at| at.max(retry_at))
+        } else {
+            retry_at
+        });
+        cache.last_started_at = Some(started_at);
+        cache.force_retry_at = if retired || interrupted {
+            let retry_at = completed_at + Duration::from_secs(30);
+            Some(cache.force_retry_at.map_or(retry_at, |at| at.max(retry_at)))
+        } else if headless
+            || matches!(
+                &result,
+                Some(Err(Error::CliLoginRequired | Error::CliUnavailable))
+            )
+        {
+            Some(started_at + Duration::from_secs(30))
+        } else {
+            None
+        };
+        let outcome = if retired {
+            ManualRefreshOutcome::Interrupted
+        } else {
+            // No persisted or last-good account data across errors, closure or a toggle.
+            cache.result = result.clone();
+            result.map_or(ManualRefreshOutcome::Interrupted, |result| {
+                ManualRefreshOutcome::Completed(Arc::new(result))
+            })
+        };
+        let _ = self.flight.outcome.set((completed_at, outcome));
+        cache.active = None;
+        self.flight.ready.notify_all();
+    }
+}
+
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        if self.flight.outcome.get().is_none() {
+            self.finish(None);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -670,7 +813,7 @@ mod tests {
         for busy in [true, false] {
             let state = Mutex::new(Cache {
                 enabled: true,
-                busy,
+                active: busy.then(|| Arc::new(Flight::new(0, Instant::now()))),
                 retry_at: Some(Instant::now() + std::time::Duration::from_secs(60)),
                 result: Some(Ok(closed.clone())),
                 ..Default::default()
@@ -773,6 +916,180 @@ mod tests {
             captured_at,
         )
         .unwrap()
+    }
+
+    fn blocked_auto(
+        state: &Mutex<Cache>,
+        fetch: impl FnOnce(&dyn Fn() -> bool) -> Result<AgentStatus, Error> + Send,
+        check: impl FnOnce(std::sync::mpsc::Sender<()>, Instant),
+    ) -> std::thread::Result<Option<AgentStatus>> {
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let auto = scope.spawn(move || {
+                refresh_cache(state, false, |admitted| {
+                    started_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .unwrap();
+                    fetch(admitted)
+                })
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            check(release_tx, deadline);
+            auto.join()
+        })
+    }
+
+    fn wait_for_manual_join(state: &Mutex<Cache>, deadline: Instant) {
+        let flight = state.lock().unwrap().active.clone().unwrap();
+        // The cache, auto attempt, and this test hold the first three references.
+        while Arc::strong_count(&flight) <= 3 {
+            assert!(
+                Instant::now() < deadline,
+                "manual never joined the active flight"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn manual_waits_for_blocked_auto_instead_of_returning_old_quota() {
+        let old = snapshot_fixture(10.0, "old");
+        let new = headless_fixture();
+        let state = Mutex::new(Cache {
+            enabled: true,
+            result: Some(Ok(old.clone())),
+            ..Default::default()
+        });
+        let auto = blocked_auto(
+            &state,
+            |_| Ok(new.clone()),
+            |release, deadline| {
+                let no_fetch = |_: &dyn Fn() -> bool| panic!("must not start a second fetch");
+                assert_eq!(refresh_cache(&state, false, no_fetch), Some(old));
+                assert_eq!(
+                    refresh_manual_cache(
+                        &state,
+                        Instant::now() + Duration::from_millis(20),
+                        no_fetch
+                    ),
+                    ManualRefreshOutcome::TimedOut
+                );
+                std::thread::scope(|scope| {
+                    let manual = scope.spawn(|| refresh_manual_cache(&state, deadline, no_fetch));
+                    wait_for_manual_join(&state, deadline);
+                    release.send(()).unwrap();
+                    assert_eq!(
+                        manual.join().unwrap(),
+                        ManualRefreshOutcome::Completed(Arc::new(Ok(new.clone())))
+                    );
+                });
+                assert_eq!(
+                    refresh_manual_cache(&state, deadline, no_fetch),
+                    ManualRefreshOutcome::Throttled
+                );
+            },
+        );
+        assert_eq!(auto.unwrap(), Some(new));
+    }
+
+    #[test]
+    fn manual_wait_is_interrupted_by_invalidation_or_panic() {
+        for (suspend, panics) in [(false, false), (true, false), (false, true)] {
+            let state = Mutex::new(Cache {
+                enabled: true,
+                result: Some(Ok(headless_fixture())),
+                ..Default::default()
+            });
+            let auto = blocked_auto(
+                &state,
+                |admitted| {
+                    assert!(!panics, "synthetic auto panic");
+                    assert!(!admitted());
+                    Ok(headless_fixture())
+                },
+                |release, deadline| {
+                    std::thread::scope(|scope| {
+                        let (done_tx, done_rx) = std::sync::mpsc::channel();
+                        let state = &state;
+                        scope.spawn(move || {
+                            let outcome = refresh_manual_cache(state, deadline, |_| {
+                                panic!("must not replace a cancelled flight")
+                            });
+                            done_tx.send(outcome).unwrap();
+                        });
+                        wait_for_manual_join(state, deadline);
+                        if !panics {
+                            let mut cache = state.lock().unwrap();
+                            if suspend {
+                                assert!(cache.suspend_for_settings_failure());
+                            } else {
+                                assert!(cache.set_enabled(false));
+                            }
+                            assert!(cache.set_enabled(true));
+                        } else {
+                            release.send(()).unwrap();
+                        }
+                        assert_eq!(
+                            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                            ManualRefreshOutcome::Interrupted
+                        );
+                        if !panics {
+                            release.send(()).unwrap();
+                        }
+                    });
+                },
+            );
+            if panics {
+                assert!(auto.is_err());
+            } else {
+                assert_eq!(auto.unwrap(), None);
+            }
+            let mut cache = state.lock().unwrap();
+            assert!(cache.active.is_none());
+            assert!(cache.result.is_none());
+            assert!(cache.throttled(false, Instant::now()));
+            assert!(cache.throttled(true, Instant::now()));
+            cache.force_retry_at = None;
+            drop(cache);
+            assert_eq!(
+                refresh_manual_cache(&state, Instant::now() + Duration::from_secs(2), |_| {
+                    Err(Error::AppRequired)
+                }),
+                ManualRefreshOutcome::Completed(Arc::new(Err(Error::AppRequired)))
+            );
+        }
+    }
+
+    #[test]
+    fn manual_gets_the_joined_flight_outcome_not_a_later_completion() {
+        let state = Mutex::new(Cache {
+            enabled: true,
+            ..Default::default()
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let attempt = Attempt::start(&state, &mut state.lock().unwrap(), Instant::now());
+        attempt.run(|_| Err(Error::AppRequired));
+        let later = headless_fixture();
+        assert_eq!(
+            refresh_manual_cache(&state, deadline, |_| Ok(later.clone())),
+            ManualRefreshOutcome::Completed(Arc::new(Ok(later)))
+        );
+        assert_eq!(
+            attempt.flight.wait(&state, deadline),
+            ManualRefreshOutcome::Completed(Arc::new(Err(Error::AppRequired)))
+        );
+        assert_eq!(
+            attempt.flight.wait(&state, attempt.flight.started_at),
+            ManualRefreshOutcome::TimedOut
+        );
+        assert!(state.lock().unwrap().suspend_for_settings_failure());
+        assert_eq!(
+            attempt.flight.wait(&state, deadline),
+            ManualRefreshOutcome::Interrupted
+        );
     }
 
     fn snapshot_after_cursor_wait(
@@ -962,7 +1279,7 @@ mod tests {
             let is_closed = status.session_id.starts_with("antigravity-cli:");
             let state = Mutex::new(Cache {
                 enabled: true,
-                busy: true,
+                active: Some(Arc::new(Flight::new(0, Instant::now()))),
                 retry_at: Some(Instant::now() + std::time::Duration::from_secs(300)),
                 result: Some(Ok(status.clone())),
                 ..Default::default()
@@ -1167,7 +1484,7 @@ mod tests {
                 .is_none());
                 {
                     let cache = state.lock().unwrap();
-                    assert!(!cache.busy);
+                    assert!(cache.active.is_none());
                     assert!(cache.result.is_none());
                     assert!(cache.last_started_at.is_some());
                     assert!(
@@ -1236,6 +1553,6 @@ mod tests {
             state.lock().unwrap().result.is_none(),
             "disabled generation must not commit"
         );
-        assert!(!state.lock().unwrap().busy);
+        assert!(state.lock().unwrap().active.is_none());
     }
 }

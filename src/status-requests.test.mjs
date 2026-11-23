@@ -10,19 +10,19 @@ function deferred() {
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 function harness(invoke) {
-  const commands = [], statuses = [], health = [], timers = new Map();
+  const commands = [], statuses = [], health = [], healthRender = [], timers = new Map();
   let statusGeneration = 0, healthGeneration = 0;
   const loader = createStatusRequests({
     invoke(command) { commands.push(command); return invoke(command); },
     getStatusGeneration: () => statusGeneration,
     getHealthGeneration: () => healthGeneration,
     acceptStatus: value => statuses.push(value),
-    acceptHealth: value => health.push(value),
+    acceptHealth: (value, renderCurrent) => { health.push(value); healthRender.push(renderCurrent); },
     setTimer(callback, delay) { const timer = {callback, delay}; timers.set(timer, timer); return timer; },
     clearTimer(timer) { timers.delete(timer); },
   });
   return {
-    loader, commands, statuses, health, timers,
+    loader, commands, statuses, health, healthRender, timers,
     statusEvent() { statusGeneration += 1; }, healthEvent() { healthGeneration += 1; },
     async timeout(delay) {
       const timer = [...timers.values()].find(value => value.delay === delay);
@@ -97,10 +97,12 @@ test("status timeout and status failure retain the existing empty snapshot contr
 
 test("native status and health event generations remain authoritative", async () => {
   const response = deferred();
-  const h = harness(() => response.promise);
+  const h = harness(command => command === "get_status" ? response.promise : {cursor: "ready"});
   const pending = h.loader.load(); h.statusEvent(); response.resolve(["old"]); await pending;
   assert.deepEqual(h.statuses, []);
-  assert.deepEqual(h.commands, ["get_status"]);
+  assert.deepEqual(h.commands, ["get_status", "get_collection_health"]);
+  assert.deepEqual(h.health, [{cursor: "ready"}]);
+  assert.deepEqual(h.healthRender, [true]);
   const healthReply = deferred();
   const other = harness(command => command === "get_status" ? ["valid"] : healthReply.promise);
   const next = other.loader.load(); await settle(); other.healthEvent(); healthReply.resolve({codex: "old"}); await next;
@@ -121,4 +123,75 @@ test("disposal settles all waits and forbids new IPC, callbacks and timers", asy
     assert.deepEqual(h.health, []);
     assert.equal(h.timers.size, 0);
   }
+});
+
+test("manual refresh shares one force request with repeated clicks and automatic reads", async () => {
+  const response = deferred();
+  const h = harness(command => command === "refresh_status" ? response.promise : {codex: "ready"});
+  const pending = h.loader.refresh();
+  assert.equal(h.loader.refresh(), pending);
+  assert.equal(h.loader.load(), pending);
+  assert.deepEqual(h.commands, ["refresh_status"]);
+  response.resolve(["reconnected"]);
+  assert.equal((await pending).ok, true);
+  assert.deepEqual(h.statuses, [["reconnected"]]);
+  assert.deepEqual(h.health, [{codex: "ready"}]);
+  assert.equal(h.timers.size, 0);
+});
+
+test("a manual request retires a pending automatic read without accepting its late reply", async () => {
+  const old = deferred();
+  const h = harness(command => command === "get_status" ? old.promise : command === "refresh_status" ? ["fresh"] : {codex: "ready"});
+  const automatic = h.loader.load();
+  await h.loader.refresh();
+  await automatic;
+  old.reject(new Error("retired read"));
+  await settle();
+  assert.deepEqual(h.statuses, [["fresh"]]);
+});
+
+test("manual failures, invalid replies and timeout preserve the last visible quota", async () => {
+  for (const kind of ["failure", "invalid", "timeout"]) {
+    const response = deferred();
+    const h = harness(command => command === "get_status" ? ["last-good"] : command === "get_collection_health" ? {codex: "ready"}
+      : kind === "failure" ? Promise.reject(new Error("refresh failed")) : kind === "invalid" ? null : response.promise);
+    await h.loader.load();
+    const pending = h.loader.refresh();
+    if (kind === "timeout") {
+      assert.equal([...h.timers.values()].some(timer => timer.delay === 20_000), false);
+      await h.timeout(46_000);
+    }
+    assert.equal((await pending).ok, false);
+    assert.deepEqual(h.statuses, [["last-good"]]);
+    response.resolve(["late"]);
+    await settle();
+    assert.deepEqual(h.statuses, [["last-good"]]);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test("native events remain authoritative during a force refresh", async () => {
+  const response = deferred();
+  const h = harness(() => response.promise);
+  const pending = h.loader.refresh();
+  h.statusEvent();
+  h.healthEvent();
+  response.resolve(["old reply"]);
+  assert.equal((await pending).ok, true);
+  assert.deepEqual(h.statuses, []);
+  assert.deepEqual(h.commands, ["refresh_status"]);
+});
+
+test("disposed force requests settle without callbacks or more IPC", async () => {
+  const response = deferred();
+  const h = harness(() => response.promise);
+  const pending = h.loader.refresh();
+  h.loader.dispose();
+  assert.equal((await pending).retired, true);
+  assert.equal((await h.loader.refresh()).retired, true);
+  response.reject(new Error("late refresh"));
+  await settle();
+  assert.deepEqual(h.commands, ["refresh_status"]);
+  assert.deepEqual(h.statuses, []);
+  assert.equal(h.timers.size, 0);
 });

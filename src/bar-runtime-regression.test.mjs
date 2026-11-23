@@ -19,15 +19,25 @@ const deferred = () => {
 
 function nativeMenuState(revision = 0n) {
   let open = false;
+  let generation = "1", latestIntent = 0n;
   const snapshot = () => ({ open, revision: String(revision) });
   return {
     snapshot,
     write(value) { open = value; revision += 1n; return snapshot(); },
+    replace(value) { generation = value; latestIntent = 0n; return this.write(false); },
+    request(args) {
+      // Missing metadata models the original native command, which wrote unconditionally.
+      if (args.windowGeneration !== undefined || args.intentSequence !== undefined) {
+        if (args.windowGeneration !== generation || BigInt(args.intentSequence) <= latestIntent) return snapshot();
+        latestIntent = BigInt(args.intentSequence);
+      }
+      return this.write(args.open);
+    },
   };
 }
 
 async function fixture({ orientation = "horizontal", orientationInvoke, menuInvoke, settings = {}, length = 120,
-  viewportSize, menuSize = { width: 82, height: 32 }, textScale = 1, menuListen } = {}) {
+  viewportSize, menuSize = { width: 82, height: 32 }, textScale = 1, menuListen, menuGeneration = "1" } = {}) {
   const events = new Map(), windowEvents = new Map(), timers = new Map(), calls = [];
   const properties = new Map();
   const root = { dataset: {}, style: { setProperty: (key, value) => properties.set(key, value) } };
@@ -61,7 +71,7 @@ async function fixture({ orientation = "horizontal", orientationInvoke, menuInvo
     events.set(name, handler); return () => events.delete(name);
   };
   const window = {
-    location: { search: "?tool=codex" }, devicePixelRatio: 1,
+    location: { search: `?tool=codex&menuGeneration=${menuGeneration}` }, devicePixelRatio: 1,
     get innerWidth() { return viewport.clientWidth; }, get innerHeight() { return viewport.clientHeight; },
     addEventListener: (name, handler) => windowEvents.set(name, handler),
     removeEventListener: name => windowEvents.delete(name),
@@ -115,6 +125,99 @@ async function fixture({ orientation = "horizontal", orientationInvoke, menuInvo
     },
   };
 }
+
+test("R5 a retired close WRITE after reopen cannot change native ownership or revision", async () => {
+  const native = nativeMenuState(), delayed = deferred();
+  let oldClose;
+  const h = await fixture({ menuInvoke: args => {
+    if (!args.open && !oldClose) { oldClose = args; return delayed.promise; }
+    return native.request(args);
+  } });
+  try {
+    await h.api.show({});
+    h.api.hide();
+    await h.api.show({});
+    const reopened = native.snapshot();
+    assert.equal(reopened.open, true);
+    const late = native.request(oldClose);
+    h.event("taskbar-menu-state-updated", late);
+    delayed.resolve(late); await settle();
+    assert.deepEqual(native.snapshot(), reopened, "retired close must not WRITE or allocate a revision");
+    assert.equal(h.root.dataset.menuState, "open");
+    assert.equal(h.menu.hidden, false);
+    assert.deepEqual(h.calls.filter(call => call.command === "set_taskbar_menu_open")
+      .map(call => call.args.intentSequence), ["1", "2", "3"]);
+  } finally { h.api.cleanup(); }
+});
+
+test("R6 a disposed page's late native open cannot own the replacement page's menu", async () => {
+  const native = nativeMenuState(), delayed = deferred();
+  let oldOpen, replacement;
+  const old = await fixture({ settings: { bar_mode: "dual" }, length: 36,
+    menuInvoke: args => {
+      if (args.open) { oldOpen = args; return delayed.promise; }
+      return native.request(args);
+    } });
+  try {
+    const opening = old.api.show({});
+    old.api.cleanup();
+    native.replace("2");
+    replacement = await fixture({ menuGeneration: "2", settings: { bar_mode: "dual" }, length: 36,
+      menuInvoke: args => native.request(args) });
+    const recovered = native.snapshot(), oldCalls = old.calls.length;
+    const late = native.request(oldOpen);
+    replacement.event("taskbar-menu-state-updated", late);
+    delayed.resolve(late); await opening; await settle();
+    await replacement.advance(100);
+    assert.deepEqual(native.snapshot(), recovered, "old open must not WRITE on the replacement");
+    assert.equal(old.calls.length, oldCalls, "disposed page must not issue cleanup IPC");
+    assert.equal(replacement.menu.hidden, true);
+    assert.equal(replacement.root.dataset.menuState ?? "closed", "closed");
+    assert.ok(replacement.widths().length > 0);
+    await replacement.api.show({});
+    assert.equal(native.snapshot().open, true, "replacement lifetime starts its own intent sequence");
+    assert.equal(replacement.menu.hidden, false);
+  } finally { old.api.cleanup(); replacement?.api.cleanup(); }
+});
+
+test("R6 window lifetime is captured at module load, never acquired from a later current-token lookup", async () => {
+  const h = await fixture({ menuGeneration: "71" });
+  try {
+    h.window.location.search = "?tool=codex&menuGeneration=72";
+    await h.api.show({});
+    const args = h.calls.find(call => call.command === "set_taskbar_menu_open")?.args;
+    assert.equal(args?.windowGeneration, "71");
+    assert.equal(args?.intentSequence, "1");
+    assert.equal(h.calls.filter(call => /get_.*menu.*(token|generation)/.test(call.command)).length, 0);
+  } finally { h.api.cleanup(); }
+});
+
+test("R6 invalid or absent creation generations never dispatch menu IPC", async () => {
+  for (const menuGeneration of ["", "0", "01", "+1", "18446744073709551616", "current"]) {
+    const h = await fixture({ menuGeneration });
+    try {
+      await h.api.show({}); await h.advance(250);
+      assert.equal(h.menu.hidden, true);
+      assert.equal(h.calls.filter(call => call.command === "set_taskbar_menu_open").length, 0);
+      assert.ok(h.widths().length > 0, "missing lifetime does not block normal width sync");
+    } finally { h.api.cleanup(); }
+  }
+});
+
+test("R5 close retries retain local intent but allocate strictly newer native admission sequences", async () => {
+  let closes = 0;
+  const h = await fixture({ menuInvoke: (args, result) => {
+    if (!args.open && ++closes < 3) throw new Error("layout gate busy");
+    return result;
+  } });
+  try {
+    await h.api.show({}); h.api.hide(); await settle();
+    await h.advance(250); await h.advance(250);
+    assert.equal(h.root.dataset.menuState, "closed");
+    assert.deepEqual(h.calls.filter(call => call.command === "set_taskbar_menu_open")
+      .map(call => call.args.intentSequence), ["1", "2", "3", "4"]);
+  } finally { h.api.cleanup(); }
+});
 
 test("R3 failed native menu subscription uses direct refresh without opening an unobservable menu", async () => {
   const h = await fixture({ menuListen: () => Promise.reject(new Error("listener unavailable")) });
