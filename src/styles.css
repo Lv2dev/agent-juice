@@ -215,6 +215,16 @@ p {
   box-shadow: none;
 }
 
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme="light"]) .bar-shell {
+    --ring-number-outline-color: rgba(13, 15, 16, 0.88);
+  }
+}
+
+html[data-theme="dark"] .bar-shell {
+  --ring-number-outline-color: rgba(13, 15, 16, 0.88);
+}
+
 .bar-shell[data-dragging="true"] {
   outline: 1px solid color-mix(in srgb, var(--accent) 64%, transparent);
   outline-offset: -1px;
