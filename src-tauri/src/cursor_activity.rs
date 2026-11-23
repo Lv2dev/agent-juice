@@ -9,6 +9,7 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -23,6 +24,11 @@ const MAX_CACHE_MONTHS: usize = 14;
 const CURRENT_MONTH_FRESHNESS: Duration = Duration::from_secs(5 * 60);
 const PREVIOUS_MONTH_FRESHNESS: Duration = Duration::from_secs(60 * 60);
 const CURRENT_INGESTION_LAG: Duration = Duration::from_secs(5 * 60);
+const RATE_LIMIT_COOLDOWN: Duration = CURRENT_MONTH_FRESHNESS;
+const MAX_COOLDOWN_SCOPES: usize = 16;
+static ACTIVITY_COOLDOWNS: ActivityCooldowns = ActivityCooldowns {
+    deadlines: Mutex::new(BTreeMap::new()),
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimezoneIdentity {
@@ -85,6 +91,59 @@ impl std::error::Error for ActivityError {}
 impl From<cursor_dashboard::DashboardError> for ActivityError {
     fn from(error: cursor_dashboard::DashboardError) -> Self {
         Self::new(error.kind, "Cursor account activity request failed")
+    }
+}
+
+#[derive(Default)]
+struct ActivityCooldowns {
+    deadlines: Mutex<BTreeMap<AccountScope, Instant>>,
+}
+
+impl ActivityCooldowns {
+    fn is_active(&self, scope: AccountScope, now: Instant) -> bool {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&scope)
+            .is_some_and(|&until| now < until)
+    }
+
+    fn record(&self, scope: AccountScope, now: Instant) {
+        let mut deadlines = self
+            .deadlines
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        deadlines.retain(|_, until| now < *until);
+        deadlines.insert(scope, now + RATE_LIMIT_COOLDOWN);
+        // Keep recent account switches without retaining an unbounded scope history.
+        if deadlines.len() > MAX_COOLDOWN_SCOPES {
+            if let Some(oldest) = deadlines
+                .iter()
+                .min_by_key(|(_, until)| *until)
+                .map(|(&scope, _)| scope)
+            {
+                deadlines.remove(&oldest);
+            }
+        }
+    }
+
+    fn refresh_or_wait(
+        &self,
+        cache: &mut CursorActivityCache,
+        now: impl Fn() -> Instant,
+        refresh: impl FnOnce(&mut CursorActivityCache) -> Result<RefreshStep, ActivityError>,
+        wait: impl FnOnce(&CursorActivityCache) -> Result<RefreshStep, ActivityError>,
+    ) -> Result<RefreshStep, ActivityError> {
+        let scope = cache.account_scope;
+        if !self.is_active(scope, now()) {
+            match refresh(cache) {
+                Err(error) if error.kind == DashboardErrorKind::RateLimited => {
+                    self.record(scope, now());
+                }
+                outcome => return outcome,
+            }
+        }
+        wait(cache)
     }
 }
 
@@ -368,7 +427,7 @@ fn view_from_cache<Tz: TimeZone>(
     required: &[Month],
     now: DateTime<Utc>,
     timezone: &Tz,
-    partial: bool,
+    rate_limited: bool,
 ) -> CursorActivityView {
     let mut days = BTreeMap::new();
     for month in required {
@@ -378,10 +437,11 @@ fn view_from_cache<Tz: TimeZone>(
             }
         }
     }
-    let backfill_pending = required
-        .iter()
-        .any(|month| !cache.months.contains_key(&month.key()))
-        || historical_target_month(cache, required, now, timezone).is_some();
+    let backfill_pending = !rate_limited
+        && (required
+            .iter()
+            .any(|month| !cache.months.contains_key(&month.key()))
+            || historical_target_month(cache, required, now, timezone).is_some());
     let incomplete_history = required.iter().skip(1).any(|month| {
         cache
             .months
@@ -390,7 +450,7 @@ fn view_from_cache<Tz: TimeZone>(
     });
     CursorActivityView {
         days,
-        partial: partial || backfill_pending || incomplete_history,
+        partial: rate_limited || backfill_pending || incomplete_history,
         backfill_pending,
         scope: cache.account_scope,
     }
@@ -416,7 +476,7 @@ pub fn cached_view(
         &required_months(weeks, now, &Local),
         now,
         &Local,
-        false,
+        ACTIVITY_COOLDOWNS.is_active(credentials.scope, Instant::now()),
     );
     validate_cache_access(&cache, deadline, &|| true)?;
     Ok(view)
@@ -477,10 +537,13 @@ fn target_month<Tz: TimeZone>(
 ) -> Option<Month> {
     let current = *required.first()?;
     let current_cached = cache.months.get(&current.key());
-    if force_current
-        || current_cached.is_none_or(|month| {
-            !refreshed_recently(&month.refreshed_at, now, CURRENT_MONTH_FRESHNESS)
-        })
+    let current_deferred = month_bounds(current, timezone)
+        .is_ok_and(|(start_ms, _)| ingestion_cutoff(now) <= start_ms);
+    if !current_deferred
+        && (force_current
+            || current_cached.is_none_or(|month| {
+                !refreshed_recently(&month.refreshed_at, now, CURRENT_MONTH_FRESHNESS)
+            }))
     {
         return Some(current);
     }
@@ -671,30 +734,50 @@ fn refresh_step_at_path(
     let timezone = timezone_identity()?;
     let mut cache = load_cache(path, credentials.scope, &timezone);
     let required = required_months(weeks, now, &Local);
-    let Some(target) = target_month(&cache, &required, now, force_current, &Local) else {
-        return checked_refresh_step(&cache, &required, now, &Local, || {
-            validate_cache_access(&cache, deadline, &commit_allowed)
-        });
-    };
-    let source = DashboardSource {
-        credentials: &credentials,
-    };
-    let source = AdmittedSource {
-        source: &source,
-        request_allowed: &commit_allowed,
-    };
-    let month = fetch_month(&source, target, &Local, deadline)?;
-    validate_cache_access(&cache, deadline, &commit_allowed)?;
-    cache.months.insert(target.key(), month);
-    while cache.months.len() > MAX_CACHE_MONTHS {
-        let Some(oldest) = cache.months.keys().next().cloned() else {
-            break;
-        };
-        cache.months.remove(&oldest);
-    }
-    save_cache(path, &cache)?;
-    checked_refresh_step(&cache, &required, Utc::now(), &Local, || {
-        validate_cache_access(&cache, deadline, &commit_allowed)
+    let validate =
+        |cache: &CursorActivityCache| validate_cache_access(cache, deadline, &commit_allowed);
+    ACTIVITY_COOLDOWNS.refresh_or_wait(
+        &mut cache,
+        Instant::now,
+        |cache| {
+            let Some(target) = target_month(cache, &required, now, force_current, &Local) else {
+                return checked_refresh_step(cache, &required, now, &Local, || validate(cache));
+            };
+            let source = DashboardSource {
+                credentials: &credentials,
+            };
+            let source = AdmittedSource {
+                source: &source,
+                request_allowed: &commit_allowed,
+            };
+            let month = fetch_month(&source, target, &Local, deadline)?;
+            validate(cache)?;
+            cache.months.insert(target.key(), month);
+            while cache.months.len() > MAX_CACHE_MONTHS {
+                let Some(oldest) = cache.months.keys().next().cloned() else {
+                    break;
+                };
+                cache.months.remove(&oldest);
+            }
+            save_cache(path, cache)?;
+            checked_refresh_step(cache, &required, Utc::now(), &Local, || validate(cache))
+        },
+        |cache| checked_cooldown_step(cache, &required, now, &Local, || validate(cache)),
+    )
+}
+
+fn checked_cooldown_step<Tz: TimeZone>(
+    cache: &CursorActivityCache,
+    required: &[Month],
+    now: DateTime<Utc>,
+    timezone: &Tz,
+    validate: impl FnOnce() -> Result<(), ActivityError>,
+) -> Result<RefreshStep, ActivityError> {
+    let view = view_from_cache(cache, required, now, timezone, true);
+    validate()?;
+    Ok(RefreshStep {
+        kind: RefreshStepKind::Complete,
+        view,
     })
 }
 
@@ -706,15 +789,15 @@ fn checked_refresh_step<Tz: TimeZone>(
     validate: impl FnOnce() -> Result<(), ActivityError>,
 ) -> Result<RefreshStep, ActivityError> {
     let view = view_from_cache(cache, required, now, timezone, false);
-    validate()?;
-    Ok(RefreshStep {
-        kind: if view.backfill_pending {
+    // Ingestion may remain pending when this run has no queryable month.
+    let kind =
+        if view.backfill_pending && target_month(cache, required, now, false, timezone).is_some() {
             RefreshStepKind::Updated
         } else {
             RefreshStepKind::Complete
-        },
-        view,
-    })
+        };
+    validate()?;
+    Ok(RefreshStep { kind, view })
 }
 
 #[cfg(test)]
@@ -1043,6 +1126,280 @@ mod tests {
             );
         }
         (cache, required)
+    }
+
+    struct RateLimitedSource<'a> {
+        requests: Cell<usize>,
+        clock: &'a Cell<Instant>,
+    }
+
+    impl UsageSource for RateLimitedSource<'_> {
+        fn filtered(
+            &self,
+            _start_ms: i64,
+            _end_ms: i64,
+            _page: u32,
+            _page_size: u32,
+            _deadline: Instant,
+        ) -> Result<cursor_dashboard::UsageEventPage, ActivityError> {
+            let count = self.requests.get() + 1;
+            self.requests.set(count);
+            if count == 2 {
+                self.clock.set(self.clock.get() + Duration::from_secs(3));
+                return Err(ActivityError::new(DashboardErrorKind::RateLimited, "429"));
+            }
+            Ok(cursor_dashboard::UsageEventPage {
+                events: vec![],
+                total_count: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn activity_rate_limit_stops_auto_and_force_until_scope_deadline() {
+        let wall_now = timestamp("2026-09-08T12:00:00Z");
+        let started = Instant::now();
+        let clock = Cell::new(started);
+        let source = RateLimitedSource {
+            requests: Cell::new(0),
+            clock: &clock,
+        };
+        let cooldowns = ActivityCooldowns::default();
+        let (mut cache, required) = sample_cache(wall_now);
+        cache.months.remove(&required[1].key());
+        let original = cache.clone();
+        let run = |cache: &mut CursorActivityCache, now, force| {
+            cooldowns.refresh_or_wait(
+                cache,
+                || clock.get(),
+                |cache| {
+                    let target = target_month(cache, &required, now, force, &Utc).unwrap();
+                    let mut month = fetch_month_with_page_size_at(
+                        &source,
+                        target,
+                        &Utc,
+                        PAGE_SIZE,
+                        started + Duration::from_secs(600),
+                        now,
+                    )?;
+                    month.refreshed_at = now.to_rfc3339();
+                    cache.months.insert(target.key(), month);
+                    checked_refresh_step(cache, &required, now, &Utc, || Ok(()))
+                },
+                |cache| checked_cooldown_step(cache, &required, now, &Utc, || Ok(())),
+            )
+        };
+
+        let limited = run(&mut cache, wall_now, false).unwrap();
+        assert_eq!(source.requests.get(), 2);
+        assert_eq!(limited.kind, RefreshStepKind::Complete);
+        assert!(limited.view.partial && !limited.view.backfill_pending);
+        assert_eq!(limited.view.days.values().sum::<u64>(), 20);
+        let retry_at = clock.get() + RATE_LIMIT_COOLDOWN;
+        // Still waiting five minutes after the attempt started: the 429 arrived later.
+        clock.set(started + RATE_LIMIT_COOLDOWN);
+        for force in [false, true] {
+            let waiting = run(&mut cache, wall_now + ChronoDuration::days(1), force).unwrap();
+            assert_eq!(waiting, limited);
+            assert_eq!(source.requests.get(), 2);
+            assert_eq!(cache, original);
+        }
+        for other_scope in [
+            AccountScope {
+                user_id: cache.account_scope.user_id,
+                team_id: Some(1),
+            },
+            AccountScope {
+                user_id: 2,
+                team_id: None,
+            },
+        ] {
+            let mut other = original.clone();
+            other.account_scope = other_scope;
+            let collected = run(&mut other, wall_now, false).unwrap();
+            assert_eq!(collected.view.scope, other_scope);
+            assert!(!collected.view.partial && !collected.view.backfill_pending);
+        }
+        assert_eq!(source.requests.get(), 6);
+        assert_eq!(run(&mut cache, wall_now, true).unwrap(), limited);
+        assert_eq!(source.requests.get(), 6);
+        clock.set(retry_at);
+        let resumed = run(&mut cache, wall_now, false).unwrap();
+        assert_eq!(resumed.kind, RefreshStepKind::Complete);
+        assert!(!resumed.view.partial && !resumed.view.backfill_pending);
+        assert_eq!(source.requests.get(), 8);
+    }
+
+    #[test]
+    fn activity_rate_limit_keeps_waiting_when_cache_access_is_rejected() {
+        let now = timestamp("2026-09-08T12:00:00Z");
+        let instant = Instant::now();
+        let cooldowns = ActivityCooldowns::default();
+        let (mut cache, required) = sample_cache(now);
+        let withdraw_access = |cache: &CursorActivityCache| {
+            checked_cooldown_step(cache, &required, now, &Utc, || {
+                check_cache_access(
+                    cache,
+                    cache.account_scope,
+                    &cache.timezone_identity,
+                    true,
+                    false,
+                )
+            })
+        };
+        for kind in [
+            DashboardErrorKind::Transport,
+            DashboardErrorKind::RateLimited,
+        ] {
+            let error = cooldowns
+                .refresh_or_wait(
+                    &mut cache,
+                    || instant,
+                    |_| Err(ActivityError::new(kind, "synthetic failure")),
+                    withdraw_access,
+                )
+                .unwrap_err();
+            if kind == DashboardErrorKind::RateLimited {
+                assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+                assert!(cooldowns.is_active(cache.account_scope, instant));
+            } else {
+                assert_eq!(error.kind, kind);
+                assert!(!cooldowns.is_active(cache.account_scope, instant));
+            }
+        }
+        let waiting = cooldowns
+            .refresh_or_wait(
+                &mut cache,
+                || instant,
+                |_| panic!("cooldown lost after policy cancellation"),
+                |cache| {
+                    checked_cooldown_step(cache, &required, now, &Utc, || {
+                        check_cache_access(
+                            cache,
+                            cache.account_scope,
+                            &cache.timezone_identity,
+                            true,
+                            true,
+                        )
+                    })
+                },
+            )
+            .unwrap();
+        assert!(waiting.view.partial && !waiting.view.backfill_pending);
+    }
+
+    #[test]
+    fn activity_rate_limit_expires_and_bounds_retained_scopes() {
+        let now = Instant::now();
+        let cooldowns = ActivityCooldowns::default();
+        let scope = |user_id| AccountScope {
+            user_id,
+            team_id: None,
+        };
+        let limit = MAX_COOLDOWN_SCOPES as u64;
+        for user_id in 1..=limit + 1 {
+            cooldowns.record(scope(user_id), now + Duration::from_secs(user_id));
+        }
+        assert!(!cooldowns.is_active(scope(1), now + Duration::from_secs(limit + 1)));
+        assert_eq!(
+            cooldowns.deadlines.lock().unwrap().len(),
+            MAX_COOLDOWN_SCOPES
+        );
+        let expiry = now + Duration::from_secs(limit + 1) + RATE_LIMIT_COOLDOWN;
+        assert!(!cooldowns.is_active(scope(limit + 1), expiry));
+        cooldowns.record(scope(1), expiry);
+        assert_eq!(cooldowns.deadlines.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn g3264_month_start_defers_current_preserves_history_and_revalidates() {
+        let timezone = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        for value in [
+            "2026-09-01T00:00:00+09:00",
+            "2026-09-01T00:02:00+09:00",
+            "2026-09-01T00:05:00+09:00",
+        ] {
+            let now = timestamp(value);
+            let (mut cache, required) = sample_cache(now);
+            cache.months.remove(&required[0].key());
+            for force in [false, true] {
+                assert_eq!(target_month(&cache, &required, now, force, &timezone), None);
+            }
+            let validations = Cell::new(0);
+            let step = checked_refresh_step(&cache, &required, now, &timezone, || {
+                validations.set(validations.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(validations.get(), 1);
+            assert_eq!(step.kind, RefreshStepKind::Complete);
+            assert!(step.view.partial && step.view.backfill_pending);
+            assert_eq!(step.view.days.values().sum::<u64>(), 20);
+            let error = checked_refresh_step(&cache, &required, now, &timezone, || {
+                check_cache_access(
+                    &cache,
+                    cache.account_scope,
+                    &cache.timezone_identity,
+                    false,
+                    true,
+                )
+            })
+            .unwrap_err();
+            assert_eq!(error.kind, DashboardErrorKind::ScopeChanged);
+        }
+    }
+
+    #[test]
+    fn g3264_month_start_collects_history_then_resumes_current_after_lag() {
+        let timezone = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        let before = timestamp("2026-09-01T00:02:00+09:00");
+        let after = timestamp("2026-09-01T00:05:00.001+09:00");
+        let (mut cache, required) = sample_cache(before);
+        let current = required[0];
+        let previous = required[1];
+        cache.months.remove(&current.key());
+        cache.months.remove(&previous.key());
+        assert_eq!(
+            target_month(&cache, &required, before, true, &timezone),
+            Some(previous)
+        );
+        let mut month = fetch_empty_month(previous, before, &timezone);
+        assert!(!month.complete);
+        month.refreshed_at = before.to_rfc3339();
+        cache.months.insert(previous.key(), month);
+        assert_eq!(
+            target_month(&cache, &required, before, true, &timezone),
+            None
+        );
+        let waiting =
+            checked_refresh_step(&cache, &required, before, &timezone, || Ok(())).unwrap();
+        assert_eq!(waiting.kind, RefreshStepKind::Complete);
+        assert!(waiting.view.partial && waiting.view.backfill_pending);
+        assert_eq!(waiting.view.days.values().sum::<u64>(), 10);
+
+        assert_eq!(
+            target_month(&cache, &required, after, false, &timezone),
+            Some(current)
+        );
+        let mut month = fetch_empty_month(current, after, &timezone);
+        month.refreshed_at = after.to_rfc3339();
+        cache.months.insert(current.key(), month);
+        assert_eq!(
+            target_month(&cache, &required, after, false, &timezone),
+            Some(previous)
+        );
+        let mut finalized = fetch_empty_month(previous, after, &timezone);
+        assert!(finalized.complete);
+        finalized.refreshed_at = after.to_rfc3339();
+        cache.months.insert(previous.key(), finalized);
+        assert_eq!(
+            target_month(&cache, &required, after, false, &timezone),
+            None
+        );
+        let finished =
+            checked_refresh_step(&cache, &required, after, &timezone, || Ok(())).unwrap();
+        assert_eq!(finished.kind, RefreshStepKind::Complete);
+        assert!(!finished.view.partial && !finished.view.backfill_pending);
     }
 
     fn fetch_empty_month<Tz: TimeZone>(

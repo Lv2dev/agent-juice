@@ -39,16 +39,18 @@ test('late and queued provider completions publish only the current Antigravity 
   assert.match(publication, /with_taskbar_settings_read/);
   assert.match(publication, /let mut snapshot = current_snapshot\(\)/);
   assert.match(publication, /filter_enabled_statuses\(latest_per_tool\(&snapshot\), &settings\)/);
-  assert.match(collection, /let _ = sender\.send\(\(\)\)/);
-  assert.match(collection, /let _ = receiver\.recv_timeout\(remaining\);\s*statuses\.extend\(antigravity::cached\(\)\)/);
+  assert.match(collection, /if manual_refresh \{[\s\S]*?antigravity::refresh_manual\(deadline\)[\s\S]*?Throttled => Err\("usage_refresh_throttled"\)[\s\S]*?sender\.send\(outcome\)/);
+  assert.match(collection, /let outcome = receiver\.recv_timeout\(remaining\);[\s\S]*?if manual_refresh && refresh_error.is_none\(\)[\s\S]*?statuses\.extend\(antigravity::cached\(\)\)/);
   const combined = source.match(/fn combined_collection_last_result[\s\S]*?\n}\r?\n/)?.[0] ?? '';
   assert.match(combined, /statuses\.extend\(antigravity::cached\(\)\)/);
   const emit = source.match(/fn emit_collection_snapshot[\s\S]*?\n}\r?\n/)?.[0] ?? '';
   assert.match(emit, /consume_current_collection_snapshot\([\s\S]*?combined_collection_last_result/);
-  for (const command of ['get_status', 'refresh_status']) {
+  for (const command of ['get_status', 'run_force_refresh']) {
     const handler = source.match(new RegExp(`async fn ${command}\\b[\\s\\S]*?\\n}\\r?\\n`))?.[0] ?? '';
     assert.match(handler, /current_collection_snapshot\(\)\.map_err/);
   }
+  const refresh = source.match(/async fn refresh_status\b[\s\S]*?\n}\r?\n/)?.[0] ?? '';
+  assert.match(refresh, /collect_force_refresh_off_thread\(app\).await/);
 });
 
 test('Antigravity is opt-in and settings preserve independent colors and position', () => {

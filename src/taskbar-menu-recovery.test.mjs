@@ -49,7 +49,7 @@ function fixture(invoke = async () => null) {
       documentElement: { clientWidth: 400, clientHeight: 48 },
       querySelector: selector => selector === "#bar" ? root : selector === "#bar-menu" ? menu : null,
     },
-    window: { location: { search: "?tool=codex" }, innerWidth: 400, innerHeight: 48,
+    window: { location: { search: "?tool=codex&menuGeneration=1" }, innerWidth: 400, innerHeight: 48,
       devicePixelRatio: 1, __TAURI__: { core: {
         invoke(command, args) {
           calls.push({ command, args });

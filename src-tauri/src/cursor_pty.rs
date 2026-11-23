@@ -888,6 +888,7 @@ fn capture_cursor_usage_with_command_and_identity(
     if let Some(proof) = proof {
         crate::cursor_dashboard::verify_cli_identity(proof, deadline)?;
     }
+    crate::collection_admission::ensure_current()?;
     unsafe {
         CreateProcessW(
             PCWSTR(application_name.as_ptr()),
@@ -908,6 +909,7 @@ fn capture_cursor_usage_with_command_and_identity(
     unsafe {
         AssignProcessToJobObject(job.0, process.0)?;
         containment.disarm();
+        crate::collection_admission::ensure_current()?;
         if ResumeThread(thread.0) == u32::MAX {
             anyhow::bail!("Cursor Agent thread could not be resumed");
         }

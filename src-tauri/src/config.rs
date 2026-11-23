@@ -2589,6 +2589,39 @@ fn parse_hex_rgb(value: Option<&str>) -> Option<[u8; 3]> {
 }
 
 pub(crate) fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    stage_file_replacement(path, contents)?.publish()
+}
+
+pub(crate) struct StagedFileReplacement<'a> {
+    path: &'a Path,
+    temporary: Option<PathBuf>,
+}
+
+impl StagedFileReplacement<'_> {
+    pub(crate) fn publish(mut self) -> std::io::Result<()> {
+        let tmp = self.temporary.as_ref().expect("staged file");
+        if self.path.exists() {
+            replace_existing_file(self.path, tmp)?;
+        } else {
+            std::fs::rename(tmp, self.path)?;
+        }
+        self.temporary = None;
+        Ok(())
+    }
+}
+
+impl Drop for StagedFileReplacement<'_> {
+    fn drop(&mut self) {
+        if let Some(tmp) = self.temporary.take() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
+}
+
+pub(crate) fn stage_file_replacement<'a>(
+    path: &'a Path,
+    contents: &[u8],
+) -> std::io::Result<StagedFileReplacement<'a>> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2599,22 +2632,18 @@ pub(crate) fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> 
         std::process::id(),
         sequence
     ));
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
-    let result = if path.exists() {
-        replace_existing_file(path, &tmp)
-    } else {
-        std::fs::rename(&tmp, path)
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let staged = StagedFileReplacement {
+        path,
+        temporary: Some(tmp),
     };
-    match result {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(err)
-        }
-    }
+    let written = file.write_all(contents).and_then(|()| file.sync_all());
+    drop(file);
+    written?;
+    Ok(staged)
 }
 
 #[cfg(windows)]

@@ -33,6 +33,7 @@ pub enum HttpMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpErrorKind {
+    PolicyCancelled,
     Deadline,
     Transport,
     Oversized,
@@ -80,6 +81,9 @@ pub fn execute(
     }
     let mut attempts = 0usize;
     let mut response = loop {
+        if !crate::collection_admission::current_is_allowed() {
+            return Err(HttpError::new(HttpErrorKind::PolicyCancelled, context));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(HttpError::new(HttpErrorKind::Deadline, context));
@@ -109,6 +113,9 @@ pub fn execute(
                     .send(body.unwrap_or_default())
             }
         };
+        if !crate::collection_admission::current_is_allowed() {
+            return Err(HttpError::new(HttpErrorKind::PolicyCancelled, context));
+        }
         match response {
             Ok(response) => break response,
             Err(error)
@@ -166,6 +173,9 @@ pub fn execute(
     if Instant::now() >= deadline {
         return Err(HttpError::new(HttpErrorKind::Deadline, context));
     }
+    if !crate::collection_admission::current_is_allowed() {
+        return Err(HttpError::new(HttpErrorKind::PolicyCancelled, context));
+    }
     Ok(HttpResponse {
         status,
         content_type,
@@ -215,6 +225,67 @@ mod tests {
             request
         });
         (format!("http://{address}"), worker)
+    }
+
+    #[test]
+    fn retired_collection_is_rejected_before_http_dispatch() {
+        let policy = crate::collection_admission::CollectionAdmission::new();
+        policy.set_enabled(true);
+        policy.admit().unwrap().run(|| {
+            policy.set_enabled(false);
+            let error = execute(
+                HttpMethod::Get,
+                "invalid://synthetic",
+                &[],
+                None,
+                Instant::now() + Duration::from_secs(1),
+                128,
+                "synthetic request",
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, HttpErrorKind::PolicyCancelled);
+        });
+    }
+
+    #[test]
+    fn retired_collection_is_not_retried_after_the_first_transport_failure() {
+        let policy = std::sync::Arc::new(crate::collection_admission::CollectionAdmission::new());
+        policy.set_enabled(true);
+        let permit = policy.admit().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            policy.set_enabled(false);
+            // A missing response would normally cause another safe transport attempt.
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        let error = permit
+            .run(|| {
+                execute(
+                    HttpMethod::Get,
+                    &url,
+                    &[],
+                    None,
+                    Instant::now() + Duration::from_secs(2),
+                    128,
+                    "synthetic request",
+                )
+                .unwrap_err()
+            })
+            .unwrap();
+        assert_eq!(error.kind, HttpErrorKind::PolicyCancelled);
+        server.join().unwrap();
     }
 
     #[test]

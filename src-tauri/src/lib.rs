@@ -4,6 +4,7 @@ pub mod antigravity;
 pub mod antigravity_cli;
 mod claude_desktop;
 pub mod codex_activity;
+mod collection_admission;
 pub mod collector;
 pub mod config;
 pub mod cursor_activity;
@@ -14,6 +15,7 @@ mod electron_windows;
 pub(crate) mod http_transport;
 pub mod model;
 pub mod paths;
+mod quit;
 pub mod render;
 #[cfg(windows)]
 mod single_instance;
@@ -71,6 +73,7 @@ const GROK_BILLING_CACHE_MIN_SECS: i64 = 60;
 const GROK_BILLING_TIMEOUT_SECS: u64 = 8;
 const CURSOR_USAGE_CACHE_MIN_SECS: i64 = 5 * 60;
 const CURSOR_USAGE_TIMEOUT_SECS: u64 = 20;
+const CURSOR_FORCE_WAIT_SECS: u64 = CURSOR_USAGE_TIMEOUT_SECS * 2 + 2;
 const CURSOR_AGENT_FALLBACK_MAX_RESERVE_SECS: u64 = 10;
 const CURSOR_SCOPE_REVALIDATION_MAX_SECS: u64 = 1;
 const COLLECTION_REFRESH_DEADLINE_SECS: u64 = 15;
@@ -93,7 +96,10 @@ const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
 static UPDATE_OPERATION_GATE: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
+static UPDATE_CHECK_COORDINATOR: Lazy<update::UpdateCheckCoordinator> =
+    Lazy::new(update::UpdateCheckCoordinator::default);
 static TASKBAR_PAUSE_WRITE_GATE: Mutex<()> = Mutex::new(());
+static TASKBAR_CONTENT_EDIT_GATE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, serde::Serialize)]
 struct TaskbarDraggingPayload {
@@ -145,6 +151,8 @@ struct TaskbarMenuLayout {
 struct TaskbarMenuSlot {
     revision: u64,
     layout: TaskbarMenuLayout,
+    request_generation: u64,
+    request_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -263,15 +271,13 @@ enum TaskbarDockAction {
 struct TaskbarDockPlan {
     actions: Vec<TaskbarDockAction>,
     content_revisions: Vec<(&'static str, Option<u64>)>,
+    menu_revisions: Vec<(&'static str, Option<u64>)>,
     menu_cleanup: Vec<(&'static str, TaskbarMenuWrite)>,
     requires_confirmed_topology: bool,
 }
 
 #[derive(Default)]
 struct TaskbarShutdownState(AtomicBool);
-
-#[derive(Default)]
-struct QuitPendingState(AtomicBool);
 
 #[derive(Default)]
 struct SettingsSideEffectRetryState {
@@ -295,15 +301,9 @@ fn spawn_single_instance_listener(app: tauri::AppHandle, event: single_instance:
             }
             match event.wait(std::time::Duration::from_millis(100)) {
                 Ok(true) => {
+                    quit::cancel_for_activation(&app);
                     let activation_app = app.clone();
                     if let Err(err) = app.run_on_main_thread(move || {
-                        let quit_cancelled = activation_app
-                            .try_state::<QuitPendingState>()
-                            .is_some_and(|pending| pending.0.swap(false, Ordering::AcqRel));
-                        if quit_cancelled {
-                            let _ = activation_app
-                                .emit("app-quit-cancelled", "single-instance activation");
-                        }
                         show_panel(&activation_app);
                     }) {
                         eprintln!("[single-instance] activation dispatch failed: {err}");
@@ -327,6 +327,7 @@ enum CollectionErrorKind {
     LoginRequired,
     Unavailable,
     RateLimited,
+    RateLimitedSourceChanged,
     CredentialsDecode,
     SourceChanged,
 }
@@ -361,8 +362,36 @@ struct CachedStatusAttempt {
     attempted_at: DateTime<Utc>,
     last_good: Option<AgentStatus>,
     error: Option<CollectionErrorKind>,
+    authentication_failed: bool,
     retry_at: DateTime<Utc>,
     consecutive_failures: u32,
+}
+
+#[derive(Clone)]
+struct ClaudeDesktopCooldown {
+    revision: claude_desktop::Revision,
+    retry_at: DateTime<Utc>,
+    attempted_at: DateTime<Utc>,
+    consecutive_failures: u32,
+}
+
+impl ClaudeDesktopCooldown {
+    fn for_source(
+        &self,
+        revision: &claude_desktop::Revision,
+        epoch: u64,
+        now: DateTime<Utc>,
+    ) -> Option<CachedStatusAttempt> {
+        (self.revision == *revision && now < self.retry_at).then_some(CachedStatusAttempt {
+            generation: epoch,
+            attempted_at: self.attempted_at,
+            last_good: None,
+            error: Some(CollectionErrorKind::RateLimited),
+            authentication_failed: false,
+            retry_at: self.retry_at,
+            consecutive_failures: self.consecutive_failures,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -373,6 +402,7 @@ enum CursorStatusSource {
 
 #[derive(Clone)]
 struct CursorCachedStatusAttempt {
+    policy_generation: Option<u64>,
     attempted_at: DateTime<Utc>,
     last_good: Option<AgentStatus>,
     source: Option<CursorStatusSource>,
@@ -383,16 +413,63 @@ struct CursorCachedStatusAttempt {
     consecutive_failures: u32,
 }
 
+type CollectionOutcome = (Vec<AgentStatus>, bool);
+type CollectionAnswer = std::sync::Arc<std::sync::OnceLock<CollectionOutcome>>;
+
+struct ActiveCollection {
+    force: bool,
+    answer: CollectionAnswer,
+}
+
 #[derive(Default)]
 struct CollectionFlight {
-    in_flight: bool,
-    in_flight_force: bool,
-    active_generation: u64,
-    completed_generation: u64,
-    pending_force_generation: Option<u64>,
+    active: Option<ActiveCollection>,
+    pending_force: Option<CollectionAnswer>,
+    #[cfg(test)]
     pending_force_waiters: usize,
+    #[cfg(test)]
     joined_waiters: usize,
     last_result: Vec<AgentStatus>,
+}
+
+impl CollectionFlight {
+    fn target(&mut self, force: bool) -> CollectionAnswer {
+        let Some(active) = &self.active else {
+            return self.pending_force.clone().unwrap_or_default();
+        };
+        #[cfg(test)]
+        {
+            self.joined_waiters += 1;
+        }
+        if force && !active.force {
+            #[cfg(test)]
+            {
+                self.pending_force_waiters += 1;
+            }
+            self.pending_force.get_or_insert_default().clone()
+        } else {
+            active.answer.clone()
+        }
+    }
+
+    fn finish(&mut self, result: Option<Vec<AgentStatus>>) -> CollectionOutcome {
+        let active = self.active.take().expect("active collection");
+        let succeeded = result.is_some();
+        if let Some(result) = result {
+            self.last_result = result;
+        }
+        #[cfg(test)]
+        {
+            self.joined_waiters = 0;
+            if active.force {
+                self.pending_force_waiters = 0;
+            }
+        }
+        let result = (self.last_result.clone(), succeeded);
+        // A waiter must observe the exact flight it joined even if another one has finished.
+        let _ = active.answer.set(result.clone());
+        result
+    }
 }
 
 #[derive(Default)]
@@ -410,48 +487,29 @@ impl CollectionCoordinator {
             .clone()
     }
 
+    #[cfg(test)]
     fn run(&self, force: bool, collect: impl FnOnce() -> Vec<AgentStatus>) -> Vec<AgentStatus> {
+        self.run_with_outcome(force, collect).0
+    }
+
+    fn run_with_outcome(
+        &self,
+        force: bool,
+        collect: impl FnOnce() -> Vec<AgentStatus>,
+    ) -> CollectionOutcome {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        let target_generation = if state.in_flight {
-            state.joined_waiters = state.joined_waiters.saturating_add(1);
-            if force && !state.in_flight_force {
-                let next = state.active_generation.saturating_add(1);
-                state.pending_force_waiters = state.pending_force_waiters.saturating_add(1);
-                *state.pending_force_generation.get_or_insert(next)
-            } else {
-                state.active_generation
-            }
-        } else if force {
-            state
-                .pending_force_generation
-                .take()
-                .unwrap_or_else(|| state.completed_generation.saturating_add(1))
-        } else if let Some(pending) = state.pending_force_generation {
-            pending
-        } else {
-            state.completed_generation.saturating_add(1)
-        };
+        let target = state.target(force);
 
         loop {
-            if state.completed_generation >= target_generation {
-                return state.last_result.clone();
+            if let Some(result) = target.get() {
+                return result.clone();
             }
-            if !state.in_flight
-                && (force || state.pending_force_generation != Some(target_generation))
-            {
-                state.pending_force_generation = state
-                    .pending_force_generation
-                    .filter(|generation| *generation != target_generation);
-                state.in_flight = true;
-                state.in_flight_force = force;
-                state.active_generation = target_generation;
-                break;
-            }
-            if !state.in_flight && force {
-                state.pending_force_generation = None;
-                state.in_flight = true;
-                state.in_flight_force = true;
-                state.active_generation = target_generation;
+            if state.active.is_none() && (force || state.pending_force.is_none()) {
+                state.pending_force = None;
+                state.active = Some(ActiveCollection {
+                    force,
+                    answer: target,
+                });
                 break;
             }
             state = self
@@ -460,26 +518,7 @@ impl CollectionCoordinator {
                 .unwrap_or_else(|err| err.into_inner());
         }
         drop(state);
-
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect));
-        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        state.in_flight = false;
-        state.in_flight_force = false;
-        state.completed_generation = target_generation;
-        state.joined_waiters = 0;
-        if force {
-            state.pending_force_waiters = 0;
-        }
-        let result = match outcome {
-            Ok(result) => {
-                state.last_result = result.clone();
-                result
-            }
-            Err(_) => state.last_result.clone(),
-        };
-        self.completed.notify_all();
-        drop(state);
-        result
+        self.execute(collect)
     }
 
     fn run_if_idle_with_flag(
@@ -487,27 +526,23 @@ impl CollectionCoordinator {
         collect: impl FnOnce() -> Vec<AgentStatus>,
     ) -> (Vec<AgentStatus>, bool) {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if state.in_flight {
+        if state.active.is_some() || state.pending_force.is_some() {
             return (state.last_result.clone(), false);
         }
-        let generation = state.completed_generation.saturating_add(1);
-        state.in_flight = true;
-        state.active_generation = generation;
+        state.active = Some(ActiveCollection {
+            force: false,
+            answer: Default::default(),
+        });
         drop(state);
+        (self.execute(collect).0, true)
+    }
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect));
+    fn execute(&self, collect: impl FnOnce() -> Vec<AgentStatus>) -> CollectionOutcome {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect)).ok();
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        state.in_flight = false;
-        state.completed_generation = generation;
-        let result = match outcome {
-            Ok(result) => {
-                state.last_result = result.clone();
-                result
-            }
-            Err(_) => state.last_result.clone(),
-        };
+        let result = state.finish(outcome);
         self.completed.notify_all();
-        (result, true)
+        result
     }
 }
 
@@ -519,7 +554,16 @@ static CODEX_ACCOUNT_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
 static CLAUDE_USAGE_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
+// Preserve a verified account's cooldown across temporary inability to prepare credentials.
+static CLAUDE_DESKTOP_COOLDOWN: Mutex<Option<ClaudeDesktopCooldown>> = Mutex::new(None);
 static CLAUDE_SOURCE_REVISION: Lazy<Mutex<Option<claude_desktop::Revision>>> =
+    Lazy::new(|| Mutex::new(None));
+static CLAUDE_COLLECTION_ADMISSION: Lazy<collection_admission::CollectionAdmission> =
+    Lazy::new(collection_admission::CollectionAdmission::new);
+static CURSOR_COLLECTION_ADMISSION: Lazy<collection_admission::CollectionAdmission> =
+    Lazy::new(collection_admission::CollectionAdmission::new);
+static CLAUDE_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
+static CLAUDE_CURRENT_SAMPLE: Lazy<Mutex<Option<(u64, AgentStatus)>>> =
     Lazy::new(|| Mutex::new(None));
 static GROK_BILLING_CACHE: Lazy<Mutex<Option<CachedStatusAttempt>>> =
     Lazy::new(|| Mutex::new(None));
@@ -535,65 +579,266 @@ static TASKBAR_SETTINGS_WRITE_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()
 static TASKBAR_SETTINGS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static COLLECTION_POLICY_RECOVERY: Lazy<Mutex<CollectionPolicyRecovery>> =
     Lazy::new(|| Mutex::new(CollectionPolicyRecovery::default()));
-static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
-static FORCE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-static ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-static CURSOR_ACTIVITY_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-static CURSOR_ACTIVITY_GENERATION: AtomicU64 = AtomicU64::new(0);
-#[derive(Clone)]
+static TASKBAR_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(1);
+static FORCE_REFRESH: ForceRefresh = ForceRefresh::new();
+static ACTIVITY_REFRESH_QUEUE: Lazy<Mutex<ActivityRefreshQueue<ActivityRefreshKey>>> =
+    Lazy::new(|| Mutex::new(ActivityRefreshQueue::default()));
+static LOCAL_ACTIVITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CURSOR_ACTIVITY_POLICY_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CURSOR_ACTIVITY_REFRESH_QUEUE: Lazy<Mutex<ActivityRefreshQueue<(u64, u16)>>> =
+    Lazy::new(|| Mutex::new(ActivityRefreshQueue::default()));
 struct CollectedActivity {
     snapshot: activity::ActivitySnapshot,
     codex_generation: Option<u64>,
+    local_policy: LocalActivityPolicy,
 }
 
-static LAST_LOCAL_ACTIVITY: Lazy<Mutex<Option<CollectedActivity>>> = Lazy::new(|| Mutex::new(None));
+static LOCAL_ACTIVITY_SCAN_GATE: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ACTIVITY_PUBLICATION: Lazy<Mutex<ActivityPublication>> =
+    Lazy::new(|| Mutex::new(ActivityPublication::default()));
 
-struct ForceRefreshGuard;
+#[derive(Default)]
+struct ActivityPublication {
+    local: Option<std::sync::Arc<CollectedActivity>>,
+    cursor_emitted_at: Option<u64>,
+}
 
-impl Drop for ForceRefreshGuard {
-    fn drop(&mut self) {
-        FORCE_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+impl ActivityPublication {
+    fn save_local(&mut self, local: std::sync::Arc<CollectedActivity>) {
+        self.local = Some(local);
+        self.cursor_emitted_at = None;
+    }
+
+    fn is_current_local(&self, local: &std::sync::Arc<CollectedActivity>) -> bool {
+        self.local
+            .as_ref()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, local))
+    }
+
+    fn should_emit_local(
+        &self,
+        local: &std::sync::Arc<CollectedActivity>,
+        generation: u64,
+    ) -> bool {
+        // An in-flight or cancelled Cursor refresh has not covered any local result.
+        self.is_current_local(local) && self.cursor_emitted_at != Some(generation)
     }
 }
 
-fn try_begin_force_refresh() -> Option<ForceRefreshGuard> {
-    FORCE_REFRESH_IN_FLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| ForceRefreshGuard)
+struct ActivityPass {
+    local: std::sync::Arc<CollectedActivity>,
+    cursor: Option<cursor_activity::CursorActivityView>,
+    cursor_settings_generation: u64,
 }
 
-struct ActivityRefreshGuard;
-
-impl Drop for ActivityRefreshGuard {
-    fn drop(&mut self) {
-        ACTIVITY_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+impl ActivityPass {
+    fn snapshot(&self, settings: &Settings, generation: u64) -> activity::ActivitySnapshot {
+        let cursor = (self.cursor_settings_generation == generation)
+            .then_some(self.cursor.as_ref())
+            .flatten();
+        activity::merge_cursor_activity(
+            current_activity_snapshot(&self.local, settings.show_codex),
+            cursor,
+            settings.show_cursor,
+        )
     }
 }
 
-fn try_begin_activity_refresh() -> Option<ActivityRefreshGuard> {
-    ACTIVITY_REFRESH_IN_FLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| ActivityRefreshGuard)
+#[derive(Clone, Copy)]
+pub(crate) struct LocalActivityPolicy {
+    generation: u64,
+    show_claude: bool,
+    show_grok: bool,
 }
 
-struct CursorActivityRefreshGuard;
-
-impl Drop for CursorActivityRefreshGuard {
-    fn drop(&mut self) {
-        CURSOR_ACTIVITY_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+impl LocalActivityPolicy {
+    fn from_settings(settings: &Settings, generation: u64) -> Self {
+        Self {
+            generation,
+            show_claude: settings.show_claude,
+            show_grok: settings.show_grok,
+        }
     }
-}
 
-fn try_begin_cursor_activity_refresh() -> Option<(CursorActivityRefreshGuard, u64)> {
-    CURSOR_ACTIVITY_REFRESH_IN_FLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| {
-            let generation = CURSOR_ACTIVITY_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-            (CursorActivityRefreshGuard, generation)
+    fn matches(self, settings: &Settings, generation: u64) -> bool {
+        self.generation == generation
+            && settings.show_claude == self.show_claude
+            && settings.show_grok == self.show_grok
+    }
+
+    fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            LOCAL_ACTIVITY_GENERATION.load(Ordering::Acquire) == self.generation,
+            collection_admission::PolicyCancelled
+        );
+        Ok(())
+    }
+
+    fn validate_settings(self, settings: &Settings) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.matches(settings, LOCAL_ACTIVITY_GENERATION.load(Ordering::Acquire)),
+            collection_admission::PolicyCancelled
+        );
+        Ok(())
+    }
+
+    fn with_current<T>(self, work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        with_taskbar_settings_read(|_| {
+            self.validate_settings(&Settings::try_load()?)?;
+            work()
         })
+    }
+}
+
+fn load_activity_request() -> anyhow::Result<(Settings, LocalActivityPolicy)> {
+    with_taskbar_settings_read(|_| {
+        let settings = Settings::try_load()?;
+        let policy = LocalActivityPolicy::from_settings(
+            &settings,
+            LOCAL_ACTIVITY_GENERATION.load(Ordering::Acquire),
+        );
+        Ok((settings, policy))
+    })
+}
+
+type ForceRefreshResult = Result<Vec<AgentStatus>, String>;
+type ForceRefreshReceiver = tokio::sync::watch::Receiver<Option<ForceRefreshResult>>;
+
+struct ForceRefresh(Mutex<Option<ForceRefreshReceiver>>);
+
+impl ForceRefresh {
+    const fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn join(&self) -> (ForceRefreshReceiver, Option<ForceRefreshGuard<'_>>) {
+        let mut current = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(receiver) = current.as_ref() {
+            return (receiver.clone(), None);
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *current = Some(receiver.clone());
+        (
+            receiver,
+            Some(ForceRefreshGuard {
+                owner: self,
+                sender,
+            }),
+        )
+    }
+}
+
+struct ForceRefreshGuard<'a> {
+    owner: &'a ForceRefresh,
+    sender: tokio::sync::watch::Sender<Option<ForceRefreshResult>>,
+}
+
+impl Drop for ForceRefreshGuard<'_> {
+    fn drop(&mut self) {
+        let mut current = self.owner.0.lock().unwrap_or_else(|err| err.into_inner());
+        *current = None;
+    }
+}
+
+async fn wait_for_force_refresh(mut receiver: ForceRefreshReceiver) -> ForceRefreshResult {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        receiver
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| "usage refresh was interrupted".to_string())?
+            .clone()
+            .expect("refresh outcome was checked")
+    })
+    .await
+    .map_err(|_| "usage refresh timed out".to_string())?
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ActivityRefreshKey {
+    local_generation: u64,
+    show_codex: bool,
+    codex_generation: Option<u64>,
+}
+
+impl ActivityRefreshKey {
+    fn new(settings: &Settings, policy: LocalActivityPolicy) -> Self {
+        Self {
+            local_generation: policy.generation,
+            show_codex: settings.show_codex,
+            codex_generation: settings
+                .show_codex
+                .then(collector::codex_collection_generation)
+                .flatten(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActivityRefreshRequest<K> {
+    key: K,
+    force: bool,
+}
+
+struct ActivityRefreshQueue<K> {
+    active: Option<ActivityRefreshRequest<K>>,
+    pending: Option<ActivityRefreshRequest<K>>,
+}
+
+impl<K> Default for ActivityRefreshQueue<K> {
+    fn default() -> Self {
+        Self {
+            active: None,
+            pending: None,
+        }
+    }
+}
+
+impl<K: Copy + Eq> ActivityRefreshQueue<K> {
+    fn request(&mut self, mut request: ActivityRefreshRequest<K>) -> bool {
+        let Some(active) = self.active else {
+            self.active = Some(request);
+            return true;
+        };
+        if active.key == request.key && (active.force || !request.force) {
+            return false;
+        }
+        request.force |= self
+            .pending
+            .is_some_and(|pending| pending.key == request.key && pending.force);
+        self.pending = Some(request);
+        false
+    }
+
+    fn finish(&mut self) -> Option<ActivityRefreshRequest<K>> {
+        self.active = self.pending.take();
+        self.active
+    }
+}
+
+struct ActivityRefreshGuard<'a, K> {
+    queue: &'a Mutex<ActivityRefreshQueue<K>>,
+    active: bool,
+}
+
+impl<K: Copy + Eq> ActivityRefreshGuard<'_, K> {
+    fn finish(&mut self) -> Option<ActivityRefreshRequest<K>> {
+        let next = self
+            .queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .finish();
+        self.active = next.is_some();
+        next
+    }
+}
+
+impl<K> Drop for ActivityRefreshGuard<'_, K> {
+    fn drop(&mut self) {
+        if self.active {
+            *self.queue.lock().unwrap_or_else(|error| error.into_inner()) =
+                ActivityRefreshQueue::default();
+        }
+    }
 }
 
 fn mark_taskbar_settings_changed() -> u64 {
@@ -687,6 +932,37 @@ impl CollectionPolicy {
     }
 }
 
+#[derive(Default)]
+struct DirectCollectionPermits {
+    claude: Option<collection_admission::Permit>,
+    cursor: Option<collection_admission::Permit>,
+}
+
+fn sync_direct_collection_policy(settings: Option<&Settings>) {
+    if CLAUDE_COLLECTION_ADMISSION.set_enabled(settings.is_some_and(|s| s.show_claude)) {
+        CLAUDE_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
+        *CLAUDE_USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *CLAUDE_CURRENT_SAMPLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    if CURSOR_COLLECTION_ADMISSION.set_enabled(settings.is_some_and(|s| s.show_cursor)) {
+        *CURSOR_USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn current_direct_collection_permits() -> DirectCollectionPermits {
+    with_taskbar_settings_read(|_| {
+        let settings = Settings::try_load();
+        sync_direct_collection_policy(settings.as_ref().ok());
+        Ok(DirectCollectionPermits {
+            claude: CLAUDE_COLLECTION_ADMISSION.admit(),
+            cursor: CURSOR_COLLECTION_ADMISSION.admit(),
+        })
+    })
+    .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CollectionChanges {
     transitions: [Option<bool>; TASKBAR_TOOLS.len()],
@@ -711,6 +987,10 @@ impl CollectionChanges {
 
     fn enabled_now(&self, tool: &Tool) -> bool {
         self.transition(tool) == Some(true)
+    }
+
+    fn cursor_activity_policy_changed(&self) -> bool {
+        self.transition(&Tool::Cursor).is_some() || self.cursor_activity_range_changed
     }
 
     fn any(&self) -> bool {
@@ -786,6 +1066,15 @@ fn try_update_taskbar_settings(
         Settings::try_load,
         |enabled| apply_claude_statusline_for_release(enabled).map_err(anyhow::Error::msg),
     )?;
+    if collection_changes.transition(&Tool::Claude).is_some()
+        || collection_changes.transition(&Tool::Grok).is_some()
+    {
+        LOCAL_ACTIVITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+    if collection_changes.cursor_activity_policy_changed() {
+        CURSOR_ACTIVITY_POLICY_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+    sync_direct_collection_policy(Some(&settings));
     if collection_changes.transition(&Tool::Claude).is_some() {
         COLLECTION_POLICY_RECOVERY
             .lock()
@@ -896,29 +1185,7 @@ fn exit_after_update_cleanup(app: tauri::AppHandle) {
 }
 
 fn request_app_quit(app: &tauri::AppHandle) {
-    let Some(pending) = app.try_state::<QuitPendingState>() else {
-        exit_after_taskbar_cleanup(app.clone());
-        return;
-    };
-    if pending.0.swap(true, Ordering::AcqRel) {
-        return;
-    }
-
-    let _ = app.emit("app-quit-requested", ());
-    let fallback = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if fallback
-            .try_state::<QuitPendingState>()
-            .is_some_and(|state| state.0.swap(false, Ordering::AcqRel))
-        {
-            let panel_app = fallback.clone();
-            let _ = fallback.run_on_main_thread(move || {
-                show_panel(&panel_app);
-                let _ = panel_app.emit("app-quit-cancelled", "settings flush timed out");
-            });
-        }
-    });
+    quit::request_app_quit(app);
 }
 
 fn rfc3339_of_mtime(path: &std::path::Path, fallback: DateTime<Utc>) -> String {
@@ -1003,9 +1270,15 @@ async fn collect_representatives_off_thread(settings: Settings, force: bool) -> 
 
 async fn collect_activity_off_thread(
     settings: Settings,
+    local_policy: LocalActivityPolicy,
     force_codex: bool,
-) -> Result<CollectedActivity, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+) -> Result<Option<ActivityPass>, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<ActivityPass> {
+        // IPC and backfill share the index: keep memory commits in scan/save order.
+        let scan = LOCAL_ACTIVITY_SCAN_GATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        local_policy.with_current(|| Ok(()))?;
         let (local, codex) = std::thread::scope(|scope| {
             let codex_worker = settings.show_codex.then(|| {
                 scope.spawn(|| {
@@ -1018,7 +1291,7 @@ async fn collect_activity_off_thread(
                     (generation, view)
                 })
             });
-            let local = activity::refresh(settings.show_claude, settings.show_grok);
+            let local = activity::refresh(local_policy);
             let codex = codex_worker.and_then(|worker| worker.join().ok());
             (local, codex)
         });
@@ -1034,34 +1307,47 @@ async fn collect_activity_off_thread(
         let local = CollectedActivity {
             snapshot: local,
             codex_generation: generation,
+            local_policy,
         };
-        let local = CollectedActivity {
+        let local = std::sync::Arc::new(CollectedActivity {
             snapshot: current_activity_snapshot(&local, settings.show_codex),
             ..local
-        };
-        *LAST_LOCAL_ACTIVITY
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(local.clone());
-        let cursor = if settings.show_cursor {
+        });
+        let (cursor_weeks, cursor_settings_generation) = with_taskbar_settings_read(|_| {
+            let settings = Settings::try_load()?;
+            local_policy.validate_settings(&settings)?;
+            ACTIVITY_PUBLICATION
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .save_local(local.clone());
+            Ok((
+                settings.show_cursor.then_some(settings.activity_weeks),
+                CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire),
+            ))
+        })?;
+        drop(scan);
+        // A local pass reads the disk cache only after its local snapshot is visible.
+        let cursor = cursor_weeks.and_then(|weeks| {
             cursor_activity::cached_view(
-                settings.activity_weeks,
+                weeks,
                 Utc::now(),
                 std::time::Instant::now() + std::time::Duration::from_millis(500),
             )
             .ok()
-        } else {
-            None
-        };
-        let snapshot =
-            activity::merge_cursor_activity(local.snapshot, cursor.as_ref(), settings.show_cursor);
-        Ok(CollectedActivity {
-            snapshot,
-            codex_generation: generation,
+        });
+        Ok(ActivityPass {
+            local,
+            cursor,
+            cursor_settings_generation,
         })
     })
     .await
-    .map_err(|err| format!("activity collection task failed: {err}"))?
-    .map_err(|err: anyhow::Error| err.to_string())
+    .map_err(|err| format!("activity collection task failed: {err}"))?;
+    match result {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(err) if err.is::<collection_admission::PolicyCancelled>() => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 fn current_activity_snapshot(
@@ -1091,48 +1377,98 @@ fn current_activity_snapshot_with_policy(
     }
 }
 
-fn spawn_activity_refresh(app: tauri::AppHandle, settings: Settings, force_codex: bool) {
+fn spawn_activity_refresh(
+    app: tauri::AppHandle,
+    settings: Settings,
+    local_policy: LocalActivityPolicy,
+    force_codex: bool,
+) {
     if !force_codex && !automatic_collection_allowed(&app) {
         return;
     }
-    let Some(guard) = try_begin_activity_refresh() else {
+    let Ok(Some(request)) = with_taskbar_settings_read(|_| {
+        let current = Settings::try_load()?;
+        local_policy.validate_settings(&current)?;
+        if settings.show_codex != current.show_codex {
+            return Ok(None);
+        }
+        let request = ActivityRefreshRequest {
+            key: ActivityRefreshKey::new(&current, local_policy),
+            force: force_codex,
+        };
+        let start = ACTIVITY_REFRESH_QUEUE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .request(request);
+        Ok(start.then_some(request))
+    }) else {
         return;
     };
+    let mut guard = ActivityRefreshGuard {
+        queue: &ACTIVITY_REFRESH_QUEUE,
+        active: true,
+    };
     tauri::async_runtime::spawn(async move {
-        let _guard = guard;
-        let started = std::time::Instant::now();
-        for pass in 0..ACTIVITY_BACKFILL_MAX_PASSES {
-            if !force_codex && !automatic_collection_allowed(&app) {
-                break;
-            }
-            match collect_activity_off_thread(settings.clone(), force_codex && pass == 0).await {
-                Ok(snapshot) => {
-                    let backfill_pending = snapshot.snapshot.local_backfill_pending;
-                    if !CURSOR_ACTIVITY_REFRESH_IN_FLIGHT.load(Ordering::Acquire) {
-                        let _ = with_taskbar_settings_read(|_| {
-                            let settings = Settings::try_load()?;
-                            let snapshot =
-                                current_activity_snapshot(&snapshot, settings.show_codex);
-                            let _ = app.emit("activity-updated", snapshot);
-                            Ok(())
-                        });
-                    }
-                    if !backfill_pending {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    eprintln!("[activity] refresh failed: {err}");
+        let mut next = Some(request);
+        while let Some(request) = next {
+            run_activity_backfill(&app, request).await;
+            next = guard.finish();
+        }
+    });
+}
+
+async fn run_activity_backfill(
+    app: &tauri::AppHandle,
+    request: ActivityRefreshRequest<ActivityRefreshKey>,
+) {
+    let Ok((settings, local_policy)) = load_activity_request() else {
+        return;
+    };
+    if ActivityRefreshKey::new(&settings, local_policy) != request.key {
+        return;
+    }
+    let force_codex = request.force;
+    let started = std::time::Instant::now();
+    for pass in 0..ACTIVITY_BACKFILL_MAX_PASSES {
+        if !force_codex && !automatic_collection_allowed(app) {
+            break;
+        }
+        match collect_activity_off_thread(settings.clone(), local_policy, force_codex && pass == 0)
+            .await
+        {
+            Ok(Some(result)) => {
+                publish_local_activity(app, &result);
+                if !result.local.snapshot.local_backfill_pending {
                     break;
                 }
             }
-            if pass + 1 >= ACTIVITY_BACKFILL_MAX_PASSES
-                || started.elapsed() >= std::time::Duration::from_secs(ACTIVITY_BACKFILL_MAX_SECS)
-            {
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("[activity] refresh failed: {err}");
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
         }
+        if pass + 1 >= ACTIVITY_BACKFILL_MAX_PASSES
+            || started.elapsed() >= std::time::Duration::from_secs(ACTIVITY_BACKFILL_MAX_SECS)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    }
+}
+
+fn publish_local_activity(app: &tauri::AppHandle, result: &ActivityPass) {
+    let _ = with_taskbar_settings_read(|_| {
+        let settings = Settings::try_load()?;
+        result.local.local_policy.validate_settings(&settings)?;
+        let generation = CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire);
+        let publication = ACTIVITY_PUBLICATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if publication.should_emit_local(&result.local, generation) {
+            let _ = app.emit("activity-updated", result.snapshot(&settings, generation));
+        }
+        Ok(())
     });
 }
 
@@ -1140,146 +1476,165 @@ fn spawn_cursor_activity_refresh(app: tauri::AppHandle, settings: Settings, forc
     if !settings.show_cursor || (!force && !automatic_collection_allowed(&app)) {
         return;
     }
-    let Some((settings, settings_generation)) = current_cursor_activity_request(Settings::try_load)
-        .ok()
-        .flatten()
+    let Ok(Some(Some(request))) =
+        current_cursor_activity_request(Settings::try_load, |settings, generation| {
+            let request = ActivityRefreshRequest {
+                key: (generation, settings.activity_weeks),
+                force,
+            };
+            CURSOR_ACTIVITY_REFRESH_QUEUE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .request(request)
+                .then_some(request)
+        })
     else {
         return;
     };
-    let Some((guard, generation)) = try_begin_cursor_activity_refresh() else {
-        return;
+    let mut guard = ActivityRefreshGuard {
+        queue: &CURSOR_ACTIVITY_REFRESH_QUEUE,
+        active: true,
     };
     tauri::async_runtime::spawn(async move {
-        let _guard = guard;
-        let weeks = settings.activity_weeks;
-        let activity_monitor = app
-            .try_state::<system_activity::SystemActivityMonitor>()
-            .map(|monitor| monitor.inner().clone());
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            let started = std::time::Instant::now();
-            let mut force_current = force;
-            let mut latest = None;
-            for _ in 0..CURSOR_ACTIVITY_MAX_PASSES {
-                if (!force && !system_activity_allows_automatic(activity_monitor.as_ref()))
-                    || started.elapsed() >= std::time::Duration::from_secs(CURSOR_ACTIVITY_MAX_SECS)
-                {
-                    break;
-                }
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(CURSOR_ACTIVITY_PASS_SECS);
-                let step = cursor_activity::refresh_step(
-                    weeks,
-                    Utc::now(),
-                    force_current,
-                    deadline,
-                    || {
-                        TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == settings_generation
-                            && CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) == generation
-                            && (force
-                                || system_activity_allows_automatic(activity_monitor.as_ref()))
-                    },
-                )?;
-                force_current = false;
-                let complete = step.kind == cursor_activity::RefreshStepKind::Complete;
-                latest = Some(step.view);
-                if complete {
-                    break;
-                }
-            }
-            Ok::<_, cursor_activity::ActivityError>(latest)
-        })
-        .await;
-        if TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) != settings_generation
-            || CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) != generation
-        {
-            return;
+        let mut next = Some(request);
+        while let Some(request) = next {
+            run_cursor_activity_refresh(&app, request).await;
+            next = guard.finish();
         }
-        let current_settings = match Settings::try_load() {
-            Ok(settings) if settings.show_cursor => settings,
-            _ => return,
-        };
-        let local = LAST_LOCAL_ACTIVITY
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let Some(local) = local else {
-            return;
-        };
-        let cursor = match result {
-            Ok(Ok(Some(view))) => Some(view),
-            Ok(Ok(None)) => cursor_activity::cached_view(
-                current_settings.activity_weeks,
-                Utc::now(),
-                std::time::Instant::now() + std::time::Duration::from_millis(500),
-            )
-            .ok(),
-            Ok(Err(error)) => {
-                eprintln!("[activity] Cursor refresh failed: {error}");
-                if matches!(
-                    error.kind,
-                    cursor_dashboard::DashboardErrorKind::Deadline
-                        | cursor_dashboard::DashboardErrorKind::Transport
-                ) {
-                    cursor_activity::cached_view(
-                        current_settings.activity_weeks,
-                        Utc::now(),
-                        std::time::Instant::now() + std::time::Duration::from_millis(500),
-                    )
-                    .ok()
-                    .map(|mut view| {
-                        view.partial = true;
-                        view
-                    })
-                } else {
-                    None
-                }
-            }
-            Err(error) => {
-                eprintln!("[activity] Cursor task failed: {error}");
-                None
-            }
-        };
-        let mut snapshot = activity::merge_cursor_activity(
-            current_activity_snapshot(&local, current_settings.show_codex),
-            cursor.as_ref(),
-            current_settings.show_cursor,
-        );
-        if cursor.is_none() {
-            snapshot.cursor_partial = true;
-            snapshot.cursor_backfill_pending = false;
-            snapshot.partial =
-                snapshot.local_partial || snapshot.codex_partial || snapshot.cursor_partial;
-            snapshot.backfill_pending =
-                snapshot.local_backfill_pending || snapshot.codex_backfill_pending;
-        }
-        let _ = with_taskbar_settings_read(|current_generation| {
-            if current_generation != settings_generation
-                || CURSOR_ACTIVITY_GENERATION.load(Ordering::Acquire) != generation
-            {
-                return Ok(());
-            }
-            let settings = Settings::try_load()?;
-            let result = CollectedActivity {
-                snapshot,
-                codex_generation: local.codex_generation,
-            };
-            let snapshot = current_activity_snapshot(&result, settings.show_codex);
-            let _ = app.emit("activity-updated", snapshot);
-            Ok(())
-        });
     });
 }
 
-fn current_cursor_activity_request(
+async fn run_cursor_activity_refresh(
+    app: &tauri::AppHandle,
+    request: ActivityRefreshRequest<(u64, u16)>,
+) {
+    let (policy_generation, weeks) = request.key;
+    let force = request.force;
+    if CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire) != policy_generation {
+        return;
+    }
+    let activity_monitor = app
+        .try_state::<system_activity::SystemActivityMonitor>()
+        .map(|monitor| monitor.inner().clone());
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let mut force_current = force;
+        let mut latest = None;
+        for _ in 0..CURSOR_ACTIVITY_MAX_PASSES {
+            if CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire) != policy_generation
+                || (!force && !system_activity_allows_automatic(activity_monitor.as_ref()))
+                || started.elapsed() >= std::time::Duration::from_secs(CURSOR_ACTIVITY_MAX_SECS)
+            {
+                break;
+            }
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(CURSOR_ACTIVITY_PASS_SECS);
+            let step =
+                cursor_activity::refresh_step(weeks, Utc::now(), force_current, deadline, || {
+                    CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire) == policy_generation
+                        && (force || system_activity_allows_automatic(activity_monitor.as_ref()))
+                })?;
+            force_current = false;
+            let complete = step.kind == cursor_activity::RefreshStepKind::Complete;
+            latest = Some(step.view);
+            if complete {
+                break;
+            }
+        }
+        Ok::<_, cursor_activity::ActivityError>(latest)
+    })
+    .await;
+    if CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire) != policy_generation {
+        return;
+    }
+    let cursor = match result {
+        Ok(Ok(Some(view))) => Some(view),
+        Ok(Ok(None)) => cursor_activity::cached_view(
+            weeks,
+            Utc::now(),
+            std::time::Instant::now() + std::time::Duration::from_millis(500),
+        )
+        .ok(),
+        Ok(Err(error)) => {
+            eprintln!("[activity] Cursor refresh failed: {error}");
+            if matches!(
+                error.kind,
+                cursor_dashboard::DashboardErrorKind::Deadline
+                    | cursor_dashboard::DashboardErrorKind::Transport
+                    | cursor_dashboard::DashboardErrorKind::RateLimited
+            ) {
+                cursor_activity::cached_view(
+                    weeks,
+                    Utc::now(),
+                    std::time::Instant::now() + std::time::Duration::from_millis(500),
+                )
+                .ok()
+                .map(|mut view| {
+                    view.partial = true;
+                    view
+                })
+            } else {
+                None
+            }
+        }
+        Err(error) => {
+            eprintln!("[activity] Cursor task failed: {error}");
+            None
+        }
+    };
+    let _ = with_taskbar_settings_read(|_| {
+        let current_generation = CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire);
+        if current_generation != policy_generation {
+            return Ok(());
+        }
+        let settings = Settings::try_load()?;
+        if !settings.show_cursor || settings.activity_weeks != weeks {
+            return Ok(());
+        }
+        // Select the local snapshot only after the Cursor cache lookup, under its save gate.
+        let mut publication = ACTIVITY_PUBLICATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(local) = publication.local.as_ref() else {
+            return Ok(());
+        };
+        local.local_policy.validate_settings(&settings)?;
+        let snapshot = cursor_activity_snapshot(local, settings.show_codex, cursor.as_ref());
+        if app.emit("activity-updated", snapshot).is_ok() {
+            publication.cursor_emitted_at = Some(current_generation);
+        }
+        Ok(())
+    });
+}
+
+fn cursor_activity_snapshot(
+    local: &CollectedActivity,
+    codex_enabled: bool,
+    cursor: Option<&cursor_activity::CursorActivityView>,
+) -> activity::ActivitySnapshot {
+    let mut snapshot = activity::merge_cursor_activity(
+        current_activity_snapshot(local, codex_enabled),
+        cursor,
+        true,
+    );
+    if cursor.is_none() {
+        snapshot.cursor_backfill_pending = false;
+        snapshot.backfill_pending =
+            snapshot.local_backfill_pending || snapshot.codex_backfill_pending;
+    }
+    snapshot
+}
+
+fn current_cursor_activity_request<T>(
     load_settings: impl FnOnce() -> anyhow::Result<Settings>,
-) -> anyhow::Result<Option<(Settings, u64)>> {
-    with_taskbar_settings_read(|generation| {
+    on_enabled: impl FnOnce(Settings, u64) -> T,
+) -> anyhow::Result<Option<T>> {
+    with_taskbar_settings_read(|_| {
         let settings = load_settings()?;
-        anyhow::ensure!(
-            TASKBAR_SETTINGS_GENERATION.load(Ordering::Acquire) == generation,
-            "settings changed while scheduling activity"
-        );
-        Ok(settings.show_cursor.then_some((settings, generation)))
+        let generation = CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire);
+        Ok(settings
+            .show_cursor
+            .then(|| on_enabled(settings, generation)))
     })
 }
 
@@ -1299,11 +1654,16 @@ async fn collect_representatives_off_thread_with_options(
             force_grok_billing,
             force_cursor_usage,
             late_cursor_app,
+            false,
         )
     })
     .await
     {
-        Ok(statuses) => statuses,
+        Ok(Ok(statuses)) => statuses,
+        Ok(Err(err)) => {
+            eprintln!("[collector] collection failed: {err}");
+            Vec::new()
+        }
         Err(err) => {
             eprintln!("[collector] blocking task failed: {err}");
             Vec::new()
@@ -1311,28 +1671,40 @@ async fn collect_representatives_off_thread_with_options(
     }
 }
 
-async fn collect_force_refresh_off_thread(
-    settings: Settings,
-    late_cursor_app: Option<tauri::AppHandle>,
-) -> (Vec<AgentStatus>, bool) {
-    let Some(_guard) = try_begin_force_refresh() else {
-        return (
-            filter_enabled_statuses(combined_collection_last_result(), &settings),
-            false,
-        );
-    };
-    (
-        collect_representatives_off_thread_with_options(
-            settings,
+async fn collect_force_refresh_off_thread(app: tauri::AppHandle) -> ForceRefreshResult {
+    let (receiver, leader) = FORCE_REFRESH.join();
+    if let Some(leader) = leader {
+        // The worker, not the requesting window, owns this refresh.
+        tauri::async_runtime::spawn(async move {
+            let result = run_force_refresh(app).await;
+            leader.sender.send_replace(Some(result));
+        });
+    }
+    wait_for_force_refresh(receiver).await
+}
+
+async fn run_force_refresh(app: tauri::AppHandle) -> ForceRefreshResult {
+    let (settings, local_policy) = load_activity_request().map_err(|err| err.to_string())?;
+    let activity_settings = settings.clone();
+    let collector_app = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        collect_representatives_with_options_and_late_app(
+            &settings,
             true,
             true,
             true,
             true,
-            late_cursor_app,
+            Some(collector_app),
+            true,
         )
-        .await,
-        true,
-    )
+    })
+    .await
+    .map_err(|_| "usage refresh worker failed".to_string());
+    emit_collection_snapshot(&app);
+    spawn_activity_refresh(app.clone(), activity_settings.clone(), local_policy, true);
+    spawn_cursor_activity_refresh(app, activity_settings, true);
+    outcome??;
+    current_collection_snapshot().map_err(|err| err.to_string())
 }
 
 fn collect_representatives_with_options(
@@ -1349,7 +1721,9 @@ fn collect_representatives_with_options(
         force_grok_billing,
         force_cursor_usage,
         None,
+        false,
     )
+    .unwrap_or_default()
 }
 
 fn collect_representatives_with_options_and_late_app(
@@ -1359,17 +1733,19 @@ fn collect_representatives_with_options_and_late_app(
     force_grok_billing: bool,
     force_cursor_usage: bool,
     late_cursor_app: Option<tauri::AppHandle>,
-) -> Vec<AgentStatus> {
+    manual_refresh: bool,
+) -> Result<Vec<AgentStatus>, String> {
     if recover_pending_collection_policies().is_err() {
         eprintln!("[collector] pending collection policy recovery failed");
     }
+    let permits = current_direct_collection_permits();
     if !settings.show_claude
         && !settings.show_codex
         && !settings.show_grok
         && !settings.show_cursor
         && !settings.show_antigravity
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let data_dir = paths::data_dir();
     let codex_sessions_dir = dirs::home_dir().map(|home| home.join(".codex").join("sessions"));
@@ -1378,6 +1754,11 @@ fn collect_representatives_with_options_and_late_app(
     let provider_deadline =
         started + std::time::Duration::from_secs(COLLECTION_REFRESH_DEADLINE_SECS);
     let cursor_deadline = started + std::time::Duration::from_secs(CURSOR_USAGE_TIMEOUT_SECS);
+    let refresh_wait_deadline = if manual_refresh {
+        started + std::time::Duration::from_secs(CURSOR_FORCE_WAIT_SECS)
+    } else {
+        provider_deadline
+    };
     let on_time_cursor_app = late_cursor_app.clone();
     let antigravity_result = settings.show_antigravity.then(|| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1386,49 +1767,79 @@ fn collect_representatives_with_options_and_late_app(
         let thread = std::thread::Builder::new()
             .name("juice-antigravity-usage".into())
             .spawn(move || {
-                antigravity::refresh(force, started + antigravity::COLLECTION_TIMEOUT);
+                let outcome = if manual_refresh {
+                    use antigravity::ManualRefreshOutcome::*;
+                    let deadline = refresh_wait_deadline
+                        .min(std::time::Instant::now() + antigravity::COLLECTION_TIMEOUT);
+                    match antigravity::refresh_manual(deadline) {
+                        Completed(_) => Ok(()),
+                        Throttled => Err("usage_refresh_throttled"),
+                        TimedOut => Err("Antigravity usage refresh timed out"),
+                        Interrupted => Err("Antigravity usage refresh was interrupted"),
+                    }
+                } else {
+                    antigravity::refresh(force, started + antigravity::COLLECTION_TIMEOUT);
+                    Ok(())
+                };
                 // Queue completion only: a toggle can retire this result while
                 // the other providers are still being collected.
-                let _ = sender.send(());
+                let _ = sender.send(outcome);
             })
             .ok();
         (receiver, thread)
     });
-    let cursor_result = settings.show_cursor.then(|| {
-        let cursor_settings = settings.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(0);
-        let thread = std::thread::Builder::new()
-            .name("juice-cursor-usage".into())
-            .spawn(move || {
-                let result = collect_cursor_representative(
-                    &cursor_settings,
-                    force_cursor_usage,
-                    now,
-                    cursor_deadline,
-                );
-                deliver_cursor_result(sender, result, |result| {
-                    let Some(app) = late_cursor_app else {
-                        return;
-                    };
-                    let _ = publish_late_cursor_result(
-                        result,
-                        Settings::try_load,
-                        combined_collection_last_result,
-                        &CURSOR_USAGE_CACHE,
-                        |snapshot, settings| {
-                            emit_validated_collection_snapshot(&app, &snapshot, settings)
-                        },
+    let cursor_result = settings
+        .show_cursor
+        .then_some(permits.cursor)
+        .flatten()
+        .map(|permit| {
+            let cursor_settings = settings.clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+            let thread = std::thread::Builder::new()
+                .name("juice-cursor-usage".into())
+                .spawn(move || {
+                    let result = collect_cursor_representative(
+                        &cursor_settings,
+                        force_cursor_usage,
+                        now,
+                        cursor_deadline,
+                        &permit,
+                        manual_refresh.then_some(refresh_wait_deadline),
                     );
-                });
-            })
-            .ok();
-        (receiver, thread)
-    });
+                    deliver_cursor_result(sender, result, |result| {
+                        let (Some(app), Ok(result)) = (late_cursor_app, result) else {
+                            return;
+                        };
+                        let _ = publish_late_cursor_result(
+                            result,
+                            Settings::try_load,
+                            combined_collection_last_result,
+                            &CURSOR_USAGE_CACHE,
+                            |snapshot, settings| {
+                                emit_validated_collection_snapshot(&app, &snapshot, settings)
+                            },
+                        );
+                    });
+                })
+                .ok();
+            (receiver, thread)
+        });
 
     let force = (settings.show_codex && force_codex_account)
         || (settings.show_claude && force_claude_usage)
         || (settings.show_grok && force_grok_billing);
-    let mut statuses = COLLECTION_COORDINATOR.run(force, || {
+    let (mut statuses, provider_succeeded) = COLLECTION_COORDINATOR.run_with_outcome(force, || {
+        let (now, deadline) = if manual_refresh && force {
+            (
+                Utc::now(),
+                refresh_wait_deadline.min(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(COLLECTION_REFRESH_DEADLINE_SECS),
+                ),
+            )
+        } else {
+            (now, provider_deadline)
+        };
         collect_representatives_runtime(
             settings,
             data_dir.as_deref(),
@@ -1440,27 +1851,51 @@ fn collect_representatives_with_options_and_late_app(
                 grok_billing: force_grok_billing,
                 cursor_usage: false,
             },
-            provider_deadline,
+            deadline,
+            permits.claude.as_ref(),
         )
     });
+    let mut refresh_error = (manual_refresh && force && !provider_succeeded)
+        .then(|| "usage collection failed".to_string());
     let mut emit_on_time_cursor = false;
     if let Some((receiver, thread)) = cursor_result {
-        let remaining = provider_deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = refresh_wait_deadline.saturating_duration_since(std::time::Instant::now());
         match receiver.recv_timeout(remaining) {
-            Ok(result) => {
+            Ok(Ok(result)) => {
                 emit_on_time_cursor = result.attempted;
                 statuses.extend(result.statuses);
             }
+            Ok(Err(err)) => {
+                refresh_error.get_or_insert(err);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                statuses.extend(CURSOR_COLLECTION_COORDINATOR.last_result())
+                if manual_refresh {
+                    refresh_error.get_or_insert_with(|| "Cursor usage refresh timed out".into());
+                } else {
+                    statuses.extend(CURSOR_COLLECTION_COORDINATOR.last_result());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) if manual_refresh => {
+                refresh_error.get_or_insert_with(|| "Cursor usage refresh was interrupted".into());
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
         }
         drop(thread);
     }
     if let Some((receiver, thread)) = antigravity_result {
-        let remaining = provider_deadline.saturating_duration_since(std::time::Instant::now());
-        let _ = receiver.recv_timeout(remaining);
+        let remaining = refresh_wait_deadline.saturating_duration_since(std::time::Instant::now());
+        let outcome = receiver.recv_timeout(remaining);
+        if manual_refresh && refresh_error.is_none() {
+            refresh_error = match outcome {
+                Ok(result) => result.err().map(str::to_string),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    Some("Antigravity usage refresh timed out".into())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Some("Antigravity usage refresh was interrupted".into())
+                }
+            };
+        }
         statuses.extend(antigravity::cached());
         drop(thread);
     }
@@ -1486,7 +1921,7 @@ fn collect_representatives_with_options_and_late_app(
             );
         }
     }
-    statuses
+    refresh_error.map_or(Ok(statuses), Err)
 }
 
 #[derive(Clone)]
@@ -1500,16 +1935,54 @@ fn collect_cursor_representative(
     force: bool,
     now: DateTime<Utc>,
     deadline: std::time::Instant,
-) -> CursorCollectionResult {
-    let (statuses, attempted) = CURSOR_COLLECTION_COORDINATOR.run_if_idle_with_flag(|| {
+    permit: &collection_admission::Permit,
+    wait_until: Option<std::time::Instant>,
+) -> Result<CursorCollectionResult, String> {
+    let collect = || {
+        // A manual request can wait behind an automatic query; give the new attempt its own budget.
+        let (now, deadline) = if let Some(bound) = wait_until {
+            (
+                Utc::now(),
+                bound.min(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(CURSOR_USAGE_TIMEOUT_SECS),
+                ),
+            )
+        } else {
+            (now, deadline)
+        };
         let pc_id = gethostname::gethostname().to_string_lossy().to_string();
-        collect_cursor_usage_status(settings, &pc_id, now, force, deadline)
+        permit
+            .run(|| collect_cursor_usage_status(settings, &pc_id, now, force, deadline))
+            .flatten()
             .into_iter()
             .collect()
-    });
-    CursorCollectionResult {
+    };
+    let (statuses, attempted) = run_cursor_collection(
+        &CURSOR_COLLECTION_COORDINATOR,
+        wait_until.is_some(),
+        collect,
+    )?;
+    Ok(CursorCollectionResult {
         statuses: filter_current_cursor_samples(statuses, &CURSOR_USAGE_CACHE),
         attempted,
+    })
+}
+
+fn run_cursor_collection(
+    coordinator: &CollectionCoordinator,
+    wait_for_cursor: bool,
+    collect: impl FnOnce() -> Vec<AgentStatus>,
+) -> Result<(Vec<AgentStatus>, bool), String> {
+    if wait_for_cursor {
+        let (statuses, succeeded) = coordinator.run_with_outcome(true, collect);
+        if succeeded {
+            Ok((statuses, true))
+        } else {
+            Err("Cursor usage collection failed".into())
+        }
+    } else {
+        Ok(coordinator.run_if_idle_with_flag(collect))
     }
 }
 
@@ -1581,7 +2054,11 @@ fn filter_current_cursor_samples(
                 Some(CursorStatusSource::Agent(None)) => cached.known_scope.is_none(),
                 None => false,
             };
+            let policy_valid = cached
+                .policy_generation
+                .is_none_or(|generation| CURSOR_COLLECTION_ADMISSION.is_current(generation));
             scope_valid
+                && policy_valid
                 && !matches!(
                     cached.error,
                     Some(
@@ -1690,16 +2167,21 @@ fn collect_representatives_runtime(
     now: DateTime<Utc>,
     forces: CollectionForces,
     deadline: std::time::Instant,
+    claude_permit: Option<&collection_admission::Permit>,
 ) -> Vec<AgentStatus> {
     let pc_id = gethostname::gethostname().to_string_lossy().to_string();
     let mut statuses = Vec::new();
-    let plan = collection_plan(
+    let mut plan = collection_plan(
         settings,
         forces.codex_account,
         forces.claude_usage,
         forces.grok_billing,
         forces.cursor_usage,
     );
+    if !claude_permit.is_some_and(collection_admission::Permit::is_current) {
+        plan.claude_status = false;
+        plan.claude_account = false;
+    }
     let deadlines = collection_deadlines(plan, deadline);
 
     let claude_status = plan
@@ -1739,23 +2221,38 @@ fn collect_representatives_runtime(
     } else {
         None
     };
-    let desktop_source = plan.claude_account && claude_desktop::selected();
+    let desktop_source = plan.claude_account
+        && claude_permit.is_some_and(collection_admission::Permit::is_current)
+        && claude_desktop::selected();
     let claude_usage = if plan.claude_account {
-        collect_claude_usage_status(
-            settings,
-            &pc_id,
-            now,
-            plan.force_claude_account,
-            deadlines.claude,
-            desktop_source,
-        )
+        claude_permit.and_then(|permit| {
+            permit
+                .run(|| {
+                    collect_claude_usage_status(
+                        settings,
+                        &pc_id,
+                        now,
+                        plan.force_claude_account,
+                        deadlines.claude,
+                        desktop_source,
+                    )
+                })
+                .flatten()
+        })
     } else {
         None
     };
-    if let Some(status) =
-        merge_claude_usage_status(claude_status.filter(|_| !desktop_source), claude_usage)
-    {
-        statuses.push(status);
+    if let Some(permit) = claude_permit.filter(|p| p.is_current()) {
+        let status =
+            merge_claude_usage_status(claude_status.filter(|_| !desktop_source), claude_usage);
+        let epoch = CLAUDE_CACHE_EPOCH.load(Ordering::Acquire);
+        let mut current = CLAUDE_CURRENT_SAMPLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if permit.is_current() && CLAUDE_CACHE_EPOCH.load(Ordering::Acquire) == epoch {
+            *current = status.as_ref().map(|status| (epoch, status.clone()));
+            statuses.extend(status);
+        }
     }
 
     if let Some(status) = merge_codex_account_status(codex_rollout, codex_account) {
@@ -1935,6 +2432,7 @@ fn parse_codex_status_file_until(
     Some(status)
 }
 
+#[cfg(test)]
 fn cached_status_attempt(
     cache: &Mutex<Option<CachedStatusAttempt>>,
     now: DateTime<Utc>,
@@ -1975,10 +2473,11 @@ fn cached_status_attempt_with_policy(
         if let Some(cached) = cache.as_ref() {
             let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
             let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
-            let honor_cooldown = !force || cached.error == Some(CollectionErrorKind::RateLimited);
-            if honor_cooldown
-                && now >= cached.attempted_at
-                && (retry_backoff_active || success_cache_fresh)
+            let rate_limited = cached.error == Some(CollectionErrorKind::RateLimited);
+            if (rate_limited && retry_backoff_active)
+                || (!force
+                    && now >= cached.attempted_at
+                    && (retry_backoff_active || success_cache_fresh))
             {
                 let status = cached.last_good.clone();
                 return if current_generation() == Some(generation) {
@@ -1999,7 +2498,7 @@ fn cached_status_attempt_with_policy(
         .map_or(0, |cached| cached.consecutive_failures);
     let authentication_failed = cache_guard
         .as_ref()
-        .is_some_and(|cached| cached.error == Some(CollectionErrorKind::LoginRequired));
+        .is_some_and(|cached| cached.authentication_failed);
     drop(cache_guard);
 
     if current_generation() != Some(generation) {
@@ -2019,25 +2518,35 @@ fn cached_status_attempt_with_policy(
         }
         return None;
     }
-    let (last_good, error, consecutive_failures, retry_secs) = match outcome {
-        Ok(status) => (Some(status), None, 0, minimum_interval_secs.max(1)),
+    let (last_good, error, authentication_failed, consecutive_failures, retry_secs) = match outcome
+    {
+        Ok(status) => (Some(status), None, false, 0, minimum_interval_secs.max(1)),
         Err(error) => {
+            let credentials_changed = error == CollectionErrorKind::RateLimitedSourceChanged;
+            let error = if credentials_changed {
+                CollectionErrorKind::RateLimited
+            } else {
+                error
+            };
             let consecutive_failures = previous_failures.saturating_add(1);
             let retry_secs =
                 collection_retry_delay_secs(&error, minimum_interval_secs, consecutive_failures);
             let authentication_failed =
                 authentication_failed || error == CollectionErrorKind::LoginRequired;
             (
-                if authentication_failed {
+                if authentication_failed || credentials_changed {
                     None
                 } else {
                     previous_last_good
                 },
-                Some(if authentication_failed {
-                    CollectionErrorKind::LoginRequired
-                } else {
-                    error
-                }),
+                Some(
+                    if authentication_failed && error != CollectionErrorKind::RateLimited {
+                        CollectionErrorKind::LoginRequired
+                    } else {
+                        error
+                    },
+                ),
+                authentication_failed,
                 consecutive_failures,
                 retry_secs,
             )
@@ -2049,6 +2558,7 @@ fn cached_status_attempt_with_policy(
         attempted_at: now,
         last_good: last_good.clone(),
         error,
+        authentication_failed,
         retry_at,
         consecutive_failures,
     });
@@ -2112,6 +2622,7 @@ fn classify_collection_error(error: &anyhow::Error) -> CollectionErrorKind {
     }
 }
 
+#[cfg(test)]
 fn cached_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> CollectionHealth {
     cached_collection_health_for_policy(cache, Some(0))
 }
@@ -2121,6 +2632,13 @@ fn cached_collection_health_for_policy(
     generation: Option<u64>,
 ) -> CollectionHealth {
     let cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    collection_health_for_cached_attempt(cache.as_ref(), generation)
+}
+
+fn collection_health_for_cached_attempt(
+    cache: Option<&CachedStatusAttempt>,
+    generation: Option<u64>,
+) -> CollectionHealth {
     if generation.is_none()
         || cache
             .as_ref()
@@ -2133,7 +2651,9 @@ fn cached_collection_health_for_policy(
         Some(CollectionErrorKind::Unavailable | CollectionErrorKind::PolicyCancelled) => {
             CollectionHealth::Unavailable
         }
-        Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
+        Some(CollectionErrorKind::RateLimited | CollectionErrorKind::RateLimitedSourceChanged) => {
+            CollectionHealth::RateLimited
+        }
         Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
         Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
         Some(
@@ -2161,7 +2681,9 @@ fn cursor_collection_health() -> CollectionHealth {
         Some(CollectionErrorKind::Unavailable | CollectionErrorKind::PolicyCancelled) => {
             CollectionHealth::Unavailable
         }
-        Some(CollectionErrorKind::RateLimited) => CollectionHealth::RateLimited,
+        Some(CollectionErrorKind::RateLimited | CollectionErrorKind::RateLimitedSourceChanged) => {
+            CollectionHealth::RateLimited
+        }
         Some(CollectionErrorKind::CredentialsDecode) => CollectionHealth::CredentialsError,
         Some(CollectionErrorKind::SourceChanged) => CollectionHealth::SourceChanged,
         Some(
@@ -2225,18 +2747,27 @@ fn collection_health_snapshot_with_antigravity(
 }
 
 fn claude_collection_health(cache: &Mutex<Option<CachedStatusAttempt>>) -> CollectionHealth {
+    let generation = CLAUDE_COLLECTION_ADMISSION
+        .generation()
+        .map(|_| CLAUDE_CACHE_EPOCH.load(Ordering::Acquire));
+    claude_collection_health_for_policy(cache, generation)
+}
+
+fn claude_collection_health_for_policy(
+    cache: &Mutex<Option<CachedStatusAttempt>>,
+    generation: Option<u64>,
+) -> CollectionHealth {
     let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         return CollectionHealth::Idle;
     }
-    let parse_failed = guard
-        .as_ref()
-        .is_some_and(|c| c.error == Some(CollectionErrorKind::Parse));
-    drop(guard);
+    let parse_failed = guard.as_ref().is_some_and(|c| {
+        Some(c.generation) == generation && c.error == Some(CollectionErrorKind::Parse)
+    });
     if parse_failed {
         CollectionHealth::ParseError
     } else {
-        cached_collection_health(cache)
+        collection_health_for_cached_attempt(guard.as_ref(), generation)
     }
 }
 
@@ -2307,6 +2838,13 @@ fn replace_antigravity_sample(
 
 fn filter_current_broker_samples(mut statuses: Vec<AgentStatus>) -> Vec<AgentStatus> {
     statuses.retain(|status| match (&status.tool, status.session_id.as_str()) {
+        (Tool::Claude, _) => claude_sample_is_current(
+            status,
+            &CLAUDE_CURRENT_SAMPLE,
+            CLAUDE_COLLECTION_ADMISSION
+                .generation()
+                .map(|_| CLAUDE_CACHE_EPOCH.load(Ordering::Acquire)),
+        ),
         (Tool::Codex, "app-server-account") => codex_account_sample_is_current(
             status,
             &CODEX_ACCOUNT_CACHE,
@@ -2325,6 +2863,22 @@ fn filter_current_broker_samples(mut statuses: Vec<AgentStatus>) -> Vec<AgentSta
         _ => true,
     });
     statuses
+}
+
+fn claude_sample_is_current(
+    status: &AgentStatus,
+    current: &Mutex<Option<(u64, AgentStatus)>>,
+    current_epoch: Option<u64>,
+) -> bool {
+    current
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|(epoch, current)| {
+            let mut sample = status.clone();
+            sample.session.active = current.session.active;
+            Some(*epoch) == current_epoch && sample == *current
+        })
 }
 
 fn codex_account_sample_is_current(
@@ -2456,17 +3010,54 @@ fn collect_claude_usage_status(
     deadline: std::time::Instant,
     desktop_source: bool,
 ) -> Option<AgentStatus> {
+    if !collection_admission::current_is_allowed() {
+        return None;
+    }
     let prepared = desktop_source.then(claude_desktop::prepare);
-    let revision = prepared.as_ref().and_then(|r| r.as_ref().ok()).map_or_else(
-        || claude_desktop::revision(desktop_source),
-        |c| c.revision(),
+    let desktop_revision = prepared
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|credentials| credentials.revision());
+    let revision = desktop_revision
+        .clone()
+        .unwrap_or_else(|| claude_desktop::revision(desktop_source));
+    reconcile_claude_source(
+        &CLAUDE_USAGE_CACHE,
+        &CLAUDE_SOURCE_REVISION,
+        revision,
+        || {
+            CLAUDE_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
+        },
     );
-    reconcile_claude_source(&CLAUDE_USAGE_CACHE, &CLAUDE_SOURCE_REVISION, revision);
-    let status = cached_status_attempt(
+    let epoch = CLAUDE_CACHE_EPOCH.load(Ordering::Acquire);
+    if let Some(revision) = desktop_revision.as_ref() {
+        let saved = CLAUDE_DESKTOP_COOLDOWN
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .and_then(|cooldown| cooldown.for_source(revision, epoch, now));
+        if let Some(saved) = saved {
+            let mut cache = CLAUDE_USAGE_CACHE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if collection_admission::current_is_allowed()
+                && CLAUDE_CACHE_EPOCH.load(Ordering::Acquire) == epoch
+                && cache.is_none()
+            {
+                *cache = Some(saved);
+            }
+        }
+    }
+    let status = cached_status_attempt_with_policy(
         &CLAUDE_USAGE_CACHE,
         now,
         CLAUDE_USAGE_CACHE_MIN_SECS,
         force,
+        || {
+            (collection_admission::current_is_allowed()
+                && CLAUDE_CACHE_EPOCH.load(Ordering::Acquire) == epoch)
+                .then_some(epoch)
+        },
         || {
             let captured_at = now.to_rfc3339();
             if desktop_source {
@@ -2480,11 +3071,17 @@ fn collect_claude_usage_status(
                         claude_desktop::usage_prepared(c, std::time::Instant::now() + timeout)
                     })
                     .map_err(|e| match e {
+                        claude_desktop::Error::PolicyCancelled => {
+                            CollectionErrorKind::PolicyCancelled
+                        }
                         claude_desktop::Error::LoginRequired => CollectionErrorKind::LoginRequired,
                         claude_desktop::Error::Deadline => CollectionErrorKind::Deadline,
                         claude_desktop::Error::Transport => CollectionErrorKind::Transport,
                         claude_desktop::Error::Parse => CollectionErrorKind::Parse,
                         claude_desktop::Error::RateLimited => CollectionErrorKind::RateLimited,
+                        claude_desktop::Error::RateLimitedChanged => {
+                            CollectionErrorKind::RateLimitedSourceChanged
+                        }
                         claude_desktop::Error::Decode => CollectionErrorKind::CredentialsDecode,
                         claude_desktop::Error::Changed => CollectionErrorKind::SourceChanged,
                         claude_desktop::Error::Unavailable => CollectionErrorKind::Unavailable,
@@ -2521,6 +3118,10 @@ fn collect_claude_usage_status(
                 return Err(oauth_error);
             }
 
+            if !collection_admission::current_is_allowed() {
+                return Err(CollectionErrorKind::PolicyCancelled);
+            }
+
             let legacy_timeout = remaining_refresh_budget(
                 deadline,
                 std::time::Duration::from_secs(CLAUDE_USAGE_TIMEOUT_SECS),
@@ -2542,6 +3143,26 @@ fn collect_claude_usage_status(
             parse_claude_fallback_usage(&raw, pc_id, &captured_at, oauth_error)
         },
     );
+    if let Some(revision) = desktop_revision {
+        let cooldown = CLAUDE_USAGE_CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|cached| {
+                cached.generation == epoch && cached.error == Some(CollectionErrorKind::RateLimited)
+            })
+            .map(|cached| ClaudeDesktopCooldown {
+                revision,
+                retry_at: cached.retry_at,
+                attempted_at: cached.attempted_at,
+                consecutive_failures: cached.consecutive_failures,
+            });
+        if let Some(cooldown) = cooldown {
+            *CLAUDE_DESKTOP_COOLDOWN
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(cooldown);
+        }
+    }
     let mut status = if desktop_source {
         discard_failed_desktop_status(&CLAUDE_USAGE_CACHE, status)
     } else {
@@ -2555,12 +3176,17 @@ fn reconcile_claude_source(
     cache: &Mutex<Option<CachedStatusAttempt>>,
     previous: &Mutex<Option<claude_desktop::Revision>>,
     revision: claude_desktop::Revision,
-) {
+    retire_samples: impl FnOnce(),
+) -> bool {
     let mut previous = previous.lock().unwrap_or_else(|e| e.into_inner());
     if previous.as_ref() != Some(&revision) {
+        // Retire copied coordinator samples before discarding the provider cache.
+        retire_samples();
         *cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *previous = Some(revision);
+        return true;
     }
+    false
 }
 
 fn discard_failed_desktop_status(
@@ -2636,36 +3262,40 @@ fn collect_cursor_usage_status(
     force: bool,
     deadline: std::time::Instant,
 ) -> Option<AgentStatus> {
+    if !collection_admission::current_is_allowed() {
+        return None;
+    }
     let mut previous = CURSOR_USAGE_CACHE
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone();
-    if !force {
-        if let Some(cached) = previous.as_mut() {
-            let retry_backoff_active = cached.error.is_some() && now < cached.retry_at;
-            let success_cache_fresh = cached.error.is_none() && now < cached.retry_at;
-            if now >= cached.attempted_at && (retry_backoff_active || success_cache_fresh) {
-                cached.last_good.as_ref()?;
-                let current_scope = current_cursor_scope(
-                    deadline.min(std::time::Instant::now() + std::time::Duration::from_millis(300)),
-                );
-                if revalidate_cursor_cached_source(cached, current_scope) {
-                    let mut status = cached.last_good.clone()?;
-                    derive_active(&mut status, cursor_stale_after_secs(settings), now);
-                    return Some(status);
+    if let Some(cached) = previous.as_mut() {
+        if cursor_use_cached_attempt(cached, now, force) {
+            let rate_limited = cached.error == Some(CollectionErrorKind::RateLimited);
+            cached.last_good.as_ref()?;
+            let current_scope = current_cursor_scope(
+                deadline.min(std::time::Instant::now() + std::time::Duration::from_millis(300)),
+            );
+            if revalidate_cursor_cached_source(cached, current_scope) {
+                let mut status = cached.last_good.clone()?;
+                derive_active(&mut status, cursor_stale_after_secs(settings), now);
+                return Some(status);
+            }
+            if let Some(current) = CURSOR_USAGE_CACHE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .as_mut()
+                .filter(|_| collection_admission::current_is_allowed())
+            {
+                current.last_good = None;
+                current.source = None;
+                if !rate_limited {
+                    current.error = Some(CollectionErrorKind::SourceChanged);
                 }
-                if let Some(cached) = CURSOR_USAGE_CACHE
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner())
-                    .as_mut()
-                {
-                    cached.last_good = None;
-                    cached.source = None;
-                    cached.error = Some(CollectionErrorKind::SourceChanged);
-                    cached.known_scope = cached
-                        .known_scope
-                        .or(previous.as_ref().and_then(|cached| cached.known_scope));
-                }
+                current.known_scope = current.known_scope.or(cached.known_scope);
+            }
+            if rate_limited {
+                return None;
             }
         }
     }
@@ -2694,7 +3324,9 @@ fn collect_cursor_usage_status(
             )
         }) && matches!(
             dashboard_error,
-            CollectionErrorKind::Deadline | CollectionErrorKind::Transport
+            CollectionErrorKind::Deadline
+                | CollectionErrorKind::Transport
+                | CollectionErrorKind::RateLimited
         );
         if same_scope_last_good {
             if let Some(status) = previous
@@ -2718,7 +3350,12 @@ fn collect_cursor_usage_status(
         .and_then(|(_, scope)| *scope);
     let outcome = resolve_cursor_dashboard_first(
         dashboard_outcome,
-        || collect_cursor_agent_status(pc_id, &captured_at, deadline, fallback_scope),
+        || {
+            if !collection_admission::current_is_allowed() {
+                return Err(CollectionErrorKind::PolicyCancelled);
+            }
+            collect_cursor_agent_status(pc_id, &captured_at, deadline, fallback_scope)
+        },
         || current_cursor_scope(deadline),
         previous
             .as_ref()
@@ -2733,13 +3370,27 @@ fn collect_cursor_usage_status(
     cache_cursor_status(&CURSOR_USAGE_CACHE, now, last_good, source, error, settings)
 }
 
+fn cursor_use_cached_attempt(
+    cached: &CursorCachedStatusAttempt,
+    now: DateTime<Utc>,
+    force: bool,
+) -> bool {
+    now < cached.retry_at
+        && (cached.error == Some(CollectionErrorKind::RateLimited)
+            || (!force && now >= cached.attempted_at))
+}
+
 fn remember_cursor_account_scope(
     cache: &Mutex<Option<CursorCachedStatusAttempt>>,
     now: DateTime<Utc>,
     scope: cursor_dashboard::AccountScope,
 ) {
     let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if !collection_admission::current_is_allowed() {
+        return;
+    }
     let cached = cache.get_or_insert_with(|| CursorCachedStatusAttempt {
+        policy_generation: collection_admission::current_generation(),
         attempted_at: now,
         last_good: None,
         source: None,
@@ -2788,6 +3439,9 @@ fn revalidate_cursor_cached_source(
 fn current_cursor_scope(
     deadline: std::time::Instant,
 ) -> Result<cursor_dashboard::AccountScope, CollectionErrorKind> {
+    if !collection_admission::current_is_allowed() {
+        return Err(CollectionErrorKind::PolicyCancelled);
+    }
     cursor_dashboard::read_credentials(deadline)
         .map(|credentials| credentials.scope)
         .map_err(|error| dashboard_collection_error(error.kind))
@@ -2801,6 +3455,9 @@ fn validate_cursor_dashboard_response<T>(
     // Revalidate failed responses too, before retaining last-good or starting a fallback.
     match current_scope() {
         Ok(current) if current == expected => response.map_err(|error| (error, Some(expected))),
+        _ if matches!(&response, Err(CollectionErrorKind::RateLimited)) => {
+            Err((CollectionErrorKind::RateLimited, None))
+        }
         Err(
             error @ (CollectionErrorKind::LoginRequired | CollectionErrorKind::CredentialsDecode),
         ) => Err((error, Some(expected))),
@@ -2924,6 +3581,7 @@ fn resolve_cursor_dashboard_first(
 ) -> Result<(AgentStatus, CursorStatusSource), CollectionErrorKind> {
     match dashboard {
         Ok((status, scope)) => Ok((status, CursorStatusSource::Dashboard(scope))),
+        Err((CollectionErrorKind::RateLimited, _)) => Err(CollectionErrorKind::RateLimited),
         Err((error, None)) if previous_scope.is_some() => Err(
             if matches!(
                 error,
@@ -2965,8 +3623,12 @@ fn resolve_cursor_dashboard_first(
 
 fn dashboard_collection_error(kind: cursor_dashboard::DashboardErrorKind) -> CollectionErrorKind {
     match kind {
+        cursor_dashboard::DashboardErrorKind::PolicyCancelled => {
+            CollectionErrorKind::PolicyCancelled
+        }
         cursor_dashboard::DashboardErrorKind::Deadline => CollectionErrorKind::Deadline,
         cursor_dashboard::DashboardErrorKind::Transport => CollectionErrorKind::Transport,
+        cursor_dashboard::DashboardErrorKind::RateLimited => CollectionErrorKind::RateLimited,
         cursor_dashboard::DashboardErrorKind::Parse
         | cursor_dashboard::DashboardErrorKind::Oversized => CollectionErrorKind::Parse,
         cursor_dashboard::DashboardErrorKind::LoginRequired => CollectionErrorKind::LoginRequired,
@@ -3020,6 +3682,9 @@ fn cache_cursor_status(
     settings: &Settings,
 ) -> Option<AgentStatus> {
     let mut cached = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if !collection_admission::current_is_allowed() {
+        return None;
+    }
     let previous_failures = cached
         .as_ref()
         .map_or(0, |cached| cached.consecutive_failures);
@@ -3038,6 +3703,7 @@ fn cache_cursor_status(
     });
     let retry_at = now + chrono::Duration::seconds(retry_secs);
     *cached = Some(CursorCachedStatusAttempt {
+        policy_generation: collection_admission::current_generation(),
         attempted_at: now,
         last_good: last_good.clone(),
         source,
@@ -3298,17 +3964,7 @@ fn setup_trays(app: &mut tauri::App) -> tauri::Result<()> {
             id if id == tray_refresh_menu_id() => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let Ok(settings) = Settings::try_load() else {
-                        return;
-                    };
-                    let activity_settings = settings.clone();
-                    let (_, collected) =
-                        collect_force_refresh_off_thread(settings, Some(app.clone())).await;
-                    if collected {
-                        emit_collection_snapshot(&app);
-                    }
-                    spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
-                    spawn_cursor_activity_refresh(app, activity_settings, true);
+                    let _ = collect_force_refresh_off_thread(app).await;
                 });
             }
             id if id == tray_pause_bar_menu_id() => {
@@ -3531,6 +4187,7 @@ fn set_taskbar_window_hwnd<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     tool: &str,
     hwnd: Option<windows::Win32::Foundation::HWND>,
+    generation: u64,
 ) {
     let Some(state) = manager.try_state::<TaskbarWindowState>() else {
         return;
@@ -3538,7 +4195,6 @@ fn set_taskbar_window_hwnd<R: tauri::Runtime>(
     let Some(slot) = taskbar_window_slot(&state, tool) else {
         return;
     };
-    let generation = TASKBAR_WINDOW_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     *slot.lock().unwrap_or_else(|err| err.into_inner()) = hwnd.map(|value| TaskbarWindowHandle {
         raw: value.0 as isize,
         generation,
@@ -3551,7 +4207,7 @@ fn register_taskbar_window_handles(app: &tauri::App) {
         let hwnd = taskbar_bar_label(tool)
             .and_then(|label| app.get_webview_window(label))
             .and_then(|window| window.hwnd().ok());
-        set_taskbar_window_hwnd(app, tool, hwnd);
+        set_taskbar_window_hwnd(app, tool, hwnd, 1);
     }
 }
 
@@ -3635,7 +4291,8 @@ fn taskbar_observation_requires_reapply(
 #[cfg(windows)]
 fn create_taskbar_bar_window(app: &tauri::AppHandle, tool: &str) -> anyhow::Result<()> {
     let label = taskbar_bar_label(tool).ok_or_else(|| anyhow::anyhow!("unknown taskbar tool"))?;
-    let url = WebviewUrl::App(format!("bar.html?tool={tool}").into());
+    let generation = TASKBAR_WINDOW_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let url = WebviewUrl::App(format!("bar.html?tool={tool}&menuGeneration={generation}").into());
     let window = WebviewWindowBuilder::new(app, label, url)
         .title("Juice Bar")
         .inner_size(260.0, 40.0)
@@ -3647,7 +4304,7 @@ fn create_taskbar_bar_window(app: &tauri::AppHandle, tool: &str) -> anyhow::Resu
         .shadow(false)
         .transparent(true)
         .build()?;
-    set_taskbar_window_hwnd(app, tool, Some(window.hwnd()?));
+    set_taskbar_window_hwnd(app, tool, Some(window.hwnd()?), generation);
     Ok(())
 }
 
@@ -3696,11 +4353,12 @@ fn request_taskbar_bar_recovery(app: &tauri::AppHandle) {
                 if taskbar_bar_window_is_alive(&recovery_app, tool) {
                     continue;
                 }
+                // Retire the old origin before closing its slot, even if no webview remains.
+                set_taskbar_window_hwnd(&recovery_app, tool, None, 0);
                 set_taskbar_menu_state(&recovery_app, tool, false);
                 if let Some(stale) =
                     taskbar_bar_label(tool).and_then(|label| recovery_app.get_webview_window(label))
                 {
-                    set_taskbar_window_hwnd(&recovery_app, tool, None);
                     let _ = stale.destroy();
                 }
                 if let Err(err) = create_taskbar_bar_window(&recovery_app, tool) {
@@ -4944,6 +5602,14 @@ fn set_taskbar_menu_layout_in_slot(
     ratio: Option<f32>,
 ) -> TaskbarMenuWrite {
     let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    write_taskbar_menu_layout(&mut current, open, ratio)
+}
+
+fn write_taskbar_menu_layout(
+    current: &mut TaskbarMenuSlot,
+    open: bool,
+    ratio: Option<f32>,
+) -> TaskbarMenuWrite {
     current.revision = current.revision.wrapping_add(1);
     current.layout = TaskbarMenuLayout {
         open,
@@ -4954,24 +5620,124 @@ fn set_taskbar_menu_layout_in_slot(
     }
 }
 
+fn taskbar_menu_request_origin_matches(
+    origin: TaskbarWindowHandle,
+    current: Option<TaskbarWindowHandle>,
+) -> bool {
+    origin.raw != 0 && origin.generation != 0 && current == Some(origin)
+}
+
+fn parse_taskbar_menu_request_number(value: &str) -> Result<u64, &'static str> {
+    let number = value
+        .parse::<u64>()
+        .map_err(|_| "invalid taskbar menu request number")?;
+    if number == 0 || number.to_string() != value {
+        return Err("invalid taskbar menu request number");
+    }
+    Ok(number)
+}
+
+fn taskbar_menu_layout_plan_is_current(
+    planned: &[(&str, Option<u64>)],
+    mut revision: impl FnMut(&str) -> Option<u64>,
+) -> bool {
+    planned
+        .iter()
+        .all(|(tool, expected)| revision(tool) == *expected)
+}
+
+fn admit_taskbar_menu_request_in_slot(
+    slot: &Mutex<TaskbarMenuSlot>,
+    origin: TaskbarWindowHandle,
+    current_window: Option<TaskbarWindowHandle>,
+    sequence: u64,
+) -> Result<(), &'static str> {
+    if !taskbar_menu_request_origin_matches(origin, current_window) {
+        return Err("taskbar menu window was replaced");
+    }
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    if sequence == 0
+        || (current.request_generation == origin.generation && sequence <= current.request_sequence)
+    {
+        return Err("taskbar menu intent was superseded");
+    }
+    current.request_generation = origin.generation;
+    current.request_sequence = sequence;
+    Ok(())
+}
+
+fn set_taskbar_menu_layout_for_request_in_slot(
+    slot: &Mutex<TaskbarMenuSlot>,
+    origin: TaskbarWindowHandle,
+    current_window: Option<TaskbarWindowHandle>,
+    sequence: u64,
+    open: bool,
+    ratio: Option<f32>,
+) -> Result<TaskbarMenuWrite, &'static str> {
+    if !taskbar_menu_request_origin_matches(origin, current_window) {
+        return Err("taskbar menu window was replaced");
+    }
+    let mut current = slot.lock().unwrap_or_else(|err| err.into_inner());
+    if current.request_generation != origin.generation || current.request_sequence != sequence {
+        return Err("taskbar menu intent was superseded");
+    }
+    Ok(write_taskbar_menu_layout(&mut current, open, ratio))
+}
+
+fn admit_taskbar_menu_request<R: tauri::Runtime>(
+    manager: &impl tauri::Manager<R>,
+    tool: &str,
+    origin: TaskbarWindowHandle,
+    sequence: u64,
+) -> anyhow::Result<()> {
+    let _layout_guard = try_taskbar_layout_gate(&TASKBAR_LAYOUT_GATE)?;
+    #[cfg(windows)]
+    let current_window = taskbar_window_handle(manager, tool);
+    #[cfg(not(windows))]
+    let current_window = None;
+    let state = manager
+        .try_state::<TaskbarMenuState>()
+        .ok_or_else(|| anyhow::anyhow!("taskbar menu state is unavailable"))?;
+    let slot = taskbar_menu_slot(&state, tool)
+        .ok_or_else(|| anyhow::anyhow!("taskbar menu slot is unavailable"))?;
+    admit_taskbar_menu_request_in_slot(slot, origin, current_window, sequence)
+        .map_err(anyhow::Error::msg)
+}
+
 fn set_taskbar_menu_layout_for_generation<R: tauri::Runtime>(
     manager: &impl tauri::Manager<R>,
     tool: &str,
     open: bool,
     ratio: Option<f32>,
     expected_generation: u64,
+    origin: TaskbarWindowHandle,
+    sequence: u64,
 ) -> anyhow::Result<TaskbarMenuWrite> {
     let write = with_taskbar_settings_read(|generation| {
         anyhow::ensure!(
             generation == expected_generation,
             "taskbar settings changed before menu publication"
         );
+        // Recovery holds the same gate while retiring, closing and replacing a window.
+        let _layout_guard = try_taskbar_layout_gate(&TASKBAR_LAYOUT_GATE)?;
+        #[cfg(windows)]
+        let current_window = taskbar_window_handle(manager, tool);
+        #[cfg(not(windows))]
+        let current_window = None;
         let state = manager
             .try_state::<TaskbarMenuState>()
             .ok_or_else(|| anyhow::anyhow!("taskbar menu state is unavailable"))?;
         let slot = taskbar_menu_slot(&state, tool)
             .ok_or_else(|| anyhow::anyhow!("taskbar menu slot is unavailable"))?;
-        Ok(set_taskbar_menu_layout_in_slot(slot, open, ratio))
+        set_taskbar_menu_layout_for_request_in_slot(
+            slot,
+            origin,
+            current_window,
+            sequence,
+            open,
+            ratio,
+        )
+        .map_err(anyhow::Error::msg)
     })?;
     publish_taskbar_menu_state(manager, tool);
     Ok(write)
@@ -5119,10 +5885,7 @@ fn reconcile_taskbar_layout_profile(
     update_taskbar_settings(|current| {
         changed = reconcile_taskbar_profile_state(current, topology, pending);
     })?;
-    if !changed {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(changed)
 }
 
 fn reconcile_taskbar_profile_state(
@@ -5600,18 +6363,27 @@ async fn get_activity(
     if !automatic_collection_allowed(&app) {
         return Ok(None);
     }
-    let settings = Settings::try_load().map_err(|err| err.to_string())?;
-    let snapshot = collect_activity_off_thread(settings.clone(), false).await?;
-    if snapshot.snapshot.local_backfill_pending {
-        spawn_activity_refresh(app.clone(), settings.clone(), false);
+    let (settings, local_policy) = load_activity_request().map_err(|err| err.to_string())?;
+    let Some(result) = collect_activity_off_thread(settings.clone(), local_policy, false).await?
+    else {
+        return Ok(None);
+    };
+    if result.local.snapshot.local_backfill_pending {
+        spawn_activity_refresh(app.clone(), settings.clone(), local_policy, false);
     }
     spawn_cursor_activity_refresh(app, settings, false);
     with_taskbar_settings_read(|_| {
         let settings = Settings::try_load()?;
-        Ok(Some(current_activity_snapshot(
-            &snapshot,
-            settings.show_codex,
-        )))
+        let generation = CURSOR_ACTIVITY_POLICY_GENERATION.load(Ordering::Acquire);
+        let publication = ACTIVITY_PUBLICATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if local_policy.validate_settings(&settings).is_err()
+            || !publication.is_current_local(&result.local)
+        {
+            return Ok(None);
+        }
+        Ok(Some(result.snapshot(&settings, generation)))
     })
     .map_err(|err| err.to_string())
 }
@@ -5635,15 +6407,8 @@ async fn refresh_status(
     app: tauri::AppHandle,
 ) -> Result<Vec<AgentStatus>, String> {
     ensure_status_refresh_command(window.label())?;
-    let settings = Settings::try_load().map_err(|err| err.to_string())?;
-    let activity_settings = settings.clone();
-    let (_, collected) = collect_force_refresh_off_thread(settings, Some(app.clone())).await;
-    if collected {
-        emit_collection_snapshot(&app);
-    }
-    spawn_activity_refresh(app.clone(), activity_settings.clone(), true);
-    spawn_cursor_activity_refresh(app, activity_settings, true);
-    current_collection_snapshot().map_err(|err| err.to_string())
+    drop(window);
+    collect_force_refresh_off_thread(app).await
 }
 
 fn update_error_result() -> update::UpdateCheckResult {
@@ -5675,24 +6440,31 @@ async fn run_update_check(
     if !update::update_check_is_due(force) {
         return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
     }
-    let Ok(_guard) = UPDATE_OPERATION_GATE.try_lock() else {
-        return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
-    };
-    if !update::update_check_is_due(force) {
-        return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
-    }
-
-    let available = updater_with_timeout(app, UPDATE_CHECK_TIMEOUT_SECS)?
-        .check()
+    UPDATE_CHECK_COORDINATOR
+        .check(|| async {
+            let _guard = UPDATE_OPERATION_GATE
+                .try_lock()
+                .map_err(|_| "update installation is in progress".to_string())?;
+            if !update::update_check_is_due(force) {
+                return Ok(update::cached_result(env!("CARGO_PKG_VERSION")));
+            }
+            let updater = updater_with_timeout(app, UPDATE_CHECK_TIMEOUT_SECS)?;
+            let available = tokio::time::timeout(
+                std::time::Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS),
+                updater.check(),
+            )
+            .await
+            .map_err(|_| "update check timed out".to_string())?
+            .map_err(|_| "update check failed".to_string())?;
+            update::record_update_check(
+                env!("CARGO_PKG_VERSION"),
+                available
+                    .as_ref()
+                    .map(|candidate| candidate.version.as_str()),
+            )
+            .map_err(|_| "update state save failed".to_string())
+        })
         .await
-        .map_err(|_| "update check failed".to_string())?;
-    update::record_update_check(
-        env!("CARGO_PKG_VERSION"),
-        available
-            .as_ref()
-            .map(|candidate| candidate.version.as_str()),
-    )
-    .map_err(|_| "update state save failed".to_string())
 }
 
 fn show_update_notification(app: &tauri::AppHandle, result: &update::UpdateCheckResult) {
@@ -6388,19 +7160,18 @@ async fn save_settings(
     let previous_language = baseline.language.clone();
     let drag_was_active = taskbar_drag_active(&app);
     preserve_taskbar_targets(&baseline, &mut requested);
-    #[cfg(windows)]
-    if !drag_was_active {
-        preserve_taskbar_leading_edges(&app, &baseline, &mut requested);
-    }
     let update_app = app.clone();
     let save_result = tauri::async_runtime::spawn_blocking(move || {
         // Read Shell outside the profile/settings locks. A display change may have
         // happened before the background observer cleared its stable snapshot.
         #[cfg(windows)]
-        let observed_topology = taskbar::shell_taskbar_windows()
-            .map(|taskbars| taskbar_profile_topology(&taskbars))
-            .unwrap_or_default();
+        let observed_taskbars = taskbar::shell_taskbar_windows().unwrap_or_default();
+        #[cfg(windows)]
+        let observed_topology = taskbar_profile_topology(&observed_taskbars);
         let _profile_guard = TASKBAR_PROFILE_GATE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _content_guard = TASKBAR_CONTENT_EDIT_GATE
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let profile_topology = stable_taskbar_topology(&update_app);
@@ -6423,6 +7194,18 @@ async fn save_settings(
             preserve_taskbar_positions(&requested, &mut merged);
             requested = merged;
             autostart_changed = autostart_setting_changed(current, &requested);
+            #[cfg(windows)]
+            if !drag_was_active
+                && !taskbar_drag_active(&update_app)
+                && taskbar_targets_match(current, &baseline)
+            {
+                preserve_taskbar_leading_edges(
+                    &update_app,
+                    current,
+                    &mut requested,
+                    &observed_taskbars,
+                );
+            }
             preserve_concurrent_taskbar_state(
                 current,
                 &baseline,
@@ -6432,6 +7215,12 @@ async fn save_settings(
             *current = requested;
             if !profile_topology.is_empty() {
                 record_taskbar_layout_profile(current, &profile_topology);
+            }
+            Ok(())
+        })?;
+        with_taskbar_settings_read(|current_generation| {
+            if current_generation == snapshot.generation && !taskbar_drag_active(&update_app) {
+                sync_taskbar_content_layout_ratios(&update_app, &snapshot.settings);
             }
             Ok(())
         })?;
@@ -6482,16 +7271,6 @@ async fn save_settings(
     {
         eprintln!("[collector] pending collection policy recovery failed");
     }
-    if !taskbar_drag_active(&app) {
-        let _ = with_taskbar_settings_read(|current_generation| {
-            anyhow::ensure!(
-                current_generation == generation,
-                "taskbar settings changed before ratio synchronization"
-            );
-            sync_taskbar_content_layout_ratios(&app, &settings);
-            Ok(())
-        });
-    }
     let taskbar_result = if taskbar_drag_active(&app) {
         Ok(())
     } else {
@@ -6535,7 +7314,14 @@ async fn save_settings(
                 emit_collection_snapshot(&refresh_app);
             });
             if claude_enabled_now || codex_enabled_now || grok_enabled_now {
-                spawn_activity_refresh(app.clone(), settings.clone(), codex_enabled_now);
+                if let Ok((activity_settings, policy)) = load_activity_request() {
+                    spawn_activity_refresh(
+                        app.clone(),
+                        activity_settings,
+                        policy,
+                        codex_enabled_now,
+                    );
+                }
             }
             if cursor_enabled_now {
                 spawn_cursor_activity_refresh(app.clone(), settings.clone(), true);
@@ -6551,11 +7337,31 @@ async fn save_settings(
     Ok(report)
 }
 
+fn unchanged_taskbar_content_ratio(
+    current: &Settings,
+    requested: &Settings,
+    tool: &str,
+    layout: Option<&TaskbarContentLayout>,
+) -> Option<f32> {
+    if taskbar_monitor_key(current, tool) != taskbar_monitor_key(requested, tool)
+        || taskbar_offset_ratio(current, tool) != taskbar_offset_ratio(requested, tool)
+        || taskbar_target_initialized(current, tool) != taskbar_target_initialized(requested, tool)
+    {
+        return None;
+    }
+    let layout = layout.filter(|layout| layout.mode == current.bar_mode)?;
+    layout
+        .ratio
+        .filter(|ratio| ratio.is_finite())
+        .map(|ratio| ratio.clamp(0.0, 1.0))
+}
+
 #[cfg(windows)]
 fn preserve_taskbar_leading_edges(
     app: &tauri::AppHandle,
     current: &Settings,
     requested: &mut Settings,
+    taskbars: &[taskbar::ShellTaskbarWindow],
 ) {
     for tool in TASKBAR_TOOLS {
         let (Some(current_length), Some(requested_length)) = (
@@ -6565,10 +7371,28 @@ fn preserve_taskbar_leading_edges(
             continue;
         };
         if current_length == requested_length {
+            if let Some(ratio) = unchanged_taskbar_content_ratio(
+                current,
+                requested,
+                tool,
+                taskbar_content_layout(app, current, tool).as_ref(),
+            ) {
+                set_taskbar_offset_ratio(requested, tool, ratio);
+            }
             continue;
         }
 
-        let Ok(taskbar) = taskbar::shell_taskbar_window_for_key(taskbar_monitor_key(current, tool))
+        let key = taskbar_monitor_key(current, tool);
+        let Some(taskbar) = taskbars
+            .iter()
+            .find(|taskbar| {
+                !key.is_empty()
+                    && (taskbar.key == key
+                        || taskbar.device_key == key
+                        || taskbar.legacy_key == key)
+            })
+            .or_else(|| taskbars.iter().find(|taskbar| taskbar.primary))
+            .or_else(|| taskbars.first())
         else {
             continue;
         };
@@ -6581,8 +7405,8 @@ fn preserve_taskbar_leading_edges(
         let current_ratio = taskbar_content_layout(app, current, tool)
             .and_then(|layout| layout.ratio)
             .unwrap_or_else(|| taskbar_offset_ratio(current, tool));
-        let current_length = taskbar_physical_length_for_window(current_length, taskbar.hwnd);
-        let requested_length = taskbar_physical_length_for_window(requested_length, taskbar.hwnd);
+        let current_length = taskbar_physical_length(current_length, taskbar.dpi);
+        let requested_length = taskbar_physical_length(requested_length, taskbar.dpi);
         if let Some(ratio) = taskbar_ratio_preserving_layout_leading_edge(
             taskbar_rect,
             current_length,
@@ -6685,18 +7509,6 @@ fn hide_panel_window(window: tauri::Window) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn complete_app_quit(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
-    ensure_panel_command(window.label())?;
-    let should_exit = app
-        .try_state::<QuitPendingState>()
-        .is_some_and(|state| state.0.swap(false, Ordering::AcqRel));
-    if should_exit {
-        exit_after_taskbar_cleanup(app);
-    }
-    Ok(())
-}
-
-#[tauri::command]
 fn start_panel_drag(window: tauri::Window) -> Result<(), String> {
     ensure_panel_command(window.label())?;
     window.start_dragging().map_err(|err| err.to_string())
@@ -6787,6 +7599,8 @@ async fn set_taskbar_content_width(
     if !width.is_finite() || !(1.0..=2304.0).contains(&width) {
         return Err("taskbar content width is out of range".into());
     }
+    let _content_guard =
+        try_taskbar_layout_gate(&TASKBAR_CONTENT_EDIT_GATE).map_err(|err| err.to_string())?;
 
     let tool = normalize_taskbar_tool(&tool).ok_or_else(|| "unknown taskbar tool".to_string())?;
     let (settings, settings_generation) =
@@ -6921,8 +7735,19 @@ async fn set_taskbar_menu_open(
     app: tauri::AppHandle,
     tool: String,
     open: bool,
+    window_generation: String,
+    intent_sequence: String,
 ) -> Result<TaskbarMenuAcknowledgement, String> {
     ensure_matching_bar_command(window.label(), &tool)?;
+    let generation =
+        parse_taskbar_menu_request_number(&window_generation).map_err(str::to_string)?;
+    let sequence = parse_taskbar_menu_request_number(&intent_sequence).map_err(str::to_string)?;
+    #[cfg(windows)]
+    let raw = window.hwnd().map_err(|err| err.to_string())?.0 as isize;
+    #[cfg(not(windows))]
+    let raw = 0;
+    let origin = TaskbarWindowHandle { raw, generation };
+    admit_taskbar_menu_request(&app, &tool, origin, sequence).map_err(|err| err.to_string())?;
     let (settings, settings_generation) =
         load_settings_with_generation().map_err(|err| err.to_string())?;
     #[cfg(windows)]
@@ -6967,9 +7792,16 @@ async fn set_taskbar_menu_open(
     if open && menu_ratio.is_none() {
         return Err("taskbar menu geometry is unavailable".into());
     }
-    let write =
-        set_taskbar_menu_layout_for_generation(&app, &tool, open, menu_ratio, settings_generation)
-            .map_err(|err| err.to_string())?;
+    let write = set_taskbar_menu_layout_for_generation(
+        &app,
+        &tool,
+        open,
+        menu_ratio,
+        settings_generation,
+        origin,
+        sequence,
+    )
+    .map_err(|err| err.to_string())?;
     if let Err(err) = apply_taskbar_dock_for_generation(&app, &settings, settings_generation) {
         close_taskbar_menu_layout_if_current(&app, &tool, write);
         return Err(err.to_string());
@@ -7026,6 +7858,15 @@ fn plan_taskbar_dock<R: tauri::Runtime>(
     let content_revisions = TASKBAR_TOOLS
         .iter()
         .map(|tool| (*tool, taskbar_content_layout_revision(manager, tool)))
+        .collect::<Vec<_>>();
+    let menu_revisions = TASKBAR_TOOLS
+        .iter()
+        .map(|tool| {
+            (
+                *tool,
+                taskbar_menu_layout_snapshot(manager, tool).map(|(revision, _)| revision),
+            )
+        })
         .collect::<Vec<_>>();
     let taskbar_paused = settings.taskbar_bars_paused || taskbar_bars_paused(manager);
     let topology_confirmed =
@@ -7162,6 +8003,7 @@ fn plan_taskbar_dock<R: tauri::Runtime>(
     Ok(TaskbarDockPlan {
         actions,
         content_revisions,
+        menu_revisions,
         menu_cleanup,
         requires_confirmed_topology,
     })
@@ -7183,6 +8025,7 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
         let TaskbarDockPlan {
             actions,
             content_revisions,
+            menu_revisions,
             menu_cleanup,
             requires_confirmed_topology,
         } = plan_taskbar_dock(manager, settings, snapshot)?;
@@ -7198,6 +8041,12 @@ fn apply_taskbar_dock_with_snapshot<R: tauri::Runtime>(
             validate_taskbar_content_layout_plan(&content_revisions, |tool| {
                 taskbar_content_layout_revision(manager, tool)
             })?;
+            anyhow::ensure!(
+                taskbar_menu_layout_plan_is_current(&menu_revisions, |tool| {
+                    taskbar_menu_layout_snapshot(manager, tool).map(|(revision, _)| revision)
+                }),
+                "taskbar menu changed while layout was being planned"
+            );
             for action in actions {
                 let (tool, handle) = match action {
                     Action::Hide(tool, handle) => (tool, handle),
@@ -7359,10 +8208,7 @@ fn migrate_legacy_taskbar_monitor_keys(
     update_taskbar_settings(|current| {
         changed = current.migrate_taskbar_monitor_key_aliases(&replacements);
     })?;
-    if !changed {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(changed)
 }
 
 #[cfg(windows)]
@@ -7683,7 +8529,7 @@ fn sync_taskbar_tooltips(
                     eprintln!("[taskbar] tooltip cleanup failed for {tool}: {err}");
                 }
                 registered.remove(tool);
-                set_taskbar_menu_state(app, tool, false);
+                // Menu retirement belongs to the window lifecycle, not an old tooltip HWND.
                 removed.push(tool);
             }
         }
@@ -8562,6 +9408,20 @@ where
     Ok(())
 }
 
+fn taskbar_menu_context() -> tauri::Context<tauri::Wry> {
+    let mut context = tauri::generate_context!();
+    // Initial windows are created by Tauri before setup; freeze their lifetime now.
+    for window in &mut context.config_mut().app.windows {
+        if let Some(tool) = TASKBAR_TOOLS
+            .iter()
+            .find(|tool| taskbar_bar_label(tool) == Some(window.label.as_str()))
+        {
+            window.url = WebviewUrl::App(format!("bar.html?tool={tool}&menuGeneration=1").into());
+        }
+    }
+    context
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -8606,7 +9466,9 @@ pub fn run() {
             minimize_panel,
             toggle_panel_maximized,
             hide_panel_window,
-            complete_app_quit,
+            quit::complete_app_quit,
+            quit::fail_app_quit,
+            quit::get_pending_quit_request,
             start_panel_drag
         ])
         .setup(move |app| {
@@ -8623,7 +9485,7 @@ pub fn run() {
             app.manage(TaskbarContentLayoutState::default());
             app.manage(TaskbarWindowState::default());
             app.manage(TaskbarShutdownState::default());
-            app.manage(QuitPendingState::default());
+            app.manage(quit::QuitState::default());
             app.manage(SettingsSideEffectRetryState::default());
             #[cfg(windows)]
             register_taskbar_window_handles(app);
@@ -8649,6 +9511,7 @@ pub fn run() {
                     None
                 }
             };
+            sync_direct_collection_policy(settings.as_ref());
             if let Err(error) = reconcile_broker_policy_for(&Tool::Codex) {
                 eprintln!("[codex] app-server broker startup failed: {error}");
             }
@@ -8691,7 +9554,7 @@ pub fn run() {
             spawn_update_check(app.handle().clone());
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(taskbar_menu_context())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
@@ -10447,11 +11310,295 @@ mod tests {
     }
 
     #[test]
-    fn force_refresh_admission_allows_only_one_blocking_waiter() {
-        let first = super::try_begin_force_refresh().expect("first refresh must be admitted");
-        assert!(super::try_begin_force_refresh().is_none());
-        drop(first);
-        assert!(super::try_begin_force_refresh().is_some());
+    fn force_refresh_shares_completion_and_recovers_after_owner_drop() {
+        let refresh = super::ForceRefresh::new();
+        tauri::async_runtime::block_on(async {
+            let (first, owner) = refresh.join();
+            let owner = owner.unwrap();
+            let (second, duplicate) = refresh.join();
+            assert!(duplicate.is_none());
+            assert!(first.borrow().is_none());
+            assert!(second.borrow().is_none());
+            drop(first);
+            let data = vec![status_for_signature("refreshed")];
+            owner.sender.send_replace(Some(Ok(data.clone())));
+            assert_eq!(super::wait_for_force_refresh(second).await.unwrap(), data);
+            drop(owner);
+
+            let (interrupted, owner) = refresh.join();
+            drop(owner.unwrap());
+            assert_eq!(
+                super::wait_for_force_refresh(interrupted)
+                    .await
+                    .unwrap_err(),
+                "usage refresh was interrupted"
+            );
+            let (failed, owner) = refresh.join();
+            let owner = owner.unwrap();
+            owner
+                .sender
+                .send_replace(Some(Err("synthetic failure".into())));
+            assert_eq!(
+                super::wait_for_force_refresh(failed).await.unwrap_err(),
+                "synthetic failure"
+            );
+        });
+    }
+
+    #[test]
+    fn cursor_manual_refresh_waits_for_automatic_and_runs_once() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        let coordinator = super::CollectionCoordinator::default();
+        let old = status_for_signature("older");
+        super::run_cursor_collection(&coordinator, false, || vec![old.clone()]).unwrap();
+        std::thread::scope(|scope| {
+            let (started, admitted) = mpsc::channel();
+            let (release, finish) = mpsc::channel();
+            let shared = &coordinator;
+            let automatic = scope.spawn(move || {
+                super::run_cursor_collection(shared, false, || {
+                    started.send(()).unwrap();
+                    finish.recv_timeout(Duration::from_secs(3)).unwrap();
+                    vec![status_for_signature("automatic")]
+                })
+            });
+            admitted.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(
+                super::run_cursor_collection(&coordinator, false, || panic!("must join cache"))
+                    .unwrap(),
+                (vec![old], false),
+            );
+            let manual = scope.spawn(move || {
+                super::run_cursor_collection(shared, true, || vec![status_for_signature("manual")])
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let queued = loop {
+                if coordinator.state.lock().unwrap().pending_force_waiters == 1 {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            release.send(()).unwrap();
+            assert!(queued);
+            assert_eq!(
+                automatic.join().unwrap().unwrap().0[0].session_id,
+                "automatic"
+            );
+            let (fresh, attempted) = manual.join().unwrap().unwrap();
+            assert!(attempted);
+            assert_eq!(fresh[0].session_id, "manual");
+        });
+        assert!(super::run_cursor_collection(&coordinator, true, || panic!("fixture")).is_err());
+        assert_eq!(coordinator.last_result()[0].session_id, "manual");
+    }
+
+    #[test]
+    fn cursor_automatic_cannot_steal_the_queued_manual_generation() {
+        let coordinator = super::CollectionCoordinator::default();
+        let old = status_for_signature("older");
+        super::run_cursor_collection(&coordinator, false, || vec![old.clone()]).unwrap();
+        {
+            let mut state = coordinator.state.lock().unwrap();
+            state.pending_force = Some(Default::default());
+        }
+        assert_eq!(
+            super::run_cursor_collection(&coordinator, false, || panic!("reserved by force"))
+                .unwrap(),
+            (vec![old], false),
+        );
+        let (fresh, attempted) = super::run_cursor_collection(&coordinator, true, || {
+            vec![status_for_signature("manual")]
+        })
+        .unwrap();
+        assert!(attempted);
+        assert_eq!(fresh[0].session_id, "manual");
+        assert!(coordinator.state.lock().unwrap().pending_force.is_none());
+    }
+
+    #[test]
+    fn delayed_collection_waiter_keeps_the_joined_outcome_after_next_flight() {
+        let mut state = super::CollectionFlight {
+            last_result: vec![status_for_signature("cached")],
+            active: Some(super::ActiveCollection {
+                force: true,
+                answer: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let joined = state.target(true);
+        assert!(!state.finish(None).1);
+        state.active = Some(super::ActiveCollection {
+            force: false,
+            answer: Default::default(),
+        });
+        assert!(state.finish(Some(vec![status_for_signature("newer")])).1);
+        let (statuses, succeeded) = joined.get().unwrap();
+        assert!(!succeeded);
+        assert_eq!(statuses[0].session_id, "cached");
+        assert_eq!(state.last_result[0].session_id, "newer");
+    }
+
+    #[test]
+    fn claude_desktop_cooldown_can_restore_only_the_verified_account_and_no_values() {
+        let now = chrono::Utc::now();
+        let revision =
+            super::claude_desktop::Revision::Desktop("fixture".into(), "a".into(), "org".into());
+        let other =
+            super::claude_desktop::Revision::Desktop("fixture".into(), "b".into(), "org".into());
+        let unavailable = super::claude_desktop::Revision::Files(Vec::new(), true);
+        let cooldown = super::ClaudeDesktopCooldown {
+            revision: revision.clone(),
+            retry_at: now + chrono::Duration::seconds(60),
+            attempted_at: now,
+            consecutive_failures: 1,
+        };
+        assert!(cooldown.for_source(&unavailable, 2, now).is_none());
+        assert!(cooldown.for_source(&other, 2, now).is_none());
+        let restored = cooldown.for_source(&revision, 3, now).unwrap();
+        assert_eq!(restored.generation, 3);
+        assert_eq!(restored.retry_at, cooldown.retry_at);
+        assert!(restored.last_good.is_none());
+        assert!(cooldown
+            .for_source(&revision, 3, cooldown.retry_at)
+            .is_none());
+    }
+
+    #[test]
+    fn rotated_claude_credentials_drop_values_but_keep_the_rate_limit() {
+        use super::{CollectionErrorKind as E, CollectionHealth as H};
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        assert!(super::cached_status_attempt(&cache, now, 60, true, || {
+            Ok(status_for_signature("old credentials"))
+        })
+        .is_some());
+        assert!(super::cached_status_attempt(&cache, now, 60, true, || Err(
+            E::RateLimitedSourceChanged
+        ))
+        .is_none());
+        assert_eq!(super::cached_collection_health(&cache), H::RateLimited);
+        assert!(super::cached_status_attempt(&cache, now, 60, true, || {
+            panic!("429 must survive the credential change")
+        })
+        .is_none());
+        let retry = cache.lock().unwrap().as_ref().unwrap().retry_at;
+        assert!(super::cached_status_attempt(&cache, retry, 60, true, || {
+            Ok(status_for_signature("new credentials"))
+        })
+        .is_some());
+    }
+
+    #[test]
+    fn auth_failure_does_not_overwrite_rate_limit_or_allow_early_retry() {
+        use super::{CollectionErrorKind as E, CollectionHealth as H};
+        let cache = std::sync::Mutex::new(None);
+        let now = chrono::Utc::now();
+        for error in [E::LoginRequired, E::RateLimited] {
+            assert!(super::cached_status_attempt(&cache, now, 60, true, || Err(error)).is_none());
+        }
+        let retry_at = cache.lock().unwrap().as_ref().unwrap().retry_at;
+        assert_eq!(super::cached_collection_health(&cache), H::RateLimited);
+        for time in [
+            now - chrono::Duration::seconds(1),
+            now + chrono::Duration::seconds(1),
+        ] {
+            assert!(super::cached_status_attempt(&cache, time, 60, true, || {
+                panic!("a manual retry must honor 429")
+            })
+            .is_none());
+        }
+        assert!(
+            super::cached_status_attempt(&cache, retry_at, 60, true, || Err(E::Transport))
+                .is_none()
+        );
+        assert_eq!(super::cached_collection_health(&cache), H::LoginRequired);
+        assert!(
+            super::cached_status_attempt(&cache, retry_at, 60, true, || {
+                Ok(status_for_signature("recovered"))
+            })
+            .is_some()
+        );
+        assert_eq!(super::cached_collection_health(&cache), H::Ready);
+    }
+
+    #[test]
+    fn cursor_rate_limit_keeps_cooldown_even_if_cached_scope_cannot_be_revalidated() {
+        use super::CollectionErrorKind as E;
+        let now = chrono::Utc::now();
+        let scope = crate::cursor_dashboard::AccountScope {
+            user_id: 1,
+            team_id: None,
+        };
+        let mut cached = super::CursorCachedStatusAttempt {
+            policy_generation: None,
+            attempted_at: now,
+            last_good: Some(status_for_signature("cursor")),
+            source: Some(super::CursorStatusSource::Dashboard(scope)),
+            known_scope: Some(scope),
+            error: Some(E::RateLimited),
+            retry_at: now + chrono::Duration::seconds(60),
+            consecutive_failures: 1,
+        };
+        assert!(super::cursor_use_cached_attempt(&cached, now, true));
+        assert!(super::cursor_use_cached_attempt(&cached, now, false));
+        assert!(!super::cursor_use_cached_attempt(
+            &cached,
+            cached.retry_at,
+            true
+        ));
+        cached.error = Some(E::Transport);
+        assert!(!super::cursor_use_cached_attempt(&cached, now, true));
+        assert!(super::cursor_use_cached_attempt(&cached, now, false));
+
+        let response: Result<(AgentStatus, _), E> = Err(E::RateLimited);
+        let result =
+            super::validate_cursor_dashboard_response(scope, response, || Err(E::Deadline));
+        assert!(matches!(result, Err((E::RateLimited, None))));
+        assert!(matches!(
+            super::resolve_cursor_dashboard_first(
+                result,
+                || panic!("no CLI fallback on 429"),
+                || Ok(scope),
+                Some(scope)
+            ),
+            Err(E::RateLimited)
+        ));
+    }
+
+    #[test]
+    fn local_activity_policy_retires_on_off_then_on_without_rejecting_unrelated_edits() {
+        let initial = Settings {
+            show_claude: true,
+            show_grok: true,
+            ..Settings::default()
+        };
+        let policy = super::LocalActivityPolicy::from_settings(&initial, 10);
+        assert!(policy.matches(
+            &Settings {
+                show_codex: !initial.show_codex,
+                ..initial.clone()
+            },
+            10
+        ));
+        for disabled in [
+            Settings {
+                show_claude: false,
+                ..initial.clone()
+            },
+            Settings {
+                show_grok: false,
+                ..initial.clone()
+            },
+        ] {
+            assert!(!policy.matches(&disabled, 10));
+            assert!(!policy.matches(&disabled, 11));
+        }
+        assert!(!policy.matches(&initial, 12));
+        assert!(super::LocalActivityPolicy::from_settings(&initial, 12).matches(&initial, 12));
     }
 
     #[test]
@@ -11606,6 +12753,127 @@ mod tests {
     }
 
     #[test]
+    fn equal_width_settings_edits_preserve_only_the_current_target_ratio() {
+        for tool in super::TASKBAR_TOOLS {
+            let current = Settings::default();
+            let mut requested = current.clone();
+            requested.theme = "dark".into();
+            let layout = super::TaskbarContentLayout {
+                mode: current.bar_mode.clone(),
+                width: 188,
+                ratio: Some(0.4),
+            };
+            assert_eq!(
+                super::unchanged_taskbar_content_ratio(&current, &requested, tool, Some(&layout)),
+                Some(0.4)
+            );
+
+            let mut moved = requested.clone();
+            super::set_taskbar_target(&mut moved, tool, "monitor:other", 0.6);
+            assert_eq!(
+                super::unchanged_taskbar_content_ratio(&current, &moved, tool, Some(&layout)),
+                None
+            );
+            super::set_taskbar_offset_ratio(&mut requested, tool, 0.7);
+            assert_eq!(
+                super::unchanged_taskbar_content_ratio(&current, &requested, tool, Some(&layout)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_targets_reject_invalid_or_retired_measurements() {
+        let current = Settings::default();
+        for (mode, ratio) in [
+            ("retired", Some(0.4)),
+            (current.bar_mode.as_str(), Some(f32::NAN)),
+            (current.bar_mode.as_str(), None),
+        ] {
+            let layout = super::TaskbarContentLayout {
+                mode: mode.into(),
+                width: 188,
+                ratio,
+            };
+            assert_eq!(
+                super::unchanged_taskbar_content_ratio(&current, &current, "codex", Some(&layout)),
+                None
+            );
+        }
+        assert_eq!(
+            super::unchanged_taskbar_content_ratio(&current, &current, "codex", None),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn theme_only_saves_preserve_the_measured_leading_edge_at_each_dpi() {
+        for axis in [1280, 1920, 3840] {
+            for dpi in [96, 144, 192] {
+                for horizontal in [true, false] {
+                    let rect = if horizontal {
+                        super::taskbar::DockRect {
+                            x: 0,
+                            y: 1040,
+                            width: axis,
+                            height: 40,
+                        }
+                    } else {
+                        super::taskbar::DockRect {
+                            x: 0,
+                            y: 0,
+                            width: 40,
+                            height: axis,
+                        }
+                    };
+                    let mut current = Settings::default();
+                    super::set_taskbar_offset_ratio(&mut current, "codex", 0.5);
+                    let mut requested = current.clone();
+                    requested.theme = "dark".into();
+                    let old_length = super::taskbar_physical_length(320, dpi);
+                    let new_length = super::taskbar_physical_length(188, dpi);
+                    let corrected = super::taskbar_ratio_preserving_layout_leading_edge(
+                        rect,
+                        old_length,
+                        super::taskbar_offset_ratio(&current, "codex"),
+                        new_length,
+                    )
+                    .unwrap();
+                    let layout = super::TaskbarContentLayout {
+                        mode: current.bar_mode.clone(),
+                        width: 188,
+                        ratio: Some(corrected),
+                    };
+                    let ratio = super::unchanged_taskbar_content_ratio(
+                        &current,
+                        &requested,
+                        "codex",
+                        Some(&layout),
+                    )
+                    .unwrap();
+                    super::set_taskbar_offset_ratio(&mut requested, "codex", ratio);
+                    let dock = |ratio| {
+                        super::taskbar::dock_rect_for_taskbar_at_offset(
+                            rect.x,
+                            rect.y,
+                            rect.x + rect.width,
+                            rect.y + rect.height,
+                            new_length,
+                            ratio,
+                        )
+                        .unwrap()
+                    };
+                    assert_eq!(
+                        dock(corrected),
+                        dock(super::taskbar_offset_ratio(&requested, "codex"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn restored_profile_ratio_replaces_the_cached_content_layout_ratio() {
         let mut layout = Some(super::TaskbarContentLayout {
             mode: "full".into(),
@@ -12002,19 +13270,6 @@ mod tests {
         assert!(super::ensure_matching_bar_command("bar-claude", "codex").is_err());
         assert!(super::ensure_matching_bar_command("panel", "claude").is_err());
         assert!(super::ensure_matching_bar_command("bar-claude", "unknown").is_err());
-
-        let activity_guard = super::try_begin_activity_refresh().expect("first refresh starts");
-        assert!(super::try_begin_activity_refresh().is_none());
-        drop(activity_guard);
-        assert!(super::try_begin_activity_refresh().is_some());
-
-        let (cursor_guard, generation) =
-            super::try_begin_cursor_activity_refresh().expect("first Cursor refresh starts");
-        assert!(super::try_begin_cursor_activity_refresh().is_none());
-        drop(cursor_guard);
-        let (_, next_generation) =
-            super::try_begin_cursor_activity_refresh().expect("Cursor refresh restarts");
-        assert!(next_generation > generation);
     }
 
     #[test]
@@ -12539,7 +13794,7 @@ mod tests {
         let kept = super::discard_failed_desktop_status(&cache, status).unwrap();
         assert_eq!(kept.captured_at, captured);
         assert_eq!(
-            super::claude_collection_health(&cache),
+            super::claude_collection_health_for_policy(&cache, Some(0)),
             super::CollectionHealth::RateLimited
         );
         assert!(super::cached_status_attempt(
@@ -12559,7 +13814,7 @@ mod tests {
             .is_some()
         );
         assert_eq!(
-            super::claude_collection_health(&cache),
+            super::claude_collection_health_for_policy(&cache, Some(0)),
             super::CollectionHealth::Ready
         );
     }
@@ -12591,7 +13846,10 @@ mod tests {
                 super::discard_failed_desktop_status(&cache, status).is_some(),
                 retain
             );
-            assert_eq!(super::claude_collection_health(&cache), health);
+            assert_eq!(
+                super::claude_collection_health_for_policy(&cache, Some(0)),
+                health
+            );
         }
     }
 
@@ -12971,6 +14229,189 @@ mod tests {
     }
 
     #[test]
+    fn activity_backfill_hands_off_latest_policy_before_releasing_worker() {
+        let request = |local_generation, codex_generation| super::ActivityRefreshRequest {
+            key: super::ActivityRefreshKey {
+                local_generation,
+                show_codex: true,
+                codex_generation: Some(codex_generation),
+            },
+            force: false,
+        };
+        for (finish_before_enable, replace_pending) in
+            [(false, false), (true, false), (false, true)]
+        {
+            let mut queue = super::ActivityRefreshQueue::default();
+            assert!(queue.request(request(10, 1)));
+            if finish_before_enable {
+                assert!(queue.finish().is_none());
+                assert!(queue.request(request(12, 1)));
+            } else {
+                assert!(!queue.request(request(12, 1)));
+                let latest = if replace_pending {
+                    assert!(!queue.request(request(12, 3)));
+                    request(14, 3)
+                } else {
+                    request(12, 1)
+                };
+                assert!(!queue.request(latest));
+                let next = queue.finish().unwrap();
+                assert!(next.key == latest.key);
+                assert!(!queue.request(latest));
+            }
+            assert!(queue.finish().is_none());
+            assert!(queue.active.is_none());
+        }
+    }
+
+    #[test]
+    fn activity_backfill_coalesces_same_policy_force_without_replaying_it() {
+        let mut queue = super::ActivityRefreshQueue::default();
+        let automatic = super::ActivityRefreshRequest {
+            key: super::ActivityRefreshKey {
+                local_generation: 12,
+                show_codex: true,
+                codex_generation: Some(3),
+            },
+            force: false,
+        };
+        let force = super::ActivityRefreshRequest {
+            force: true,
+            ..automatic
+        };
+        assert!(queue.request(automatic));
+        assert!(!queue.request(automatic));
+        assert!(queue.pending.is_none());
+        for request in [force, force, automatic] {
+            assert!(!queue.request(request));
+        }
+        assert!(queue.finish().unwrap().force);
+        for request in [force, automatic, force] {
+            assert!(!queue.request(request));
+        }
+        assert!(queue.finish().is_none());
+
+        assert!(queue.request(automatic));
+        let newer = super::ActivityRefreshRequest {
+            key: super::ActivityRefreshKey {
+                codex_generation: Some(4),
+                ..automatic.key
+            },
+            ..automatic
+        };
+        assert!(!queue.request(super::ActivityRefreshRequest {
+            force: true,
+            ..newer
+        }));
+        assert!(!queue.request(newer));
+        assert!(queue.finish().unwrap().force);
+        assert!(queue.finish().is_none());
+    }
+
+    #[test]
+    fn cursor_activity_queue_hands_off_only_latest_range_and_preserves_force() {
+        let mut queue = super::ActivityRefreshQueue::default();
+        let request = |key, force| super::ActivityRefreshRequest { key, force };
+        assert!(queue.request(request((1, 52), false)));
+        assert!(!queue.request(request((1, 52), true)));
+        assert!(!queue.request(request((2, 12), false)));
+        assert!(!queue.request(request((3, 26), true)));
+        assert!(!queue.request(request((3, 26), false)));
+        let next = queue.finish().unwrap();
+        assert_eq!(next.key, (3, 26));
+        assert!(next.force);
+        assert!(queue.finish().is_none());
+    }
+
+    #[test]
+    fn activity_publication_preserves_final_local_cache_in_both_orders() {
+        let day = "2026-10-13";
+        let local = |tokens, pending| {
+            std::sync::Arc::new(super::CollectedActivity {
+                snapshot: crate::activity::ActivitySnapshot {
+                    schema_version: "usage_activity.v3".into(),
+                    generated_at: "2026-10-13T00:00:00Z".into(),
+                    timezone_offset_minutes: 540,
+                    partial: pending,
+                    backfill_pending: pending,
+                    local_partial: pending,
+                    local_backfill_pending: pending,
+                    codex_partial: false,
+                    codex_backfill_pending: false,
+                    codex_account_scope: false,
+                    cursor_partial: false,
+                    cursor_backfill_pending: false,
+                    cursor_account_scope: false,
+                    days: vec![crate::activity::ActivityDay {
+                        date: day.into(),
+                        claude_tokens: tokens,
+                        ..Default::default()
+                    }],
+                },
+                codex_generation: None,
+                local_policy: super::LocalActivityPolicy::from_settings(&Settings::default(), 12),
+            })
+        };
+        let cursor = crate::cursor_activity::CursorActivityView {
+            days: [(day.into(), 7)].into(),
+            partial: false,
+            backfill_pending: false,
+            scope: crate::cursor_dashboard::AccountScope {
+                user_id: 1,
+                team_id: None,
+            },
+        };
+        let settings = Settings {
+            show_codex: false,
+            show_cursor: true,
+            ..Settings::default()
+        };
+        for cursor_first in [false, true] {
+            let mut publication = super::ActivityPublication::default();
+            let intermediate = local(10, true);
+            let complete = local(35, false);
+            publication.save_local(intermediate.clone());
+            if !cursor_first {
+                publication.save_local(complete.clone());
+                assert!(publication.should_emit_local(&complete, 20));
+            }
+            let mut visible = super::cursor_activity_snapshot(
+                publication.local.as_deref().unwrap(),
+                false,
+                Some(&cursor),
+            );
+            publication.cursor_emitted_at = Some(20);
+            if cursor_first {
+                assert_eq!(visible.days[0].claude_tokens, 10);
+                publication.save_local(complete.clone());
+                assert!(publication.should_emit_local(&complete, 20));
+                visible = super::ActivityPass {
+                    local: complete.clone(),
+                    cursor: Some(cursor.clone()),
+                    cursor_settings_generation: 20,
+                }
+                .snapshot(&settings, 20);
+            } else {
+                assert!(!publication.should_emit_local(&complete, 20));
+                assert!(publication.should_emit_local(&complete, 21));
+            }
+            assert!(!publication.should_emit_local(&intermediate, 20));
+            assert_eq!(visible.days[0].claude_tokens, 35);
+            assert_eq!(visible.days[0].cursor_tokens, 7);
+            assert!(!visible.local_backfill_pending);
+
+            // No successful Cursor emission (cancellation or emit failure) cannot suppress local.
+            publication.save_local(complete.clone());
+            assert!(publication.should_emit_local(&complete, 20));
+            let no_cursor = super::cursor_activity_snapshot(&complete, false, None);
+            assert_eq!(no_cursor.days[0].claude_tokens, 35);
+            assert!(!no_cursor.local_backfill_pending);
+            assert!(no_cursor.cursor_partial);
+            assert!(!no_cursor.cursor_backfill_pending);
+        }
+    }
+
+    #[test]
     fn activity_final_projection_strips_retired_codex_only_and_keeps_local_and_cursor_data() {
         let snapshot: crate::activity::ActivitySnapshot = serde_json::from_value(serde_json::json!({
             "schema_version":"usage_activity.v3", "generated_at":"2026-10-13T00:00:00Z",
@@ -12982,6 +14423,7 @@ mod tests {
         let result = super::CollectedActivity {
             snapshot: snapshot.clone(),
             codex_generation: Some(1),
+            local_policy: super::LocalActivityPolicy::from_settings(&Settings::default(), 0),
         };
         assert_eq!(
             super::current_activity_snapshot_with_policy(&result, true, || Some(1)),
@@ -13011,26 +14453,36 @@ mod tests {
     #[test]
     fn cursor_activity_scheduling_pairs_current_settings_with_their_generation() {
         for enabled in [false, true] {
-            let admission = super::current_cursor_activity_request(|| {
-                assert!(matches!(
-                    super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
-                    Err(std::sync::TryLockError::WouldBlock)
-                ));
-                Ok(Settings {
-                    show_cursor: enabled,
-                    activity_weeks: 12,
-                    ..Settings::default()
-                })
-            })
+            let admission = super::current_cursor_activity_request(
+                || {
+                    assert!(matches!(
+                        super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    Ok(Settings {
+                        show_cursor: enabled,
+                        activity_weeks: 12,
+                        ..Settings::default()
+                    })
+                },
+                |settings, generation| {
+                    assert!(matches!(
+                        super::TASKBAR_SETTINGS_WRITE_GATE.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    (settings, generation)
+                },
+            )
             .unwrap();
             assert_eq!(admission.is_some(), enabled);
             if let Some((settings, _)) = admission {
                 assert_eq!(settings.activity_weeks, 12);
             }
         }
-        assert!(super::current_cursor_activity_request(|| anyhow::bail!(
-            "synthetic settings error"
-        ))
+        assert!(super::current_cursor_activity_request(
+            || anyhow::bail!("synthetic settings error"),
+            |_, _| (),
+        )
         .is_err());
     }
 
@@ -13045,6 +14497,7 @@ mod tests {
             attempted_at: now,
             last_good: Some(status_for_signature("last-good")),
             error: Some(super::CollectionErrorKind::LoginRequired),
+            authentication_failed: true,
             retry_at: now,
             consecutive_failures: 1,
         }));
@@ -13066,6 +14519,7 @@ mod tests {
             attempted_at: now,
             last_good: None,
             error: Some(super::CollectionErrorKind::LoginRequired),
+            authentication_failed: true,
             retry_at: now,
             consecutive_failures: 1,
         }));
@@ -14238,6 +15692,235 @@ mod tests {
     }
 
     #[test]
+    fn menu_request_old_close_late_write_cannot_dismiss_reopen() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        let origin = super::TaskbarWindowHandle {
+            raw: 10,
+            generation: 1,
+        };
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 1).unwrap();
+        super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            1,
+            true,
+            Some(0.8),
+        )
+        .unwrap();
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 2).unwrap();
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 3).unwrap();
+        let reopened = super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            3,
+            true,
+            Some(0.3),
+        )
+        .unwrap();
+        assert!(super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            2,
+            false,
+            None
+        )
+        .is_err());
+        let current = slot.lock().unwrap();
+        assert!(current.layout.open);
+        assert_eq!(current.layout.ratio, Some(0.3));
+        assert_eq!(current.revision, reopened.revision);
+    }
+
+    #[test]
+    fn menu_request_old_close_late_admission_cannot_replace_new_intent() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        let origin = super::TaskbarWindowHandle {
+            raw: 10,
+            generation: 1,
+        };
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 3).unwrap();
+        assert!(super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 2).is_err());
+        assert!(super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 3).is_err());
+        super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            3,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(slot.lock().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn menu_request_old_page_native_open_cannot_write_after_recovery_even_with_reused_hwnd() {
+        for raw in [10, 20] {
+            let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+            let old = super::TaskbarWindowHandle {
+                raw: 10,
+                generation: 1,
+            };
+            let replacement = super::TaskbarWindowHandle { raw, generation: 2 };
+            super::admit_taskbar_menu_request_in_slot(&slot, old, Some(old), 8).unwrap();
+            super::set_taskbar_menu_layout_in_slot(&slot, false, None);
+            let closed = slot.lock().unwrap().revision;
+            assert!(super::set_taskbar_menu_layout_for_request_in_slot(
+                &slot,
+                old,
+                Some(replacement),
+                8,
+                true,
+                Some(0.5)
+            )
+            .is_err());
+            assert!(
+                super::admit_taskbar_menu_request_in_slot(&slot, old, Some(replacement), 9)
+                    .is_err()
+            );
+            assert_eq!(slot.lock().unwrap().revision, closed);
+            assert!(!slot.lock().unwrap().layout.open);
+            super::admit_taskbar_menu_request_in_slot(&slot, replacement, Some(replacement), 1)
+                .unwrap();
+            super::set_taskbar_menu_layout_for_request_in_slot(
+                &slot,
+                replacement,
+                Some(replacement),
+                1,
+                true,
+                None,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn menu_request_native_origin_cannot_borrow_replacement_generation() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        let replacement = super::TaskbarWindowHandle {
+            raw: 20,
+            generation: 2,
+        };
+        let borrowed = super::TaskbarWindowHandle {
+            raw: 10,
+            generation: 2,
+        };
+        assert!(
+            super::admit_taskbar_menu_request_in_slot(&slot, borrowed, Some(replacement), 100)
+                .is_err()
+        );
+        assert_eq!(slot.lock().unwrap().revision, 0);
+        super::admit_taskbar_menu_request_in_slot(&slot, replacement, Some(replacement), 1)
+            .unwrap();
+        assert!(super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            borrowed,
+            Some(replacement),
+            1,
+            true,
+            None
+        )
+        .is_err());
+        assert_eq!(slot.lock().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn menu_request_missing_or_retired_window_is_rejected_before_write() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        let origin = super::TaskbarWindowHandle {
+            raw: 10,
+            generation: 1,
+        };
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 1).unwrap();
+        assert!(super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot, origin, None, 1, true, None
+        )
+        .is_err());
+        assert!(super::admit_taskbar_menu_request_in_slot(&slot, origin, None, 2).is_err());
+        assert_eq!(slot.lock().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn menu_request_numbers_preserve_u64_precision_and_reject_aliases() {
+        for value in ["1", "9007199254740993", "18446744073709551615"] {
+            assert_eq!(
+                super::parse_taskbar_menu_request_number(value)
+                    .unwrap()
+                    .to_string(),
+                value
+            );
+        }
+        for value in [
+            "",
+            "0",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1.0",
+            "18446744073709551616",
+        ] {
+            assert!(super::parse_taskbar_menu_request_number(value).is_err());
+        }
+    }
+
+    #[test]
+    fn menu_request_retry_and_rollback_keep_revision_ownership() {
+        let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
+        let origin = super::TaskbarWindowHandle {
+            raw: 10,
+            generation: 1,
+        };
+        assert!(super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 0).is_err());
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 1).unwrap();
+        let old = super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            1,
+            true,
+            Some(2.0),
+        )
+        .unwrap();
+        assert_eq!(slot.lock().unwrap().layout.ratio, Some(1.0));
+        super::admit_taskbar_menu_request_in_slot(&slot, origin, Some(origin), 2).unwrap();
+        super::set_taskbar_menu_layout_for_request_in_slot(
+            &slot,
+            origin,
+            Some(origin),
+            2,
+            true,
+            Some(-1.0),
+        )
+        .unwrap();
+        assert!(!super::close_taskbar_menu_layout_in_slot_if_current(
+            &slot, old
+        ));
+        assert_eq!(slot.lock().unwrap().layout.ratio, Some(0.0));
+        assert!(slot.try_lock().is_ok());
+    }
+
+    #[test]
+    fn menu_request_native_plan_rechecks_every_menu_revision() {
+        let plan = [("codex", Some(3)), ("claude", None)];
+        assert!(super::taskbar_menu_layout_plan_is_current(&plan, |tool| {
+            if tool == "codex" {
+                Some(3)
+            } else {
+                None
+            }
+        }));
+        assert!(!super::taskbar_menu_layout_plan_is_current(
+            &plan,
+            |_| Some(4)
+        ));
+        assert!(!super::taskbar_menu_layout_plan_is_current(&plan, |_| None));
+    }
+
+    #[test]
     fn taskbar_menu_own_failure_closes_the_current_request() {
         for open in [false, true] {
             let slot = std::sync::Mutex::new(super::TaskbarMenuSlot::default());
@@ -14878,12 +16561,20 @@ mod tests {
     fn collection_policy_cursor_range_change_uses_final_settings_without_rebinding() {
         let before = collection_test_settings(&Tool::Cursor, true);
         let mut after = before.clone();
+        after.theme = "dark".into();
+        after.font_mode = "pretendard".into();
+        let appearance = super::CollectionChanges::between(
+            super::CollectionPolicy::from_settings(&before),
+            super::CollectionPolicy::from_settings(&after),
+        );
+        assert!(!appearance.cursor_activity_policy_changed());
         after.activity_weeks = if before.activity_weeks == 4 { 12 } else { 4 };
         let changes = super::CollectionChanges::between(
             super::CollectionPolicy::from_settings(&before),
             super::CollectionPolicy::from_settings(&after),
         );
         assert!(changes.cursor_activity_range_changed);
+        assert!(changes.cursor_activity_policy_changed());
         assert!(!changes.any());
         after.show_cursor = false;
         let disabled = super::CollectionChanges::between(
@@ -14891,6 +16582,7 @@ mod tests {
             super::CollectionPolicy::from_settings(&after),
         );
         assert!(!disabled.cursor_activity_range_changed);
+        assert!(disabled.cursor_activity_policy_changed());
         assert_eq!(disabled.transition(&Tool::Cursor), Some(false));
     }
 
@@ -16023,7 +17715,7 @@ mod tests {
         let panic_release = Arc::clone(&release);
         let panicking = std::thread::spawn(move || {
             std::panic::catch_unwind(|| {
-                panic_coordinator.run(true, || {
+                panic_coordinator.run_with_outcome(true, || {
                     started_tx.send(()).unwrap();
                     panic_release.wait();
                     panic!("fixture panic");
@@ -16035,8 +17727,8 @@ mod tests {
         let waiter_coordinator = Arc::clone(&coordinator);
         let (done_tx, done_rx) = mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            let result =
-                waiter_coordinator.run(true, || vec![status_for_signature("must-not-run")]);
+            let result = waiter_coordinator
+                .run_with_outcome(true, || vec![status_for_signature("must-not-run")]);
             done_tx.send(result).unwrap();
         });
         while coordinator.state.lock().unwrap().joined_waiters == 0 {
@@ -16044,17 +17736,14 @@ mod tests {
         }
         release.wait();
 
-        assert_eq!(
-            panicking.join().unwrap().unwrap()[0].session_id,
-            "last-good"
-        );
-        assert_eq!(
-            done_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap()[0]
-                .session_id,
-            "last-good"
-        );
+        let (leader_status, leader_succeeded) = panicking.join().unwrap().unwrap();
+        let (joined_status, joined_succeeded) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(!leader_succeeded);
+        assert!(!joined_succeeded);
+        assert_eq!(leader_status[0].session_id, "last-good");
+        assert_eq!(joined_status[0].session_id, "last-good");
         waiter.join().unwrap();
     }
 
@@ -16351,6 +18040,237 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn retired_claude_sources_cannot_validate_account_or_merged_statusline_samples() {
+        for id in [
+            "claude-desktop-usage",
+            "claude-oauth-usage",
+            "claude-usage",
+            "live-session",
+        ] {
+            let sample = status_for_signature(id);
+            let current = std::sync::Mutex::new(Some((10, sample.clone())));
+            assert!(super::claude_sample_is_current(&sample, &current, Some(10)));
+            assert!(!super::claude_sample_is_current(
+                &sample,
+                &current,
+                Some(11)
+            ));
+            assert!(!super::claude_sample_is_current(&sample, &current, None));
+            *current.lock().unwrap() = None;
+            assert!(!super::claude_sample_is_current(
+                &sample,
+                &current,
+                Some(10)
+            ));
+        }
+    }
+
+    #[test]
+    fn current_claude_sample_preserves_last_good_and_checks_full_source_identity() {
+        let sample = status_for_signature("same-source");
+        let current = std::sync::Mutex::new(Some((5, sample.clone())));
+        // A same-source transient failure leaves this validated sample in place.
+        assert!(super::claude_sample_is_current(&sample, &current, Some(5)));
+        let mut same_numbers_other_source = sample.clone();
+        same_numbers_other_source.session_id = "other-source".into();
+        assert!(!super::claude_sample_is_current(
+            &same_numbers_other_source,
+            &current,
+            Some(5)
+        ));
+        let mut inactive = sample;
+        inactive.session.active = false;
+        assert!(super::claude_sample_is_current(
+            &inactive,
+            &current,
+            Some(5)
+        ));
+    }
+
+    #[test]
+    fn claude_health_uses_the_same_nonzero_epoch_as_its_provider_cache() {
+        use super::{CollectionErrorKind as E, CollectionHealth as H};
+        let now = chrono::Utc::now();
+        for (error, expected) in [
+            (None, H::Ready),
+            (Some(E::LoginRequired), H::LoginRequired),
+            (Some(E::RateLimited), H::RateLimited),
+            (Some(E::CredentialsDecode), H::CredentialsError),
+            (Some(E::SourceChanged), H::SourceChanged),
+            (Some(E::Parse), H::ParseError),
+            (Some(E::Transport), H::TransientError),
+        ] {
+            let cache = std::sync::Mutex::new(Some(super::CachedStatusAttempt {
+                generation: 42,
+                attempted_at: now,
+                last_good: Some(status_for_signature("current-account")),
+                error,
+                authentication_failed: false,
+                retry_at: now,
+                consecutive_failures: 0,
+            }));
+            assert_eq!(
+                super::claude_collection_health_for_policy(&cache, Some(42)),
+                expected
+            );
+            assert_eq!(
+                super::claude_collection_health_for_policy(&cache, Some(43)),
+                H::Unavailable
+            );
+            assert_eq!(
+                super::claude_collection_health_for_policy(&cache, None),
+                H::Unavailable
+            );
+        }
+        assert_eq!(
+            super::claude_collection_health_for_policy(&std::sync::Mutex::new(None), None),
+            H::Idle
+        );
+    }
+
+    #[test]
+    fn claude_source_change_retires_copied_samples_before_clearing_the_cache() {
+        let epoch = std::sync::atomic::AtomicU64::new(5);
+        let sample = status_for_signature("claude-desktop-usage");
+        let copied = std::sync::Mutex::new(Some((5, sample.clone())));
+        let now = chrono::Utc::now();
+        let cache = std::sync::Mutex::new(Some(super::CachedStatusAttempt {
+            generation: 5,
+            attempted_at: now,
+            last_good: Some(sample.clone()),
+            error: None,
+            authentication_failed: false,
+            retry_at: now,
+            consecutive_failures: 0,
+        }));
+        let previous = std::sync::Mutex::new(Some(super::claude_desktop::Revision::Files(
+            Vec::new(),
+            false,
+        )));
+        assert!(super::reconcile_claude_source(
+            &cache,
+            &previous,
+            super::claude_desktop::Revision::Files(Vec::new(), true),
+            || {
+                epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                assert!(cache.lock().unwrap().is_some());
+                assert!(!super::claude_sample_is_current(
+                    &sample,
+                    &copied,
+                    Some(epoch.load(std::sync::atomic::Ordering::Acquire))
+                ));
+            }
+        ));
+        assert!(cache.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn retired_cursor_results_do_not_overwrite_cache_or_remember_scope() {
+        let policy = crate::collection_admission::CollectionAdmission::new();
+        policy.set_enabled(true);
+        let permit = policy.admit().unwrap();
+        let cache = std::sync::Mutex::new(None);
+        let mut good = status_for_signature("cursor-gui-usage");
+        good.tool = Tool::Cursor;
+        let settings = Settings::default();
+        permit.run(|| {
+            super::cache_cursor_status(
+                &cache,
+                chrono::Utc::now(),
+                Some(good.clone()),
+                Some(super::CursorStatusSource::Agent(None)),
+                None,
+                &settings,
+            );
+            policy.set_enabled(false);
+            policy.set_enabled(true);
+            super::remember_cursor_account_scope(
+                &cache,
+                chrono::Utc::now(),
+                crate::cursor_dashboard::AccountScope {
+                    user_id: 1,
+                    team_id: None,
+                },
+            );
+            assert!(super::cache_cursor_status(
+                &cache,
+                chrono::Utc::now(),
+                None,
+                None,
+                Some(super::CollectionErrorKind::LoginRequired),
+                &settings
+            )
+            .is_none());
+        });
+        let cached = cache.lock().unwrap();
+        let cached = cached.as_ref().unwrap();
+        assert_eq!(cached.last_good, Some(good));
+        assert_eq!(cached.error, None);
+        assert_eq!(cached.known_scope, None);
+    }
+
+    #[test]
+    fn queued_forced_work_cannot_restart_after_off_on_transition() {
+        use std::sync::{Arc, Barrier};
+        let policy = Arc::new(crate::collection_admission::CollectionAdmission::new());
+        policy.set_enabled(true);
+        let permit = policy.admit().unwrap();
+        let coordinator = Arc::new(super::CollectionCoordinator::default());
+        let release = Arc::new(Barrier::new(2));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let first_coordinator = coordinator.clone();
+        let first_release = release.clone();
+        let first = std::thread::spawn(move || {
+            first_coordinator.run(false, || {
+                started_tx.send(()).unwrap();
+                first_release.wait();
+                Vec::new()
+            })
+        });
+        started_rx.recv().unwrap();
+        let waiting_coordinator = coordinator.clone();
+        let waiting = std::thread::spawn(move || {
+            waiting_coordinator.run(true, || {
+                permit
+                    .run(|| panic!("retired provider work started"))
+                    .unwrap_or_default()
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while coordinator.state.lock().unwrap().pending_force_waiters == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        policy.set_enabled(false);
+        policy.set_enabled(true);
+        release.wait();
+        assert!(first.join().unwrap().is_empty());
+        assert!(waiting.join().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hiding_a_taskbar_does_not_change_collection_admission() {
+        let before = Settings {
+            show_claude: true,
+            show_cursor: true,
+            ..Settings::default()
+        };
+        let after = Settings {
+            taskbar_show_claude: false,
+            taskbar_show_cursor: false,
+            ..before.clone()
+        };
+        let changes = super::CollectionChanges::between(
+            super::CollectionPolicy::from_settings(&before),
+            super::CollectionPolicy::from_settings(&after),
+        );
+        assert_eq!(changes.transition(&Tool::Claude), None);
+        assert_eq!(changes.transition(&Tool::Cursor), None);
+        assert!(super::CollectionPolicy::from_settings(&after).enabled(&Tool::Claude));
+        assert!(super::CollectionPolicy::from_settings(&after).enabled(&Tool::Cursor));
     }
 
     fn status_for_signature(session_id: &str) -> AgentStatus {

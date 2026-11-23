@@ -35,6 +35,7 @@ const settingsTabPanels = [...(document.querySelectorAll?.("[data-settings-tab-p
 let autosaveTimer = null;
 let isHydrating = false;
 let hasLoadedSettings = false;
+let settingsLoadPromise = null;
 let localRevision = 0;
 let savedRevision = 0;
 let editSession = { baseline: null, topology: { monitor_keys: [], monitor_modes: [] } };
@@ -52,6 +53,9 @@ const settingsAuthority = createSettingsAuthority();
 let quitListenerReady = false;
 let quitFlushPromise = null;
 let quitAttemptGeneration = 0;
+let quitRequestId = null;
+let quitLatestRequestId = null;
+let quitRetryId = "0";
 let listenerLifecycleGeneration = 0;
 let listenersDisposed = false;
 const activeUnlisteners = new Set();
@@ -611,6 +615,11 @@ async function loadSettings() {
   setStatus(t("status.settingsLoadFailed", currentLanguageSettings()), "error");
 }
 
+function ensureSettingsLoad() {
+  settingsLoadPromise ??= loadSettings().finally(() => { settingsLoadPromise = null; });
+  return settingsLoadPromise;
+}
+
 function renderUpdateStatus(result, fromInstall = false) {
   if (updateInstallBusy && !fromInstall) return;
   if (!fromInstall && result?.checked_at && currentUpdateStatus?.checked_at) {
@@ -646,14 +655,31 @@ function renderUpdateStatus(result, fromInstall = false) {
   updateStatusEl.dataset.state = state?.status ?? "unknown";
 }
 
+let quitHandoffGeneration = null;
+
+function syncSettingsInputLock() {
+  if (!form) return;
+  const locked = updateInstallBusy || quitHandoffGeneration !== null;
+  form.inert = locked;
+  form.setAttribute?.("aria-disabled", String(locked));
+}
+
+function lockQuitHandoff(generation) {
+  quitHandoffGeneration = generation;
+  syncSettingsInputLock();
+}
+
+function releaseQuitHandoff(generation) {
+  if (quitHandoffGeneration !== generation) return;
+  quitHandoffGeneration = null;
+  syncSettingsInputLock();
+}
+
 function syncUpdateBusyState() {
   const busy = updateCheckBusy || updateInstallBusy;
   for (const button of updateActionButtons) button.disabled = busy;
   if (updateBand) updateBand.setAttribute?.("aria-busy", String(busy));
-  if (form) {
-    form.inert = updateInstallBusy;
-    form.setAttribute?.("aria-disabled", String(updateInstallBusy));
-  }
+  syncSettingsInputLock();
 }
 
 function setUpdateCheckBusy(busy) {
@@ -824,14 +850,17 @@ async function saveSettings(input, revision, edit) {
   showSettingsToast(t(warnings.length > 0 ? "status.savedRetrying" : "status.saved", next));
 }
 
-async function rollbackFailedSave(revision, error) {
+async function rollbackFailedSave(revision, error, canCommit = () => true) {
   if (revision !== localRevision) return;
+  if (!canCommit()) throw error;
   const requestGeneration = settingsEventGeneration;
   let recovered = false;
   try {
     const persisted = await invoke("get_settings");
-    const current = settingsForReply(persisted, requestGeneration);
     if (revision !== localRevision) return;
+    // A quit that started and was cancelled also retires this rollback reply.
+    if (!canCommit()) throw error;
+    const current = settingsForReply(persisted, requestGeneration);
     if (!current) throw new Error("invalid settings payload");
     fillForm(current);
     savedRevision = revision;
@@ -839,7 +868,7 @@ async function rollbackFailedSave(revision, error) {
   } catch {
     // Keep the original save error when the recovery read also fails.
   }
-  if (revision === localRevision) {
+  if (revision === localRevision && canCommit()) {
     const message = error instanceof Error ? error.message : String(error);
     const displayChanged = message === "monitor layout changed; settings reloaded, please retry the edit";
     setStatus(recovered && displayChanged
@@ -849,30 +878,93 @@ async function rollbackFailedSave(revision, error) {
   if (!recovered) throw error;
 }
 
-function enqueueLatestSettingsSave({ failOnRollback = false } = {}) {
+let lastSettingsSaveFailed = false;
+
+function enqueueLatestSettingsSave({ failOnRollback = false, forceSave = false, onFailure } = {}) {
   clearTimeout(autosaveTimer);
   autosaveTimer = null;
-  if (!hasLoadedSettings || localRevision <= savedRevision) return saveQueue;
+  if (!hasLoadedSettings || (!forceSave && !lastSettingsSaveFailed && localRevision <= savedRevision)) return saveQueue;
 
   const revision = localRevision;
   const input = settingsInputFromForm();
   const edit = editSession;
   saveQueue = saveQueue
     .catch(() => {})
-    .then(() => saveSettings(input, revision, edit))
+    .then(async () => {
+      await saveSettings(input, revision, edit);
+      lastSettingsSaveFailed = false;
+    })
     .catch(async (error) => {
-      await rollbackFailedSave(revision, error);
+      lastSettingsSaveFailed = true;
+      onFailure?.(error);
+      // Keep the draft available for the native retry while quitting.
+      if (quitRequestId !== null) throw error;
+      const quitGeneration = quitAttemptGeneration;
+      await rollbackFailedSave(revision, error, () => quitRequestId === null && quitAttemptGeneration === quitGeneration);
       if (failOnRollback) throw error;
+      lastSettingsSaveFailed = false;
     });
   return saveQueue;
 }
 
-async function flushSettingsAndQuit() {
-  if (quitFlushPromise) return quitFlushPromise;
+async function flushSettingsAndQuit(requestId, retryId = null) {
+  if (!isQuitId(requestId) || (retryId !== null && !isQuitId(retryId))) return;
+  const sameRequest = quitRequestId === requestId;
+  const previous = sameRequest ? quitFlushPromise : null;
+  if (sameRequest) {
+    if (retryId === null) return quitRetryId === "0" ? previous : undefined;
+    if (!isNewerQuitId(retryId, quitRetryId)) return;
+  } else {
+    if (quitLatestRequestId !== null && !isNewerQuitId(requestId, quitLatestRequestId)) return;
+    quitLatestRequestId = requestId;
+    quitRequestId = requestId;
+  }
+  quitRetryId = retryId ?? "0";
+  releaseQuitHandoff(quitAttemptGeneration);
   const generation = ++quitAttemptGeneration;
+  const isCurrent = () => quitRequestId === requestId && quitAttemptGeneration === generation;
+  let failureReported = false;
+  const reportFailure = (retryable = true) => {
+    if (!isCurrent() || failureReported) return;
+    failureReported = true;
+    // Native timeout remains available if the WebView IPC itself is unavailable.
+    void invoke("fail_app_quit", { requestId, retryId, retryable }).catch(() => {});
+  };
   const attempt = (async () => {
-    await enqueueLatestSettingsSave();
-    await invoke("complete_app_quit");
+    let saving = true;
+    try {
+      if (retryId !== null && previous) await previous.catch(() => {});
+      if (!isCurrent()) return;
+      // A reloaded panel can receive Retry before its settings have hydrated.
+      if (retryId !== null && !hasLoadedSettings) {
+        await ensureSettingsLoad();
+        if (!isCurrent()) return;
+        if (!hasLoadedSettings) throw new Error(t("status.settingsLoadFailed", currentLanguageSettings()));
+      }
+      let flushedRevision;
+      let forceSave = retryId !== null;
+      do {
+        flushedRevision = localRevision;
+        await enqueueLatestSettingsSave({ failOnRollback: true, forceSave, onFailure: () => reportFailure(true) });
+        forceSave = false;
+        if (!isCurrent()) return;
+      } while (localRevision !== flushedRevision);
+      if (!isCurrent()) return;
+      lockQuitHandoff(generation);
+      // Drain saves queued during the final flush before committing native exit.
+      await saveQueue;
+      if (!isCurrent()) return;
+      saving = false;
+      const completed = await invoke("complete_app_quit", { requestId });
+      if (!isCurrent()) return;
+      if (completed === false) retireQuitRequest(requestId);
+      // Completion retires delivery, but native exit cleanup still owns the input lock.
+      if (completed === true) quitRequestId = null;
+    } catch (error) {
+      releaseQuitHandoff(generation);
+      reportFailure(saving);
+      throw error;
+    }
   })();
   quitFlushPromise = attempt;
   try {
@@ -884,18 +976,44 @@ async function flushSettingsAndQuit() {
   }
 }
 
+function isQuitId(id) {
+  return typeof id === "string" && /^[1-9][0-9]*$/.test(id);
+}
+
+function isNewerQuitId(id, previous) {
+  return id.length > previous.length || (id.length === previous.length && id > previous);
+}
+
+function retireQuitRequest(requestId) {
+  if (!isQuitId(requestId)) return;
+  if (quitLatestRequestId !== null && requestId !== quitLatestRequestId &&
+      !isNewerQuitId(requestId, quitLatestRequestId)) return;
+  quitLatestRequestId = requestId;
+  if (quitRequestId === null) return;
+  releaseQuitHandoff(quitAttemptGeneration);
+  quitRequestId = null;
+  quitAttemptGeneration += 1;
+  quitFlushPromise = null;
+}
+
 function scheduleAutosave() {
-  if (isHydrating || !hasLoadedSettings) return;
+  if (isHydrating || !hasLoadedSettings || quitHandoffGeneration !== null) return;
   localRevision += 1;
   updateOutputs();
   publishPreview();
   hideSettingsToast();
   setStatus(t("status.saving", currentLanguageSettings()), "saving");
   clearTimeout(autosaveTimer);
-  autosaveTimer = setTimeout(enqueueLatestSettingsSave, quitListenerReady ? 120 : 0);
+  autosaveTimer = setTimeout(() => {
+    const revision = localRevision;
+    void enqueueLatestSettingsSave().catch((error) => {
+      if (revision === localRevision) setStatus(String(error), "error");
+    });
+  }, quitListenerReady ? 120 : 0);
 }
 
 function handleSettingsMutation(event) {
+  if (quitHandoffGeneration !== null) return;
   if (event?.target?.dataset?.previewTool !== undefined) return;
   if (event?.target?.dataset?.rangeNumberFor) {
     if (!syncRangeFromNumberEditor(event.target, event.type === "change")) return;
@@ -970,6 +1088,10 @@ function cleanupListeners() {
   if (listenersDisposed) return;
   listenersDisposed = true;
   listenerLifecycleGeneration += 1;
+  releaseQuitHandoff(quitAttemptGeneration);
+  quitRequestId = null;
+  quitAttemptGeneration += 1;
+  quitFlushPromise = null;
   quitListenerReady = false;
   const unlisteners = [...activeUnlisteners];
   activeUnlisteners.clear();
@@ -1026,6 +1148,10 @@ async function bindSettingsUpdates() {
       if (listenersDisposed) return;
       try {
         const unlisten = await registerListenerAttempt(listen, eventName, handler);
+        if (listenersDisposed) {
+          unlistenSafely(unlisten);
+          return;
+        }
         if (typeof unlisten === "function") activeUnlisteners.add(unlisten);
         if (critical) quitListenerReady = true;
         return;
@@ -1036,16 +1162,24 @@ async function bindSettingsUpdates() {
     if (critical) quitListenerReady = false;
   };
 
-  void register(
+  const handleQuitRequest = (payload) => {
+    if (listenersDisposed) return;
+    const requestId = payload?.request_id;
+    const attempt = flushSettingsAndQuit(requestId, payload?.retry_id ?? null);
+    const generation = quitAttemptGeneration;
+    void attempt.catch((error) => {
+      if (quitAttemptGeneration === generation && quitRequestId === requestId) {
+        setStatus(String(error), "error");
+      }
+    });
+  };
+  const quitRequested = register(
     "app-quit-requested",
-    () => {
-      void flushSettingsAndQuit().catch((error) => setStatus(String(error), "error"));
-    },
+    (event) => handleQuitRequest(event.payload),
     true,
   );
-  void register("app-quit-cancelled", () => {
-    quitAttemptGeneration += 1;
-    quitFlushPromise = null;
+  const quitCancelled = register("app-quit-cancelled", (event) => {
+    if (!listenersDisposed) retireQuitRequest(event.payload?.request_id);
   });
   void register("settings-updated", (event) => {
       if (!rememberAuthoritativeSettings(event.payload)) return;
@@ -1059,6 +1193,18 @@ async function bindSettingsUpdates() {
         renderUpdateStatus(event.payload);
       }
     });
+
+  // Subscribe before reading so a request or cancellation racing the snapshot is also delivered live.
+  await Promise.all([quitRequested, quitCancelled]);
+  if (listenersDisposed) return;
+  try {
+    const snapshot = await invoke("get_pending_quit_request");
+    if (listenersDisposed) return;
+    retireQuitRequest(snapshot?.retired_through);
+    handleQuitRequest(snapshot?.pending);
+  } catch {
+    // Live events and the native recovery dialog remain available if this read fails.
+  }
 }
 
 window.addEventListener?.("pagehide", cleanupListeners);
@@ -1159,7 +1305,7 @@ if (form) {
   selectSettingsTab("general");
   setSettingsFormEnabled(false);
   bindSettingsUpdates();
-  loadSettings();
+  void ensureSettingsLoad();
   loadUpdateStatus();
 }
 

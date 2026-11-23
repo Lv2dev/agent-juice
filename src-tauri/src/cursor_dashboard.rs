@@ -105,8 +105,10 @@ impl CliIdentityProof {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardErrorKind {
+    PolicyCancelled,
     Deadline,
     Transport,
+    RateLimited,
     Parse,
     LoginRequired,
     Unavailable,
@@ -867,7 +869,9 @@ fn resolve_credential_sources(
 fn preferred_credential_error(gui: DashboardError, cli: DashboardError) -> DashboardError {
     fn priority(kind: DashboardErrorKind) -> u8 {
         match kind {
+            DashboardErrorKind::PolicyCancelled => 0,
             DashboardErrorKind::Deadline => 7,
+            DashboardErrorKind::RateLimited => 4,
             DashboardErrorKind::ScopeChanged => 6,
             DashboardErrorKind::CredentialsDecode => 5,
             DashboardErrorKind::Parse | DashboardErrorKind::Oversized => 3,
@@ -958,6 +962,33 @@ fn dashboard_url(method: &'static str) -> Result<String, DashboardError> {
     }
 }
 
+fn dashboard_status(status: u16, body: &[u8]) -> Result<(), DashboardError> {
+    match status {
+        200..=299 => return Ok(()),
+        429 => {
+            return Err(DashboardError::new(
+                DashboardErrorKind::RateLimited,
+                "Cursor Dashboard rate limited the request",
+            ))
+        }
+        _ => {}
+    }
+    let code = serde_json::from_slice::<ConnectErrorBody>(body)
+        .ok()
+        .and_then(|value| value.code);
+    if status == 401 || code.as_deref() == Some("unauthenticated") {
+        return Err(DashboardError::login("Cursor login required"));
+    }
+    if matches!(status, 400 | 404 | 415) {
+        return Err(DashboardError::parse(
+            "Cursor Dashboard contract was not recognized",
+        ));
+    }
+    Err(DashboardError::transport(
+        "Cursor Dashboard rejected the request",
+    ))
+}
+
 fn post_json<Request: Serialize, Output: DeserializeOwned>(
     credentials: &DashboardCredentials,
     method: &'static str,
@@ -986,6 +1017,10 @@ fn post_json<Request: Serialize, Output: DeserializeOwned>(
         "Cursor Dashboard request failed",
     )
     .map_err(|error| match error.kind {
+        HttpErrorKind::PolicyCancelled => DashboardError::new(
+            DashboardErrorKind::PolicyCancelled,
+            "Cursor collection cancelled",
+        ),
         HttpErrorKind::Deadline => DashboardError::deadline("Cursor Dashboard request timed out"),
         HttpErrorKind::Oversized => DashboardError::new(
             DashboardErrorKind::Oversized,
@@ -999,22 +1034,11 @@ fn post_json<Request: Serialize, Output: DeserializeOwned>(
     let status = response.status;
     let content_type = response.content_type;
     let body = response.body;
-    if !(200..=299).contains(&status) {
-        let code = serde_json::from_slice::<ConnectErrorBody>(&body)
-            .ok()
-            .and_then(|value| value.code);
-        if status == 401 || code.as_deref() == Some("unauthenticated") {
+    if let Err(error) = dashboard_status(status, &body) {
+        if error.kind == DashboardErrorKind::LoginRequired {
             invalidate_scope(credentials.scope);
-            return Err(DashboardError::login("Cursor login required"));
         }
-        if matches!(status, 400 | 404 | 415) {
-            return Err(DashboardError::parse(
-                "Cursor Dashboard contract was not recognized",
-            ));
-        }
-        return Err(DashboardError::transport(
-            "Cursor Dashboard rejected the request",
-        ));
+        return Err(error);
     }
     if !content_type.starts_with("application/json") {
         return Err(DashboardError::parse(
@@ -1193,6 +1217,25 @@ pub fn filtered_usage_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_rate_limit_is_not_a_transport_or_auth_error() {
+        assert_eq!(
+            dashboard_status(429, br#"{"code":"unauthenticated"}"#)
+                .unwrap_err()
+                .kind,
+            DashboardErrorKind::RateLimited,
+        );
+        assert_eq!(
+            dashboard_status(401, b"{}").unwrap_err().kind,
+            DashboardErrorKind::LoginRequired
+        );
+        assert_eq!(
+            dashboard_status(500, b"{}").unwrap_err().kind,
+            DashboardErrorKind::Transport
+        );
+        assert!(dashboard_status(200, b"{}").is_ok());
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);

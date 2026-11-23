@@ -67,6 +67,7 @@ Codex처럼 계정에 한 기간만 존재하면 빈 기간을 만들지 않고 
 
 - 도구마다 이름과 PC, 기간별 게이지와 초기화까지 남은 시간을 보여줍니다. 큰 숫자는 **가장 제약이 큰 한도**(잔여량은 가장 낮은 기간, 사용량은 가장 높은 기간)와 그 기간명입니다. 한도가 하나뿐이면 해당 한도를 씁니다. 리셋 날짜는 별도 줄에서 줄바꿈됩니다.
 - 제목 옆에는 현재 표시 기준(잔여량 또는 사용량)이 표시됩니다. 경고·위험 임계값에 들어간 게이지는 설정한 경고·위험색으로 바뀝니다.
+- 개요 우측 상단의 새로고침 아이콘이나 조회 실패 카드의 `다시 시도`로 활성화된 도구 전체를 다시 조회할 수 있습니다. 재로그인하거나 도구를 다시 실행한 뒤 다음 수집주기까지 기다릴 필요가 없습니다. 개요·트레이·작업표시줄에서 동시에 요청하면 같은 조회 결과를 기다리고, 실패해도 기존 표시값을 유지합니다. 서버 조회 제한과 도구별 최소 재시도 간격은 지킵니다.
 - `로그인 필요`, 앱 실행 필요, 아직 값이 없는 상태는 숫자 대신 안내 문구로 표시합니다. 오래된 기록은 문구로 구분하며, 개요의 한도 숫자와 게이지는 흐리게 만들지 않습니다. Codex의 로컬 세션 기록 시각과 계정 한도의 조회 상태는 다를 수 있습니다.
 - 아래쪽의 주간 토큰 막대는 최근 기간의 주별 합계이며 `활동 자세히 보기`로 활동 화면으로 이동합니다.
 
@@ -326,6 +327,7 @@ Cursor는 기존 사용자에게 새 네 번째 바가 갑자기 생기지 않�
 - **Antigravity가 비어 있거나 오래됨:** 표시줄 탭에서 활성화하세요. CLI가 설치되어 있으면 CLI 로그인을 확인하세요. CLI `1.1.11` 이상에서는 Desktop이나 터미널을 열지 않아도 자동으로 조회하며, CLI 미설치 시에만 실행 중인 Desktop을 사용합니다. 정보 새로고침은 30초 간격을 지키며, 구버전 CLI는 먼저 업데이트하세요.
 - **값이 대시로 보임:** 해당 도구가 아직 한도 정보를 내보내지 않았거나 기록이 오래됐을 수 있습니다.
 - **패널을 최소화한 뒤 안 보임:** 트레이의 Juice 아이콘을 다시 클릭하세요.
+- **종료할 때 저장을 기다리는 창이 뜸:** 저장이 끝나면 정상 종료됩니다. 지연되면 Windows 확인창에서 계속 기다리거나, 저장 실패 시 다시 저장하거나, 종료를 취소할 수 있습니다. `저장하지 않고 종료`를 선택하면 미저장 설정이 사라질 수 있습니다. 패널이 응답하지 않을 때는 트레이의 종료를 다시 눌러 같은 복구 창을 열 수 있습니다.
 - **바가 안 보임:** 전체화면/최대화 숨김, 트레이 일시중지, 도구별 표시 설정과 저장된 대상 모니터를 확인하세요.
 
 #### 다른 PC에서 값이 안 보일 때
@@ -413,6 +415,7 @@ The panel switches between four views with the tabs at the top: **Overview · Ac
 
 - Each tool shows its name, PC, per-period gauges, and time until reset. The large number and its period identify the **most limiting quota**: the lowest remaining percentage or the highest used percentage. A single-limit tool uses its only quota. Reset dates wrap on a separate line.
 - The heading shows the current display basis, remaining or used. Gauges inside the warning or danger threshold switch to your warning or danger colors.
+- Use the refresh icon at the top right of Overview or `Retry` on a failed card to refresh all enabled tools without waiting for the next collection interval after signing in or restarting a tool. Concurrent requests from the panel, tray, or taskbar share the same refresh result. Request failures preserve the displayed values. Server cooldowns and provider-specific minimum retry intervals still apply.
 - `Sign in required`, app-not-running, and not-yet-collected states replace the numbers with a short explanation. Old records have a text notice rather than dimmed quota numbers and gauges in Overview. Codex local-session freshness can differ from its account-quota collection state.
 - The weekly token bars at the bottom show recent weekly totals, and `View activity` opens the Activity view.
 
@@ -672,6 +675,7 @@ The `About` tab is split into an `Updates` group at the top and an `About` group
 - **Antigravity is empty or stale:** Enable it in the Taskbar tab. If CLI is installed, check its login. CLI `1.1.11` or later is queried first without an open Desktop or terminal; the running Desktop is used only when CLI is not installed. Manual refreshes use a 30-second minimum gap; update an unsupported CLI first.
 - **Values are dashes:** The tool may not have emitted limit data yet, or the record may be stale.
 - **The minimized panel is missing:** Click the Juice tray icon again.
+- **A save-recovery dialog appears when quitting:** Juice exits normally after settings are saved. The Windows dialog lets you keep waiting, retry a failed save, or cancel quitting. `Quit without saving` may discard unsaved settings. If the panel is unresponsive, select Quit from the tray again to open the same recovery dialog.
 - **The taskbar bar is missing:** Check fullscreen/maximized hiding, tray pause, per-tool visibility, and the remembered target monitor.
 
 #### If another PC shows no data

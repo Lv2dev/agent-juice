@@ -813,19 +813,28 @@ test("settings form auto-saves changed values without a submit button", async ()
   fields.bar_mode.value = "full";
   listeners.change({ target: fields.bar_mode });
   const quitsBeforeFailedRecovery = invokedCommands.filter(command => command === "complete_app_quit").length;
-  eventHandlers["app-quit-requested"]({ payload: null });
+  const readsBeforeQuitFailure = invokedCommands.filter(command => command === "get_settings").length;
+  eventHandlers["app-quit-requested"]({ payload: { request_id: "1" } });
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(statusEl.textContent, `Error: ${displayConflict}`, "failed recovery retains the original error");
+  assert.equal(statusEl.textContent, `Error: ${displayConflict}`, "quit failure retains the original error");
+  assert.equal(fields.bar_mode.value, "full", "quit retry must keep the unsaved draft");
+  assert.equal(form.inert, false, "failed quit saves must leave the retained draft editable");
+  assert.equal(invokedCommands.filter(command => command === "get_settings").length, readsBeforeQuitFailure,
+    "quit failure must not wait for a recovery read or replace the draft");
   assert.equal(invokedCommands.filter(command => command === "complete_app_quit").length, quitsBeforeFailedRecovery);
+  assert.equal(invokedCommands.includes("fail_app_quit"), true, "save failure must immediately offer native recovery");
+  eventHandlers["app-quit-cancelled"]({ payload: { request_id: "1", reason: "cancel" } });
 
   fields.bar_mode.value = "compact";
   listeners.input?.({ target: fields.bar_mode });
-  eventHandlers["app-quit-requested"]?.({ payload: null });
+  eventHandlers["app-quit-requested"]?.({ payload: { request_id: "2" } });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(savedInputs.at(-1).bar_mode, "compact");
   assert.equal(invokedCommands.at(-1), "complete_app_quit");
-  eventHandlers["app-quit-cancelled"]?.({ payload: "activation" });
-  eventHandlers["app-quit-requested"]?.({ payload: null });
+  assert.equal(form.inert, true, "native exit handoff must keep settings input locked");
+  eventHandlers["app-quit-cancelled"]?.({ payload: { request_id: "2", reason: "activation" } });
+  assert.equal(form.inert, false, "activation cancellation must restore settings input");
+  eventHandlers["app-quit-requested"]?.({ payload: { request_id: "3" } });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(
     invokedCommands.filter((command) => command === "complete_app_quit").length,
@@ -836,6 +845,7 @@ test("settings form auto-saves changed values without a submit button", async ()
   windowListeners.pagehide?.();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(unlistenCalls, 3);
+  assert.equal(form.inert, false, "listener teardown releases the retired quit input lock");
 
   delete global.window;
   delete global.document;

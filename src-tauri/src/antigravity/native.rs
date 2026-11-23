@@ -550,7 +550,7 @@ mod tests {
         });
         assert!(result.is_none(), "retired Desktop quota must not return");
         let cache = state.lock().unwrap();
-        assert!(!cache.busy);
+        assert!(cache.active.is_none());
         assert!(cache.result.is_none(), "retired quota must not enter CACHE");
         assert!(cache.retry_at.is_some() && cache.force_retry_at.is_some());
         assert_eq!(

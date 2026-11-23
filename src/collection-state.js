@@ -1,5 +1,13 @@
 import { t } from "./i18n.js";
 
+export function collectionRetryState(health, viewState) {
+  return {
+    visible: ["login_required", "app_required", "unavailable", "transient_error", "parse_error", "credentials_error", "source_changed", "rate_limited"].includes(health)
+      || ["login_required", "empty"].includes(viewState),
+    blocked: health === "rate_limited",
+  };
+}
+
 export function collectionIssue(tool, health, language) {
   if (tool === "cursor" && health === "credentials_error") {
     return { short: t("collection.cursorCredentialsError", language), detail: t("collection.cursorCredentialsErrorDetail", language) };

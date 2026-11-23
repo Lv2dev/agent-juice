@@ -3,10 +3,20 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { barToolViewModel } from "./bar-state.js";
 import { viewModelForTool } from "./panel-state.js";
-import { collectionIssue } from "./collection-state.js";
+import { collectionIssue, collectionRetryState } from "./collection-state.js";
 import { t } from "./i18n.js";
 
 const now = new Date("2026-09-28T03:00:00Z");
+
+test("retry actions expose recoverable states without bypassing rate-limit cooldowns", () => {
+  for (const health of ["login_required", "app_required", "unavailable", "transient_error", "parse_error", "credentials_error", "source_changed"]) {
+    assert.deepEqual(collectionRetryState(health, "stale"), { visible: true, blocked: false });
+  }
+  assert.deepEqual(collectionRetryState("rate_limited", "stale"), { visible: true, blocked: true });
+  assert.deepEqual(collectionRetryState("ready", "live"), { visible: false, blocked: false });
+  assert.deepEqual(collectionRetryState("unknown", "empty"), { visible: true, blocked: false });
+  assert.deepEqual(collectionRetryState("unknown", "stale"), { visible: false, blocked: false });
+});
 
 test("Cursor bar markup includes the accessible collection issue output", async () => {
   const html = await readFile(new URL("./bar.html", import.meta.url), "utf8");

@@ -32,7 +32,10 @@ const statusRequests = createStatusRequests({
     startupStatusLoading = false;
     renderBar();
   },
-  acceptHealth: health => { collectionHealth = health && typeof health === "object" ? health : {}; },
+  acceptHealth: (health, renderCurrent) => {
+    collectionHealth = health && typeof health === "object" ? health : {};
+    if (renderCurrent) renderBar();
+  },
 });
 const CONTENT_WIDTH_SYNC_DELAY_MS = 80;
 const CONTENT_WIDTH_RETRY_DELAY_MS = 250;
@@ -55,6 +58,13 @@ function currentWindowTool() {
 }
 
 let CURRENT_TOOL = currentWindowTool();
+const MENU_WINDOW_GENERATION = currentMenuWindowGeneration();
+let menuIntentSequence = 0n;
+
+function currentMenuWindowGeneration() {
+  const value = new URLSearchParams(window.location?.search ?? "").get("menuGeneration");
+  return /^[1-9]\d{0,19}$/.test(value ?? "") && BigInt(value) <= 18446744073709551615n ? value : null;
+}
 const MENU_MARGIN = 4;
 const MENU_CLOSE_GRACE_MS = 120;
 const MENU_CLOSE_RETRY_DELAY_MS = 250;
@@ -196,7 +206,7 @@ function positionRefreshMenu(menu) {
 async function showRefreshMenu(event) {
   if (listenersDisposed || !currentBarIsVisible()) return;
   const menu = refreshMenu();
-  if (!menu || !nativeMenuListenerReady) {
+  if (!menu || !nativeMenuListenerReady || !MENU_WINDOW_GENERATION) {
     void ensureNativeMenuListener();
     void refreshTaskbarStatus();
     return;
@@ -315,7 +325,11 @@ function setRefreshMenuState(state) {
 
 async function setNativeMenuOpen(open) {
   if (listenersDisposed || !CURRENT_TOOL || !tauriApi().core?.invoke) return null;
-  return parseNativeMenuState(await invoke("set_taskbar_menu_open", { tool: CURRENT_TOOL, open }));
+  if (!MENU_WINDOW_GENERATION || menuIntentSequence === 18446744073709551615n) return null;
+  const intentSequence = String(++menuIntentSequence);
+  return parseNativeMenuState(await invoke("set_taskbar_menu_open", {
+    tool: CURRENT_TOOL, open, windowGeneration: MENU_WINDOW_GENERATION, intentSequence,
+  }));
 }
 
 function parseNativeMenuState(value) {

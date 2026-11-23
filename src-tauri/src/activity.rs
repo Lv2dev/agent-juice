@@ -24,12 +24,21 @@ const DEFAULT_MAX_FILES: usize = 4096;
 const DEFAULT_MAX_ENTRIES: usize = 32_768;
 const DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILE_BYTES_PER_PASS: u64 = 32 * 1024 * 1024;
+const MAX_PREFIX_VALIDATION_BYTES_PER_PASS: u64 = 1024 * 1024;
+const MAX_PREFIX_VALIDATION_DURATION: Duration = Duration::from_millis(50);
+const EAGER_PREFIX_VALIDATION_BYTES: u64 = 16 * 1024;
+const PREFIX_VALIDATION_RETRY_MILLIS: u64 = 1000;
+const MAX_PREFIX_VALIDATION_RETRY_MILLIS: u64 = 60_000;
+const MAX_LINE_CONTINUATIONS: usize = 32;
+const MAX_LINE_CONTINUATION_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_SCAN_DURATION: Duration = Duration::from_secs(3);
 const MAX_ENUMERATION_DEPTH: usize = 128;
 
 static SCAN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static ENUMERATION_READERS: Lazy<Mutex<[Vec<OpenDirectory>; 3]>> =
     Lazy::new(|| Mutex::new(std::array::from_fn(|_| Vec::new())));
+static LINE_CONTINUATIONS: Lazy<Mutex<VecDeque<LineContinuation>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ActivityDay {
@@ -125,6 +134,121 @@ struct PrefixValidation {
     target_offset: u64,
     source_modified_nanos: u64,
     legacy_prefix_matches: bool,
+    #[serde(skip)]
+    pending_line: Vec<u8>,
+    #[serde(default)]
+    pending_line_start_offset: Option<u64>,
+}
+
+impl PrefixValidation {
+    fn continuation_identity(&self, path: &Path) -> LineContinuationIdentity {
+        LineContinuationIdentity {
+            path: path.to_owned(),
+            offset: self.offset,
+            source_modified_nanos: self.source_modified_nanos,
+            digest: Some(self.digest),
+            proof_target: Some(self.target_offset),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct LineContinuationIdentity {
+    path: PathBuf,
+    offset: u64,
+    source_modified_nanos: u64,
+    digest: Option<[u8; 32]>,
+    proof_target: Option<u64>,
+}
+
+struct LineContinuation {
+    identity: LineContinuationIdentity,
+    start_offset: u64,
+    bytes: Vec<u8>,
+}
+
+fn restore_line_continuation(
+    identity: LineContinuationIdentity,
+    start_offset: Option<u64>,
+    bytes: &mut Vec<u8>,
+) -> Option<u64> {
+    let start_offset = start_offset?;
+    if !bytes.is_empty() {
+        return None;
+    }
+    let mut continuations = LINE_CONTINUATIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let saved = continuations
+        .iter()
+        .position(|saved| {
+            saved.identity.path == identity.path
+                && saved.identity.proof_target.is_some() == identity.proof_target.is_some()
+        })
+        .and_then(|position| continuations.remove(position));
+    if let Some(saved) = saved.filter(|saved| {
+        saved.identity == identity
+            && saved.start_offset == start_offset
+            && saved.bytes.len() as u64 == identity.offset.saturating_sub(start_offset)
+    }) {
+        *bytes = saved.bytes;
+        None
+    } else {
+        // Only token metadata reaches disk. A cold restart rereads this whole
+        // uncommitted line rather than interpreting its middle as a new record.
+        Some(start_offset)
+    }
+}
+
+fn remember_line_continuation(
+    identity: LineContinuationIdentity,
+    start_offset: Option<u64>,
+    bytes: &mut Vec<u8>,
+) {
+    let mut continuations = LINE_CONTINUATIONS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    cache_line_continuation(
+        &mut continuations,
+        identity,
+        start_offset,
+        std::mem::take(bytes),
+    );
+}
+
+fn cache_line_continuation(
+    continuations: &mut VecDeque<LineContinuation>,
+    identity: LineContinuationIdentity,
+    start_offset: Option<u64>,
+    bytes: Vec<u8>,
+) {
+    continuations.retain(|saved| {
+        saved.identity.path != identity.path
+            || saved.identity.proof_target.is_some() != identity.proof_target.is_some()
+    });
+    let Some(start_offset) = start_offset else {
+        return;
+    };
+    if bytes.is_empty() || bytes.len() > MAX_LINE_BYTES {
+        return;
+    }
+    let mut retained_bytes = continuations
+        .iter()
+        .map(|saved| saved.bytes.len())
+        .sum::<usize>();
+    while continuations.len() >= MAX_LINE_CONTINUATIONS
+        || retained_bytes.saturating_add(bytes.len()) > MAX_LINE_CONTINUATION_BYTES
+    {
+        let Some(evicted) = continuations.pop_front() else {
+            break;
+        };
+        retained_bytes = retained_bytes.saturating_sub(evicted.bytes.len());
+    }
+    continuations.push_back(LineContinuation {
+        identity,
+        start_offset,
+        bytes,
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +271,16 @@ struct FileCheckpoint {
     #[serde(default)]
     prefix_validation: Option<PrefixValidation>,
     #[serde(default)]
+    prefix_validation_retry_after_millis: u64,
+    #[serde(default)]
+    prefix_validation_backoff_millis: u64,
+    #[serde(skip)]
+    pending_line: Vec<u8>,
+    #[serde(default)]
+    pending_line_start_offset: Option<u64>,
+    #[serde(default)]
+    discarding_line: bool,
+    #[serde(default)]
     lossy: bool,
     #[serde(default)]
     days: BTreeMap<String, u64>,
@@ -161,6 +295,16 @@ struct FileCheckpoint {
 }
 
 impl FileCheckpoint {
+    fn continuation_identity(&self, path: &Path) -> LineContinuationIdentity {
+        LineContinuationIdentity {
+            path: path.to_owned(),
+            offset: self.offset,
+            source_modified_nanos: self.source_modified_nanos,
+            digest: self.prefix_digest,
+            proof_target: None,
+        }
+    }
+
     fn new(tool: ActivityTool) -> Self {
         Self {
             tool,
@@ -174,6 +318,11 @@ impl FileCheckpoint {
             prefix_digest: Some([0; 32]),
             prefix_needs_validation: false,
             prefix_validation: None,
+            prefix_validation_retry_after_millis: 0,
+            prefix_validation_backoff_millis: 0,
+            pending_line: Vec::new(),
+            pending_line_start_offset: None,
+            discarding_line: false,
             lossy: false,
             days: BTreeMap::new(),
             claude_messages: BTreeMap::new(),
@@ -345,20 +494,22 @@ pub fn local_roots() -> ActivityRoots {
     }
 }
 
-pub fn refresh(show_claude: bool, show_grok: bool) -> anyhow::Result<ActivitySnapshot> {
+pub(crate) fn refresh(policy: crate::LocalActivityPolicy) -> anyhow::Result<ActivitySnapshot> {
     let _guard = SCAN_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    policy.with_current(|| Ok(()))?;
     let path = index_path().ok_or_else(|| anyhow::anyhow!("activity data path unavailable"))?;
     let mut snapshot = refresh_in_timezone_checked(
         &path,
         &local_roots(),
-        show_claude,
+        policy.show_claude,
         false,
-        show_grok,
+        policy.show_grok,
         Utc::now(),
         Local,
         local_timezone_identity()?,
         ScanOptions::default(),
         local_timezone_identity,
+        Some(policy),
     )?;
     for day in &mut snapshot.days {
         day.codex_tokens = 0;
@@ -415,6 +566,7 @@ fn refresh_in_timezone<Tz: TimeZone + Copy>(
         timezone_identity.clone(),
         options,
         || Ok(timezone_identity.clone()),
+        None,
     )
 }
 
@@ -441,7 +593,10 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
     timezone_identity: ActivityTimezoneIdentity,
     options: ScanOptions,
     mut current_timezone: impl FnMut() -> anyhow::Result<ActivityTimezoneIdentity>,
+    policy: Option<crate::LocalActivityPolicy>,
 ) -> anyhow::Result<ActivitySnapshot> {
+    let validate_policy = || policy.map_or(Ok(()), crate::LocalActivityPolicy::validate);
+    validate_policy()?;
     validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
     let offset_minutes = now
         .with_timezone(&timezone)
@@ -449,10 +604,9 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
         .fix()
         .local_minus_utc()
         / 60;
-    let cutoff = (now.with_timezone(&timezone).date_naive()
-        - ChronoDuration::days(RETENTION_DAYS - 1))
-    .format("%Y-%m-%d")
-    .to_string();
+    let cutoff_date =
+        now.with_timezone(&timezone).date_naive() - ChronoDuration::days(RETENTION_DAYS - 1);
+    let cutoff = cutoff_date.format("%Y-%m-%d").to_string();
     let (mut index, rebuilt) = load_index_for_timezone_since(
         index_path,
         offset_minutes,
@@ -493,7 +647,7 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
         let mut readers = ENUMERATION_READERS
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let (candidates, partial) = collect_candidates(
+        let (candidates, partial) = collect_candidates_checked(
             roots,
             enabled_tools,
             &cutoff,
@@ -502,12 +656,14 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
             options,
             &mut index.enumeration,
             &mut readers,
+            || validate_policy().is_ok(),
         );
         index.enumeration.pending = fair_candidate_order(candidates).into();
         partial
     } else {
         true
     };
+    validate_policy()?;
     validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
 
     let mut progress = ScanProgress {
@@ -524,6 +680,7 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
 
     let mut files_scanned = 0;
     while !index.enumeration.pending.is_empty() {
+        validate_policy()?;
         if Instant::now() >= deadline || progress.bytes_read >= options.max_bytes {
             progress.incomplete = true;
             break;
@@ -579,7 +736,10 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
 
     index.files.retain(|key, checkpoint| {
         checkpoint.prune(&cutoff);
+        // Enumeration can move on before a file reaches its first usage record.
         seen_files.contains(key)
+            || (has_unfinished_source(checkpoint)
+                && source_is_recent(checkpoint, timezone, cutoff_date))
             || !checkpoint.days.is_empty()
             || !checkpoint.claude_messages.is_empty()
             || !checkpoint.grok_responses.is_empty()
@@ -593,9 +753,14 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
             .retain(|_, checkpoint| checkpoint.tool != ActivityTool::Codex);
     }
     reconcile_legacy_history(&mut index, &cutoff);
-    // Retained proofs stay uncertain when their source is no longer enumerable.
-    progress.lossy |= index.files.values().any(|checkpoint| {
-        (checkpoint.lossy || checkpoint.prefix_needs_validation)
+    // Retained proofs and unread checkpoints stay uncertain until revisited.
+    progress.lossy |= index.files.iter().any(|(key, checkpoint)| {
+        (checkpoint.lossy
+            || checkpoint.prefix_needs_validation
+            || checkpoint.offset < checkpoint.observed_len
+            || (has_unfinished_source(checkpoint)
+                && (seen_files.contains(key)
+                    || source_is_recent(checkpoint, timezone, cutoff_date))))
             && match checkpoint.tool {
                 ActivityTool::Claude => show_claude,
                 ActivityTool::Codex => show_codex,
@@ -619,11 +784,40 @@ fn refresh_in_timezone_checked<Tz: TimeZone + Copy>(
         progress.lossy,
         &cutoff,
     );
+    validate_policy()?;
+    // Encode and sync outside the settings gate; only the replacement is published under it.
+    let staged = if rebuilt || index != original {
+        Some(stage_index(index_path, &index)?)
+    } else {
+        None
+    };
     validate_timezone_identity(&timezone_identity, &mut current_timezone)?;
-    if rebuilt || index != original {
-        save_index(index_path, &index)?;
+    validate_policy()?;
+    if let Some(staged) = staged {
+        let commit = || staged.publish().context("replace activity index");
+        match policy {
+            Some(policy) => policy.with_current(commit)?,
+            None => commit()?,
+        }
     }
     Ok(snapshot)
+}
+
+fn has_unfinished_source(checkpoint: &FileCheckpoint) -> bool {
+    checkpoint.offset < checkpoint.observed_len
+        || checkpoint.pending_line_start_offset.is_some()
+        || checkpoint.discarding_line
+}
+
+fn source_is_recent<Tz: TimeZone>(
+    checkpoint: &FileCheckpoint,
+    timezone: Tz,
+    cutoff: chrono::NaiveDate,
+) -> bool {
+    i64::try_from(checkpoint.modified_millis)
+        .ok()
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .is_some_and(|modified| modified.with_timezone(&timezone).date_naive() >= cutoff)
 }
 
 fn fair_candidate_order(candidates: Vec<CandidateFile>) -> Vec<CandidateFile> {
@@ -698,6 +892,10 @@ fn load_index_for_timezone_since(
             }
             // Unknown historical dates remain available until their source can be reread.
             for (key, mut checkpoint) in std::mem::take(&mut index.files) {
+                if let Some(start_offset) = checkpoint.pending_line_start_offset.take() {
+                    checkpoint.offset = start_offset;
+                    checkpoint.pending_line.clear();
+                }
                 checkpoint.anonymous_source_verified = false;
                 match index.legacy_files.entry(key) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
@@ -709,6 +907,9 @@ fn load_index_for_timezone_since(
                         // Reset checkpoints have no observed revision, even with offset == len.
                         let replace_anonymous = checkpoint.offset == checkpoint.observed_len
                             && checkpoint.source_modified_nanos > 0
+                            && checkpoint.pending_line.is_empty()
+                            && checkpoint.pending_line_start_offset.is_none()
+                            && !checkpoint.discarding_line
                             && !checkpoint.lossy
                             && !checkpoint.prefix_needs_validation;
                         if has_aggregate_only_history(retained)
@@ -954,14 +1155,25 @@ fn reconcile_legacy_history(index: &mut ActivityIndex, cutoff: &str) {
     });
 }
 
-fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
+fn stage_index<'a>(
+    path: &'a Path,
+    index: &ActivityIndex,
+) -> anyhow::Result<config::StagedFileReplacement<'a>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let contents = serde_json::to_vec_pretty(index)?;
-    config::replace_file(path, &contents).context("replace activity index")
+    config::stage_file_replacement(path, &contents).context("stage activity index")
 }
 
+#[cfg(test)]
+fn save_index(path: &Path, index: &ActivityIndex) -> anyhow::Result<()> {
+    stage_index(path, index)?
+        .publish()
+        .context("replace activity index")
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn collect_candidates<Tz: TimeZone>(
     roots: &ActivityRoots,
@@ -972,6 +1184,31 @@ fn collect_candidates<Tz: TimeZone>(
     options: ScanOptions,
     checkpoint: &mut EnumerationCheckpoint,
     readers: &mut [Vec<OpenDirectory>; 3],
+) -> (Vec<CandidateFile>, bool) {
+    collect_candidates_checked(
+        roots,
+        enabled_tools,
+        cutoff,
+        timezone,
+        deadline,
+        options,
+        checkpoint,
+        readers,
+        || true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_candidates_checked<Tz: TimeZone>(
+    roots: &ActivityRoots,
+    enabled_tools: [bool; 3],
+    cutoff: &str,
+    timezone: Tz,
+    deadline: Instant,
+    options: ScanOptions,
+    checkpoint: &mut EnumerationCheckpoint,
+    readers: &mut [Vec<OpenDirectory>; 3],
+    is_current: impl Fn() -> bool,
 ) -> (Vec<CandidateFile>, bool) {
     let mut candidates = Vec::new();
     let mut partial = false;
@@ -984,6 +1221,9 @@ fn collect_candidates<Tz: TimeZone>(
     ];
     let mut active = [false; 3];
     for i in 0..3 {
+        if !is_current() {
+            return (candidates, true);
+        }
         let walk = &mut checkpoint.walks[i];
         let root = roots[i].filter(|_| enabled_tools[i]);
         if walk.root.as_deref() != root
@@ -1025,7 +1265,8 @@ fn collect_candidates<Tz: TimeZone>(
     }
 
     while active.iter().any(|active| *active) {
-        if Instant::now() >= deadline
+        if !is_current()
+            || Instant::now() >= deadline
             || entries_seen >= options.max_entries
             || candidates.len() >= options.max_files
         {
@@ -1162,7 +1403,17 @@ fn scan_file<Tz: TimeZone + Copy>(
 
     let revision_changed =
         checkpoint.offset > 0 && checkpoint.source_modified_nanos != current_revision;
-    if (checkpoint.offset > 0 && checkpoint.source_modified_nanos == 0)
+    if checkpoint.pending_line.len() > MAX_LINE_BYTES
+        || checkpoint.pending_line.len() as u64 > checkpoint.offset
+        || checkpoint.pending_line_start_offset.is_some_and(|start| {
+            start > checkpoint.offset
+                || checkpoint.offset - start > MAX_LINE_BYTES as u64
+                || (!checkpoint.pending_line.is_empty()
+                    && checkpoint.pending_line.len() as u64 != checkpoint.offset - start)
+        })
+        || (checkpoint.discarding_line && !checkpoint.pending_line.is_empty())
+        || (checkpoint.discarding_line && checkpoint.pending_line_start_offset.is_some())
+        || (checkpoint.offset > 0 && checkpoint.source_modified_nanos == 0)
         || (revision_changed && checkpoint.prefix_digest.is_none())
         || (revision_changed && current_len <= checkpoint.observed_len)
         || checkpoint.offset > current_len
@@ -1174,69 +1425,104 @@ fn scan_file<Tz: TimeZone + Copy>(
         invalidate_prefix_proof(checkpoint);
     }
 
-    if checkpoint.offset == current_len {
+    if let Some(start_offset) = restore_line_continuation(
+        checkpoint.continuation_identity(path),
+        checkpoint.pending_line_start_offset,
+        &mut checkpoint.pending_line,
+    ) {
+        checkpoint.offset = start_offset;
+        checkpoint.pending_line_start_offset = None;
+        checkpoint.tail_fingerprint = fingerprint_before(path, start_offset)?;
+    }
+
+    if checkpoint.offset == current_len && checkpoint.pending_line.is_empty() {
         checkpoint.observed_len = current_len;
         checkpoint.modified_millis = current_modified;
         checkpoint.source_modified_nanos = current_revision;
         checkpoint.tail_fingerprint = fingerprint_before(path, checkpoint.offset)?;
         checkpoint.prune(cutoff);
+        remember_line_continuation(
+            checkpoint.continuation_identity(path),
+            None,
+            &mut checkpoint.pending_line,
+        );
         return validate_scanned_prefix(path, checkpoint, prefix_proof, deadline, byte_budget);
     }
 
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(checkpoint.offset))?;
-    let mut reader = BufReader::new(file.take(current_len - checkpoint.offset));
+    let mut reader = BufReader::new(file.take((current_len - checkpoint.offset).min(byte_budget)));
     let mut bytes_read = 0u64;
     let mut incomplete = false;
     let mut lossy = false;
-    let mut buffer = Vec::with_capacity(16 * 1024);
 
     loop {
         if Instant::now() >= deadline || bytes_read >= byte_budget {
             incomplete = true;
             break;
         }
-        let line_start = checkpoint.offset;
-        let line = read_bounded_line(&mut reader, &mut buffer, MAX_LINE_BYTES)?;
-        if line.consumed == 0 {
+        let line_start = checkpoint
+            .offset
+            .saturating_sub(checkpoint.pending_line.len() as u64);
+        if !checkpoint.discarding_line {
+            checkpoint.pending_line_start_offset = Some(line_start);
+        }
+        let line = read_bounded_line(
+            &mut reader,
+            &mut checkpoint.pending_line,
+            MAX_LINE_BYTES,
+            byte_budget.saturating_sub(bytes_read),
+            deadline,
+            checkpoint.discarding_line,
+        )?;
+        if line.consumed == 0 && checkpoint.pending_line.is_empty() {
+            checkpoint.pending_line_start_offset = None;
+            incomplete |= line.interrupted;
             break;
         }
         bytes_read = bytes_read.saturating_add(line.consumed as u64);
+        checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
 
         if line.overflow {
-            checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
+            checkpoint.discarding_line = !line.terminated;
+            checkpoint.pending_line_start_offset = None;
             checkpoint.prefix_digest = None;
+            checkpoint.prefix_needs_validation = false;
+            checkpoint.prefix_validation = None;
             checkpoint.anonymous_source_verified = false;
             checkpoint.lossy = true;
             lossy = true;
             continue;
         }
+        if line.interrupted {
+            incomplete = true;
+            break;
+        }
 
+        let buffer = std::mem::take(&mut checkpoint.pending_line);
         let contents = trim_line_ending(&buffer);
         let parsed = serde_json::from_slice::<Value>(contents);
         match parsed {
-            Ok(value) => {
-                match checkpoint.tool {
-                    ActivityTool::Claude => {
-                        apply_claude_line(checkpoint, &value, cutoff, timezone, line_start)
-                    }
-                    ActivityTool::Codex => apply_codex_line(checkpoint, &value, cutoff, timezone),
-                    ActivityTool::Grok => {
-                        apply_grok_line(checkpoint, &value, cutoff, timezone, line_start)
-                    }
+            Ok(value) => match checkpoint.tool {
+                ActivityTool::Claude => {
+                    apply_claude_line(checkpoint, &value, cutoff, timezone, line_start)
                 }
-                checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
-            }
+                ActivityTool::Codex => apply_codex_line(checkpoint, &value, cutoff, timezone),
+                ActivityTool::Grok => {
+                    apply_grok_line(checkpoint, &value, cutoff, timezone, line_start)
+                }
+            },
             Err(_) if line.terminated => {
-                checkpoint.offset = checkpoint.offset.saturating_add(line.consumed as u64);
                 checkpoint.lossy = true;
                 lossy = true;
             }
             Err(_) => {
+                checkpoint.pending_line = buffer;
                 incomplete = true;
                 break;
             }
         }
+        checkpoint.pending_line_start_offset = None;
         // A chained digest covers every consumed byte without rereading large logs.
         checkpoint.prefix_digest = checkpoint.prefix_digest.map(|previous| {
             let mut hasher = Sha256::new();
@@ -1274,6 +1560,11 @@ fn scan_file<Tz: TimeZone + Copy>(
     checkpoint.source_modified_nanos = modified_nanos(&observed_metadata);
     checkpoint.tail_fingerprint = fingerprint_before(path, checkpoint.offset)?;
     checkpoint.prune(cutoff);
+    remember_line_continuation(
+        checkpoint.continuation_identity(path),
+        checkpoint.pending_line_start_offset,
+        &mut checkpoint.pending_line,
+    );
     let validation = validate_scanned_prefix(
         path,
         checkpoint,
@@ -1292,8 +1583,33 @@ fn scan_file<Tz: TimeZone + Copy>(
 
 fn invalidate_prefix_proof(checkpoint: &mut FileCheckpoint) {
     checkpoint.anonymous_source_verified = false;
+    let interrupted_validation = checkpoint.prefix_validation.take().is_some();
+    if checkpoint.offset > EAGER_PREFIX_VALIDATION_BYTES
+        && (!checkpoint.prefix_needs_validation || interrupted_validation)
+    {
+        let backoff = if interrupted_validation {
+            checkpoint
+                .prefix_validation_backoff_millis
+                .saturating_mul(2)
+        } else {
+            PREFIX_VALIDATION_RETRY_MILLIS
+        };
+        checkpoint.prefix_validation_backoff_millis = backoff.clamp(
+            PREFIX_VALIDATION_RETRY_MILLIS,
+            MAX_PREFIX_VALIDATION_RETRY_MILLIS,
+        );
+        checkpoint.prefix_validation_retry_after_millis =
+            validation_clock_millis().saturating_add(checkpoint.prefix_validation_backoff_millis);
+    }
     checkpoint.prefix_needs_validation = checkpoint.prefix_digest.is_some();
-    checkpoint.prefix_validation = None;
+}
+
+fn validation_clock_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn validate_scanned_prefix(
@@ -1306,14 +1622,23 @@ fn validate_scanned_prefix(
     if !checkpoint.prefix_needs_validation {
         return Ok(ScanProgress::default());
     }
+    // Unproved contributions remain partial, but deferred integrity work alone
+    // must not keep the caller's immediate backfill loop running on an active log.
+    let now_millis = validation_clock_millis();
+    let retry_after = checkpoint.prefix_validation_retry_after_millis;
+    if retry_after > now_millis && retry_after - now_millis <= MAX_PREFIX_VALIDATION_RETRY_MILLIS {
+        return Ok(ScanProgress::default());
+    }
+    let deadline = deadline.min(Instant::now() + MAX_PREFIX_VALIDATION_DURATION);
+    let byte_budget = byte_budget.min(MAX_PREFIX_VALIDATION_BYTES_PER_PASS);
     if Instant::now() >= deadline || byte_budget == 0 {
         return Ok(ScanProgress {
             incomplete: true,
             ..ScanProgress::default()
         });
     }
-    // Collection keeps advancing on append; only this bounded proof restarts.
-    if checkpoint.offset < checkpoint.observed_len {
+    if checkpoint.offset < checkpoint.observed_len || checkpoint.pending_line_start_offset.is_some()
+    {
         return Ok(ScanProgress {
             incomplete: true,
             ..ScanProgress::default()
@@ -1335,6 +1660,14 @@ fn validate_scanned_prefix(
             validation.target_offset == checkpoint.offset
                 && validation.source_modified_nanos == revision
                 && validation.offset <= validation.target_offset
+                && validation.pending_line.len() <= MAX_LINE_BYTES
+                && validation.pending_line.len() as u64 <= validation.offset
+                && validation.pending_line_start_offset.is_none_or(|start| {
+                    start <= validation.offset
+                        && validation.offset - start <= MAX_LINE_BYTES as u64
+                        && (validation.pending_line.is_empty()
+                            || validation.pending_line.len() as u64 == validation.offset - start)
+                })
         })
         .unwrap_or(PrefixValidation {
             offset: 0,
@@ -1342,19 +1675,48 @@ fn validate_scanned_prefix(
             target_offset: checkpoint.offset,
             source_modified_nanos: revision,
             legacy_prefix_matches: false,
+            pending_line: Vec::new(),
+            pending_line_start_offset: None,
         });
+    if let Some(start_offset) = restore_line_continuation(
+        validation.continuation_identity(path),
+        validation.pending_line_start_offset,
+        &mut validation.pending_line,
+    ) {
+        validation.offset = start_offset;
+        validation.pending_line_start_offset = None;
+    }
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(validation.offset))?;
-    let mut reader = BufReader::new(file.take(validation.target_offset - validation.offset));
-    let mut buffer = Vec::new();
+    let mut reader =
+        BufReader::new(file.take((validation.target_offset - validation.offset).min(byte_budget)));
     let mut bytes_read = 0u64;
-    while validation.offset < validation.target_offset {
+    while validation.offset < validation.target_offset || !validation.pending_line.is_empty() {
         if Instant::now() >= deadline || bytes_read >= byte_budget {
             break;
         }
-        let line = read_bounded_line(&mut reader, &mut buffer, MAX_LINE_BYTES)?;
+        validation.pending_line_start_offset = Some(
+            validation
+                .offset
+                .saturating_sub(validation.pending_line.len() as u64),
+        );
+        let line = read_bounded_line(
+            &mut reader,
+            &mut validation.pending_line,
+            MAX_LINE_BYTES,
+            byte_budget.saturating_sub(bytes_read),
+            deadline,
+            false,
+        )?;
         bytes_read = bytes_read.saturating_add(line.consumed as u64);
-        if line.overflow || line.consumed == 0 {
+        if line.overflow
+            || (line.consumed == 0 && validation.pending_line.is_empty() && !line.interrupted)
+        {
+            remember_line_continuation(
+                validation.continuation_identity(path),
+                None,
+                &mut Vec::new(),
+            );
             *checkpoint = FileCheckpoint::new(checkpoint.tool);
             return Ok(ScanProgress {
                 incomplete: true,
@@ -1363,10 +1725,15 @@ fn validate_scanned_prefix(
             });
         }
         validation.offset = validation.offset.saturating_add(line.consumed as u64);
+        if line.interrupted {
+            break;
+        }
         let mut hasher = Sha256::new();
         hasher.update(validation.digest);
-        hasher.update(&buffer);
+        hasher.update(&validation.pending_line);
         validation.digest = hasher.finalize().into();
+        validation.pending_line.clear();
+        validation.pending_line_start_offset = None;
         if let Some((offset, digest)) = prefix_proof {
             if validation.offset == offset {
                 validation.legacy_prefix_matches = validation.digest == digest;
@@ -1375,14 +1742,25 @@ fn validate_scanned_prefix(
     }
     let after = fs::metadata(path)?;
     if after.len() != before.len() || modified_nanos(&after) != revision {
-        checkpoint.prefix_validation = None;
+        remember_line_continuation(
+            validation.continuation_identity(path),
+            None,
+            &mut Vec::new(),
+        );
+        checkpoint.prefix_validation = Some(validation);
+        invalidate_prefix_proof(checkpoint);
         return Ok(ScanProgress {
             incomplete: true,
             bytes_read,
             ..ScanProgress::default()
         });
     }
-    if validation.offset < validation.target_offset {
+    if validation.offset < validation.target_offset || !validation.pending_line.is_empty() {
+        remember_line_continuation(
+            validation.continuation_identity(path),
+            validation.pending_line_start_offset,
+            &mut validation.pending_line,
+        );
         checkpoint.prefix_validation = Some(validation);
         return Ok(ScanProgress {
             incomplete: true,
@@ -1390,6 +1768,11 @@ fn validate_scanned_prefix(
             ..ScanProgress::default()
         });
     }
+    remember_line_continuation(
+        validation.continuation_identity(path),
+        None,
+        &mut Vec::new(),
+    );
     if checkpoint.prefix_digest != Some(validation.digest) {
         *checkpoint = FileCheckpoint::new(checkpoint.tool);
         return Ok(ScanProgress {
@@ -1399,6 +1782,8 @@ fn validate_scanned_prefix(
         });
     }
     checkpoint.prefix_needs_validation = false;
+    checkpoint.prefix_validation_retry_after_millis = 0;
+    checkpoint.prefix_validation_backoff_millis = 0;
     checkpoint.anonymous_source_verified = validation.legacy_prefix_matches;
     Ok(ScanProgress {
         bytes_read,
@@ -1410,28 +1795,53 @@ struct BoundedLine {
     consumed: usize,
     terminated: bool,
     overflow: bool,
+    interrupted: bool,
 }
 
 fn read_bounded_line<R: BufRead>(
     reader: &mut R,
     output: &mut Vec<u8>,
     max_bytes: usize,
+    byte_budget: u64,
+    deadline: Instant,
+    discarding: bool,
 ) -> std::io::Result<BoundedLine> {
-    output.clear();
+    let initial_len = output.len();
+    let mut overflow_buffer = None;
     let mut consumed = 0usize;
     let mut terminated = false;
-    let mut overflow = false;
+    let mut overflow = discarding;
+    let mut interrupted = false;
 
     loop {
-        let available = reader.fill_buf()?;
+        if consumed as u64 >= byte_budget || Instant::now() >= deadline {
+            interrupted = true;
+            break;
+        }
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(err) => {
+                // The caller has not committed this call's offset on I/O error.
+                if let Some(buffer) = overflow_buffer {
+                    *output = buffer;
+                }
+                output.truncate(initial_len);
+                return Err(err);
+            }
+        };
         if available.is_empty() {
             break;
         }
+        let remaining = (byte_budget - consumed as u64).min(usize::MAX as u64) as usize;
+        let available = &available[..available.len().min(remaining)];
         let newline = available.iter().position(|byte| *byte == b'\n');
         let take = newline.map_or(available.len(), |position| position + 1);
         if !overflow && output.len().saturating_add(take) <= max_bytes {
             output.extend_from_slice(&available[..take]);
         } else {
+            if !overflow {
+                overflow_buffer = Some(std::mem::take(output));
+            }
             overflow = true;
         }
         reader.consume(take);
@@ -1446,6 +1856,7 @@ fn read_bounded_line<R: BufRead>(
         consumed,
         terminated,
         overflow,
+        interrupted,
     })
 }
 
@@ -1686,7 +2097,8 @@ fn snapshot_from_index(
             continue;
         }
         let current = index.files.get(file_key).filter(|_| legacy);
-        let current_consumed = current.is_some_and(|current| current.offset > 0);
+        let current_consumed = current
+            .is_some_and(|current| current.pending_line_start_offset.unwrap_or(current.offset) > 0);
         let current_anonymous = current.is_some_and(has_anonymous_contributions);
         if checkpoint.tool == ActivityTool::Claude && !aggregate_only {
             for (message_id, contribution) in &checkpoint.claude_messages {
@@ -1935,6 +2347,1272 @@ mod tests {
             codex: Some(root.join("codex")),
             grok: Some(root.join("grok")),
         }
+    }
+
+    #[test]
+    fn g3264_unread_checkpoint_survives_batches_and_finishes_enumeration() {
+        let root = temp_root("g3264-unread-enumeration");
+        let roots = roots(&root);
+        let claude = roots.claude.as_ref().unwrap();
+        fs::create_dir_all(claude).unwrap();
+        let first = claude.join("a.jsonl");
+        let second = claude.join("b.jsonl");
+        let discovered = claude.join("c.jsonl");
+        let prefix = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(256));
+        let event = |id: &str, tokens: u64| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "message": {"id": id, "usage": {"input_tokens": tokens}}
+                })
+            )
+        };
+        fs::write(&first, prefix.repeat(4) + &event("g3264-first", 17)).unwrap();
+        fs::write(&second, &prefix).unwrap();
+        fs::write(&discovered, event("g3264-discovered", 11)).unwrap();
+        let path = root.join("index.json");
+        let mut index = ActivityIndex::new(540);
+        index.enumeration.walks[0].root = roots.claude.clone();
+        index.enumeration.pending = [&first, &second]
+            .into_iter()
+            .map(|source| CandidateFile {
+                path: source.clone(),
+                key: source.to_string_lossy().into_owned(),
+                tool: ActivityTool::Claude,
+                modified_millis: modified_millis(&fs::metadata(source).unwrap()),
+            })
+            .collect();
+        save_index(&path, &index).unwrap();
+        let options = ScanOptions {
+            max_bytes: (prefix.len() * 2) as u64,
+            ..options()
+        };
+        let refresh = || {
+            refresh_at(
+                &path,
+                &roots,
+                true,
+                false,
+                false,
+                Utc::now(),
+                kst(),
+                options,
+            )
+            .unwrap()
+        };
+        refresh();
+        let key = first.to_string_lossy().into_owned();
+        let before = load_index(&path, 540).0.files[&key].clone();
+        assert_eq!(before.offset, options.max_bytes);
+        assert!(before.offset < before.observed_len);
+        assert!(before.pending_line_start_offset.is_none());
+        assert!(before.claude_messages.is_empty());
+        assert!(refresh().local_backfill_pending);
+        assert_eq!(load_index(&path, 540).0.files.get(&key), Some(&before));
+
+        let mut complete = false;
+        for _ in 0..12 {
+            let snapshot = refresh();
+            let total: u64 = snapshot.days.iter().map(|day| day.claude_tokens).sum();
+            assert!(load_index(&path, 540).0.files[&key].offset >= before.offset);
+            if total == 28 && !snapshot.local_backfill_pending {
+                complete = true;
+                break;
+            }
+        }
+        assert!(
+            complete,
+            "unread and newly enumerated files must both finish"
+        );
+        assert_eq!(
+            refresh()
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            28
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3264_unread_retention_expires_without_preserving_empty_proofs() {
+        let root = temp_root("g3264-unread-retention");
+        let roots = roots(&root);
+        let source = root.join("synthetic.jsonl");
+        let line = "{\"padding\":1}\n";
+        fs::write(&source, line.repeat(2)).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2000-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            line.len() as u64,
+            None,
+        )
+        .unwrap();
+        assert!(checkpoint.offset < checkpoint.observed_len);
+        checkpoint.prefix_needs_validation = true;
+        let key = source.to_string_lossy().into_owned();
+        let path = root.join("index.json");
+        let mut index = ActivityIndex::new(540);
+        index.files.insert(key.clone(), checkpoint.clone());
+        save_index(&path, &index).unwrap();
+        let current = Utc::now();
+        let disabled =
+            |time| refresh_at(&path, &roots, false, false, false, time, kst(), options()).unwrap();
+        assert!(!disabled(current).backfill_pending);
+        assert_eq!(load_index(&path, 540).0.files.get(&key), Some(&checkpoint));
+        assert!(!disabled(current + ChronoDuration::days(RETENTION_DAYS)).partial);
+        assert!(load_index(&path, 540).0.files.is_empty());
+
+        checkpoint.offset = checkpoint.observed_len;
+        index.files.insert(key, checkpoint);
+        save_index(&path, &index).unwrap();
+        assert!(!disabled(current).partial);
+        assert!(load_index(&path, 540).0.files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_local_activity_pass_cannot_touch_its_index_or_enumerate() {
+        let root = temp_root("retired-local-pass");
+        let path = root.join("index.json");
+        let policy = crate::LocalActivityPolicy::from_settings(
+            &crate::Settings {
+                show_claude: true,
+                ..crate::Settings::default()
+            },
+            u64::MAX,
+        );
+        let error = refresh_in_timezone_checked(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            ActivityTimezoneIdentity::Fixed {
+                offset_seconds: 540 * 60,
+            },
+            options(),
+            || panic!("a retired pass cannot start the scan"),
+            Some(policy),
+        )
+        .unwrap_err();
+        assert!(error.is::<crate::collection_admission::PolicyCancelled>());
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_index_stage_keeps_the_previous_file_and_cleans_up() {
+        let root = temp_root("cancel-index-stage");
+        let path = root.join("index.json");
+        fs::write(&path, b"previous index").unwrap();
+        let index = ActivityIndex::new(540);
+        let staged = stage_index(&path, &index).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"previous index");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        drop(staged);
+        assert_eq!(fs::read(&path).unwrap(), b"previous index");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        stage_index(&path, &index).unwrap().publish().unwrap();
+        assert_ne!(fs::read(&path).unwrap(), b"previous index");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_pending_eof_stays_partial_until_retention_expires() {
+        let root = temp_root("missing-pending-eof");
+        let roots = roots(&root);
+        let path = root.join("index.json");
+        let source = root.join("unfinished.jsonl");
+        fs::write(&source, b"{\"message\":").unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        let progress = scan_file(
+            &source,
+            &mut checkpoint,
+            "2000-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            1024,
+            None,
+        )
+        .unwrap();
+        assert!(progress.incomplete);
+        assert_eq!(checkpoint.offset, checkpoint.observed_len);
+        assert!(checkpoint.pending_line_start_offset.is_some());
+        let now = Utc::now();
+        let mut index = ActivityIndex::new(540);
+        index
+            .files
+            .insert(source.to_string_lossy().into_owned(), checkpoint);
+        let mut discard = FileCheckpoint::new(ActivityTool::Claude);
+        discard.modified_millis = now.timestamp_millis() as u64;
+        discard.discarding_line = true;
+        index.files.insert("synthetic-discard".into(), discard);
+        save_index(&path, &index).unwrap();
+        fs::remove_file(source).unwrap();
+
+        let refresh =
+            |time| refresh_at(&path, &roots, true, false, false, time, kst(), options()).unwrap();
+        let missing = refresh(now);
+        assert!(missing.local_partial);
+        assert!(!missing.local_backfill_pending);
+        assert_eq!(load_index(&path, 540).0.files.len(), 2);
+        let expired = refresh(now + ChronoDuration::days(RETENTION_DAYS + 1));
+        assert!(!expired.local_partial);
+        assert!(load_index(&path, 540).0.files.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3264_unseen_unread_proof_preserves_backoff_without_retention_io() {
+        let root = temp_root("g3264-unread-backoff");
+        let roots = roots(&root);
+        let source = root.join("synthetic.jsonl");
+        let line = "{\"padding\":1}\n";
+        fs::write(&source, line.repeat(2)).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2000-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            line.len() as u64,
+            None,
+        )
+        .unwrap();
+        checkpoint.prefix_needs_validation = true;
+        checkpoint.prefix_validation_retry_after_millis =
+            validation_clock_millis() + MAX_PREFIX_VALIDATION_RETRY_MILLIS;
+        let deferred = validate_scanned_prefix(
+            &source,
+            &mut checkpoint,
+            None,
+            Instant::now() + Duration::from_secs(2),
+            1024,
+        )
+        .unwrap();
+        assert!(!deferred.incomplete && deferred.bytes_read == 0);
+        let path = root.join("index.json");
+        let mut index = ActivityIndex::new(540);
+        index
+            .files
+            .insert(source.to_string_lossy().into_owned(), checkpoint);
+        save_index(&path, &index).unwrap();
+        for missing in [false, true] {
+            if missing {
+                fs::remove_file(&source).unwrap();
+            }
+            let snapshot = refresh_at(
+                &path,
+                &roots,
+                true,
+                false,
+                false,
+                Utc::now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(load_index(&path, 540).0.files.len(), 1);
+            assert!(snapshot.partial && !snapshot.backfill_pending);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_line_scan_respects_byte_budget() {
+        let root = temp_root("g3262-byte-budget");
+        let source = root.join("session.jsonl");
+        fs::write(&source, vec![b'x'; MAX_LINE_BYTES + 1024]).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        let progress = scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            1024,
+            None,
+        )
+        .unwrap();
+        assert!(
+            progress.bytes_read <= 1024,
+            "read {} bytes",
+            progress.bytes_read
+        );
+        assert!(progress.incomplete);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_active_append_defers_repeated_prefix_reads() {
+        let root = temp_root("g3262-active-append");
+        let source = root.join("session.jsonl");
+        fs::write(&source, "{}\n".repeat(24_000)).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        for step in 1..=3 {
+            OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .unwrap()
+                .write_all(b"{}\n")
+                .unwrap();
+            File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_modified(SystemTime::now() + Duration::from_secs(step))
+                .unwrap();
+            let progress = scan_file(
+                &source,
+                &mut checkpoint,
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                16 * 1024,
+                None,
+            )
+            .unwrap();
+            assert_eq!(checkpoint.offset, fs::metadata(&source).unwrap().len());
+            assert_eq!(progress.bytes_read, 3, "append must not rehash the prefix");
+            assert!(
+                !progress.incomplete,
+                "deferred proof must not drive immediate backfill"
+            );
+            assert!(checkpoint.prefix_needs_validation);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_partial_normal_lines_resume_after_serialized_checkpoints() {
+        for tool in [ActivityTool::Claude, ActivityTool::Grok] {
+            let root = temp_root("g3262-partial-line");
+            let source = root.join("session.jsonl");
+            let first = anonymous_event(tool, 10);
+            let second = anonymous_event(tool, 17);
+            fs::write(&source, first.clone() + second.trim_end()).unwrap();
+            let mut checkpoint = FileCheckpoint::new(tool);
+            let mut complete = false;
+            for _ in 0..256 {
+                let progress = scan_file(
+                    &source,
+                    &mut checkpoint,
+                    "2026-01-01",
+                    kst(),
+                    Instant::now() + Duration::from_secs(2),
+                    7,
+                    None,
+                )
+                .unwrap();
+                assert!(progress.bytes_read <= 7);
+                checkpoint =
+                    serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+                if !progress.incomplete {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(complete);
+            assert!(checkpoint.pending_line.is_empty());
+            assert!(!checkpoint.lossy);
+            assert_eq!(
+                checkpoint_history_days(&checkpoint, "")
+                    .values()
+                    .sum::<u64>(),
+                27
+            );
+            match tool {
+                ActivityTool::Claude => assert!(checkpoint
+                    .claude_messages
+                    .contains_key(&format!("offset:{}", first.len()))),
+                ActivityTool::Grok => assert!(checkpoint
+                    .grok_responses
+                    .contains_key(&format!("offset:{}", first.len()))),
+                ActivityTool::Codex => unreachable!(),
+            }
+            let mut unbounded = FileCheckpoint::new(tool);
+            scan_file(
+                &source,
+                &mut unbounded,
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+            assert_eq!(checkpoint.prefix_digest, unbounded.prefix_digest);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn g3262_oversize_drain_survives_restart_and_keeps_the_next_record() {
+        let root = temp_root("g3262-drain-resume");
+        let source = root.join("session.jsonl");
+        let mut contents = vec![b'x'; MAX_LINE_BYTES + 1];
+        contents.extend_from_slice(anonymous_event(ActivityTool::Claude, 999).as_bytes());
+        let next_offset = contents.len();
+        contents.extend_from_slice(anonymous_event(ActivityTool::Claude, 17).as_bytes());
+        fs::write(&source, &contents).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        let mut saw_drain = false;
+        for _ in 0..12 {
+            let progress = scan_file(
+                &source,
+                &mut checkpoint,
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                1024 * 1024 + 1,
+                None,
+            )
+            .unwrap();
+            assert!(progress.bytes_read <= 1024 * 1024 + 1);
+            saw_drain |= checkpoint.discarding_line;
+            if checkpoint.discarding_line {
+                assert!(checkpoint.pending_line.is_empty());
+                assert!(checkpoint.pending_line_start_offset.is_none());
+                forget_test_line_continuations(&source);
+            }
+            checkpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            if !progress.incomplete {
+                break;
+            }
+        }
+        assert!(saw_drain);
+        assert_eq!(checkpoint.offset, contents.len() as u64);
+        assert!(checkpoint.lossy && !checkpoint.discarding_line);
+        assert!(checkpoint.pending_line.is_empty());
+        assert_eq!(checkpoint.claude_messages.len(), 1);
+        assert_eq!(
+            checkpoint.claude_messages[&format!("offset:{next_offset}")].tokens,
+            17
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_line_reader_checks_deadline_while_draining() {
+        struct SlowReader(std::io::Cursor<Vec<u8>>, usize);
+        impl Read for SlowReader {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(output)
+            }
+        }
+        impl BufRead for SlowReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                self.1 += 1;
+                std::thread::sleep(Duration::from_millis(2));
+                let available = self.0.fill_buf()?;
+                Ok(&available[..available.len().min(1024)])
+            }
+            fn consume(&mut self, amount: usize) {
+                self.0.consume(amount);
+            }
+        }
+        let mut reader = SlowReader(std::io::Cursor::new(vec![b'x'; 1024 * 1024]), 0);
+        let line = read_bounded_line(
+            &mut reader,
+            &mut Vec::new(),
+            16,
+            u64::MAX,
+            Instant::now() + Duration::from_millis(5),
+            false,
+        )
+        .unwrap();
+        assert!(line.interrupted && line.overflow && !line.terminated);
+        assert!(line.consumed < 1024 * 1024);
+        assert!(reader.1 <= 3);
+    }
+
+    #[test]
+    fn g3262_prefix_validation_resumes_partial_lines_without_early_certification() {
+        let root = temp_root("g3262-proof-partial-line");
+        let source = root.join("session.jsonl");
+        fs::write(&source, anonymous_event(ActivityTool::Claude, 10)).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        let proof = Some((checkpoint.offset, checkpoint.prefix_digest.unwrap()));
+        invalidate_prefix_proof(&mut checkpoint);
+        let mut complete = false;
+        for _ in 0..256 {
+            let progress = validate_scanned_prefix(
+                &source,
+                &mut checkpoint,
+                proof,
+                Instant::now() + Duration::from_secs(2),
+                7,
+            )
+            .unwrap();
+            assert!(progress.bytes_read <= 7);
+            if progress.incomplete {
+                assert!(checkpoint.prefix_needs_validation);
+                assert!(!checkpoint.anonymous_source_verified);
+            } else {
+                complete = true;
+                break;
+            }
+            checkpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        }
+        assert!(complete);
+        assert!(checkpoint.anonymous_source_verified && !checkpoint.prefix_needs_validation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_interrupted_large_proof_backs_off_and_quiet_rewrite_is_detected() {
+        let root = temp_root("g3262-proof-backoff");
+        let source = root.join("session.jsonl");
+        let original = anonymous_event(ActivityTool::Claude, 10) + &"{}\n".repeat(24_000);
+        fs::write(&source, &original).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        let proof = Some((checkpoint.offset, checkpoint.prefix_digest.unwrap()));
+        invalidate_prefix_proof(&mut checkpoint);
+        assert!(checkpoint.prefix_validation_retry_after_millis > validation_clock_millis());
+        for step in 1..=7 {
+            checkpoint.prefix_validation_retry_after_millis = 0;
+            let progress = validate_scanned_prefix(
+                &source,
+                &mut checkpoint,
+                proof,
+                Instant::now() + Duration::from_secs(2),
+                1024,
+            )
+            .unwrap();
+            assert!(progress.incomplete && progress.bytes_read <= 1024);
+            assert!(checkpoint.prefix_validation.is_some());
+            OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .unwrap()
+                .write_all(b"{}\n")
+                .unwrap();
+            File::options()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .set_modified(SystemTime::now() + Duration::from_secs(step))
+                .unwrap();
+            let progress = scan_file(
+                &source,
+                &mut checkpoint,
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                4096,
+                proof,
+            )
+            .unwrap();
+            assert_eq!(progress.bytes_read, 3);
+            assert!(!progress.incomplete);
+            assert!(!checkpoint.anonymous_source_verified);
+            assert_eq!(
+                checkpoint.prefix_validation_backoff_millis,
+                (PREFIX_VALIDATION_RETRY_MILLIS << step).min(MAX_PREFIX_VALIDATION_RETRY_MILLIS)
+            );
+            checkpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        }
+        let old_tail = checkpoint.tail_fingerprint;
+        let changed = anonymous_event(ActivityTool::Claude, 90)
+            + &"{}\n".repeat(24_007)
+            + &anonymous_event(ActivityTool::Claude, 40);
+        fs::write(&source, changed).unwrap();
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(
+            old_tail,
+            fingerprint_before(&source, checkpoint.offset).unwrap()
+        );
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            4096,
+            proof,
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint_history_days(&checkpoint, "")
+                .values()
+                .sum::<u64>(),
+            50
+        );
+        assert!(checkpoint.prefix_needs_validation && !checkpoint.anonymous_source_verified);
+        checkpoint.prefix_validation_retry_after_millis = 0;
+        let mut reset = false;
+        for _ in 0..16 {
+            scan_file(
+                &source,
+                &mut checkpoint,
+                "2026-01-01",
+                kst(),
+                Instant::now() + Duration::from_secs(2),
+                16 * 1024,
+                proof,
+            )
+            .unwrap();
+            assert!(!checkpoint.anonymous_source_verified);
+            if checkpoint.offset == 0 {
+                reset = true;
+                break;
+            }
+        }
+        assert!(reset, "quiet full proof must detect the changed old prefix");
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            proof,
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint_history_days(&checkpoint, "")
+                .values()
+                .sum::<u64>(),
+            130
+        );
+        assert!(!checkpoint.anonymous_source_verified);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_deferred_proof_snapshot_stays_partial_without_hot_backfill() {
+        let root = temp_root("g3262-proof-snapshot");
+        let folder = root.join("claude");
+        fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("session.jsonl");
+        fs::write(
+            &source,
+            anonymous_event(ActivityTool::Claude, 10) + &"{}\n".repeat(24_000),
+        )
+        .unwrap();
+        let path = root.join("index.json");
+        refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap()
+            .write_all(anonymous_event(ActivityTool::Claude, 17).as_bytes())
+            .unwrap();
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(1))
+            .unwrap();
+        let result = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            options(),
+        )
+        .unwrap();
+        assert!(result.local_partial && !result.local_backfill_pending);
+        assert_eq!(result.days[0].claude_tokens, 27);
+        let (mut index, _) = load_index(&path, 540);
+        let checkpoint = index.files.values_mut().next().unwrap();
+        assert!(checkpoint.prefix_needs_validation && !checkpoint.anonymous_source_verified);
+        checkpoint.prefix_validation_retry_after_millis = 0;
+        save_index(&path, &index).unwrap();
+        let mut complete = false;
+        for _ in 0..16 {
+            let result = refresh_at(
+                &path,
+                &roots(&root),
+                true,
+                false,
+                false,
+                now(),
+                kst(),
+                options(),
+            )
+            .unwrap();
+            assert_eq!(result.days[0].claude_tokens, 27);
+            if !result.local_partial {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "quiet full proof clears partial state");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_read_error_rolls_back_uncommitted_partial_bytes() {
+        struct FailingReader(bool);
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!()
+            }
+        }
+        impl BufRead for FailingReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.0 {
+                    Err(std::io::Error::other("synthetic read failure"))
+                } else {
+                    Ok(b"suffix")
+                }
+            }
+            fn consume(&mut self, _: usize) {
+                self.0 = true;
+            }
+        }
+        for max_bytes in [8, 32] {
+            let mut output = b"prefix".to_vec();
+            let result = read_bounded_line(
+                &mut FailingReader(false),
+                &mut output,
+                max_bytes,
+                u64::MAX,
+                Instant::now() + Duration::from_secs(2),
+                false,
+            );
+            assert!(result.is_err());
+            assert_eq!(output, b"prefix");
+        }
+    }
+
+    #[test]
+    fn g3262_existing_v3_checkpoints_default_new_resume_and_schedule_fields() {
+        let checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        for field in [
+            "pending_line",
+            "pending_line_start_offset",
+            "discarding_line",
+            "prefix_validation_retry_after_millis",
+            "prefix_validation_backoff_millis",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let loaded: FileCheckpoint = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded, checkpoint);
+    }
+
+    fn assert_no_private_body_in_index(path: &Path) {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        fn inspect(value: &Value) {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            const MARKER: &[u8] = b"SYNTHETIC_PRIVATE_BODY_G3262";
+            match value {
+                Value::String(text) => {
+                    assert!(!text
+                        .as_bytes()
+                        .windows(MARKER.len())
+                        .any(|part| part == MARKER));
+                    if let Ok(decoded) = STANDARD.decode(text) {
+                        assert!(
+                            !decoded.windows(MARKER.len()).any(|part| part == MARKER),
+                            "base64 body leaked into index"
+                        );
+                    }
+                }
+                Value::Array(values) => values.iter().for_each(inspect),
+                Value::Object(values) => {
+                    values.values().for_each(inspect);
+                    assert!(
+                        !values.contains_key("pending_line"),
+                        "raw continuation field must not be serialized"
+                    );
+                }
+                _ => {}
+            }
+        }
+        let contents = fs::read(path).unwrap();
+        let marker = b"SYNTHETIC_PRIVATE_BODY_G3262";
+        let encoded_marker = STANDARD.encode(marker);
+        assert!(!contents.windows(marker.len()).any(|part| part == marker));
+        assert!(!contents
+            .windows(encoded_marker.len())
+            .any(|part| part == encoded_marker.as_bytes()));
+        inspect(&serde_json::from_slice::<Value>(&contents).unwrap());
+    }
+
+    fn private_body_index_fixture(proof: bool) {
+        let root = temp_root("g3262-private-body");
+        let source = root.join("session.jsonl");
+        let contents = serde_json::json!({
+            "timestamp": "2026-07-19T01:00:00Z",
+            "message": {
+                "id": "private-message",
+                "content": "SYNTHETIC_PRIVATE_BODY_G3262".repeat(8),
+                "usage": { "input_tokens": 17 }
+            }
+        })
+        .to_string()
+            + "\n";
+        fs::write(&source, &contents).unwrap();
+        let budget = contents.find("SYNTHETIC_PRIVATE_BODY_G3262").unwrap() as u64 + 28;
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            if proof { u64::MAX } else { budget },
+            None,
+        )
+        .unwrap();
+        if proof {
+            invalidate_prefix_proof(&mut checkpoint);
+            validate_scanned_prefix(
+                &source,
+                &mut checkpoint,
+                None,
+                Instant::now() + Duration::from_secs(2),
+                budget,
+            )
+            .unwrap();
+        }
+        let mut index = ActivityIndex::new(540);
+        index
+            .legacy_files
+            .insert("retained.jsonl".into(), checkpoint.clone());
+        index
+            .files
+            .insert(source.to_string_lossy().into_owned(), checkpoint);
+        let path = root.join("index.json");
+        save_index(&path, &index).unwrap();
+        assert_no_private_body_in_index(&path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_collection_index_never_persists_private_body() {
+        private_body_index_fixture(false);
+    }
+
+    #[test]
+    fn g3262_proof_index_never_persists_private_body() {
+        private_body_index_fixture(true);
+    }
+
+    fn forget_test_line_continuations(path: &Path) {
+        LINE_CONTINUATIONS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .retain(|saved| saved.identity.path != path);
+    }
+
+    fn large_private_body_line() -> String {
+        serde_json::json!({
+            "timestamp": "2026-07-19T01:00:00Z",
+            "message": {
+                "content": "SYNTHETIC_PRIVATE_BODY_G3262".to_owned() + &"x".repeat(2 * 1024 * 1024),
+                "usage": { "input_tokens": 17 }
+            }
+        })
+        .to_string()
+            + "\n"
+    }
+
+    #[test]
+    fn g3262_cold_restart_rewinds_uncommitted_normal_line_without_duplication() {
+        let root = temp_root("g3262-cold-normal-line");
+        let source = root.join("session.jsonl");
+        let first = anonymous_event(ActivityTool::Claude, 10);
+        let contents = first.clone() + &large_private_body_line();
+        fs::write(&source, &contents).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            first.len() as u64 + 256,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint.pending_line_start_offset,
+            Some(first.len() as u64)
+        );
+        assert_eq!(
+            checkpoint_history_days(&checkpoint, "")
+                .values()
+                .sum::<u64>(),
+            10
+        );
+        let mut index = ActivityIndex::new(540);
+        let key = source.to_string_lossy().into_owned();
+        index.files.insert(key.clone(), checkpoint);
+        let path = root.join("index.json");
+        save_index(&path, &index).unwrap();
+        assert_no_private_body_in_index(&path);
+        forget_test_line_continuations(&source);
+        let mut cold = load_index(&path, 540).0.files.remove(&key).unwrap();
+        assert!(cold.pending_line.is_empty());
+        let progress = scan_file(
+            &source,
+            &mut cold,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(progress.bytes_read, 0);
+        assert_eq!(cold.offset, first.len() as u64);
+        assert_eq!(checkpoint_history_days(&cold, "").values().sum::<u64>(), 10);
+        let progress = scan_file(
+            &source,
+            &mut cold,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            MAX_FILE_BYTES_PER_PASS,
+            None,
+        )
+        .unwrap();
+        assert!(!progress.incomplete);
+        assert_eq!(progress.bytes_read, (contents.len() - first.len()) as u64);
+        assert_eq!(checkpoint_history_days(&cold, "").values().sum::<u64>(), 27);
+        assert_eq!(cold.claude_messages.len(), 2);
+        assert_eq!(
+            cold.claude_messages[&format!("offset:{}", first.len())].tokens,
+            17
+        );
+        let mut baseline = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut baseline,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            MAX_FILE_BYTES_PER_PASS,
+            None,
+        )
+        .unwrap();
+        assert_eq!(cold.prefix_digest, baseline.prefix_digest);
+        assert_eq!(cold.claude_messages, baseline.claude_messages);
+        scan_file(
+            &source,
+            &mut cold,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            MAX_FILE_BYTES_PER_PASS,
+            None,
+        )
+        .unwrap();
+        assert_eq!(checkpoint_history_days(&cold, "").values().sum::<u64>(), 27);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_cold_proof_rewinds_then_resumes_large_line_only_in_memory() {
+        let root = temp_root("g3262-cold-proof-line");
+        let source = root.join("session.jsonl");
+        let first = anonymous_event(ActivityTool::Claude, 10);
+        let contents = first.clone() + &large_private_body_line();
+        fs::write(&source, &contents).unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            MAX_FILE_BYTES_PER_PASS,
+            None,
+        )
+        .unwrap();
+        let proof = Some((checkpoint.offset, checkpoint.prefix_digest.unwrap()));
+        invalidate_prefix_proof(&mut checkpoint);
+        checkpoint.prefix_validation_retry_after_millis = 0;
+        validate_scanned_prefix(
+            &source,
+            &mut checkpoint,
+            proof,
+            Instant::now() + Duration::from_secs(2),
+            first.len() as u64 + 256,
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint
+                .prefix_validation
+                .as_ref()
+                .unwrap()
+                .pending_line_start_offset,
+            Some(first.len() as u64)
+        );
+        let mut index = ActivityIndex::new(540);
+        let key = source.to_string_lossy().into_owned();
+        index.files.insert(key.clone(), checkpoint);
+        let path = root.join("index.json");
+        save_index(&path, &index).unwrap();
+        assert_no_private_body_in_index(&path);
+        forget_test_line_continuations(&source);
+        let mut cold = load_index(&path, 540).0.files.remove(&key).unwrap();
+        assert!(cold
+            .prefix_validation
+            .as_ref()
+            .unwrap()
+            .pending_line
+            .is_empty());
+        let progress = validate_scanned_prefix(
+            &source,
+            &mut cold,
+            proof,
+            Instant::now() + Duration::from_secs(2),
+            7,
+        )
+        .unwrap();
+        assert_eq!(progress.bytes_read, 7);
+        assert_eq!(
+            cold.prefix_validation.as_ref().unwrap().offset,
+            first.len() as u64 + 7
+        );
+        assert!(cold.prefix_needs_validation && !cold.anonymous_source_verified);
+        let mut complete = false;
+        for _ in 0..16 {
+            cold = serde_json::from_slice(&serde_json::to_vec(&cold).unwrap()).unwrap();
+            assert!(cold
+                .prefix_validation
+                .as_ref()
+                .unwrap()
+                .pending_line
+                .is_empty());
+            let progress = validate_scanned_prefix(
+                &source,
+                &mut cold,
+                proof,
+                Instant::now() + Duration::from_secs(2),
+                u64::MAX,
+            )
+            .unwrap();
+            assert!(progress.bytes_read <= MAX_PREFIX_VALIDATION_BYTES_PER_PASS);
+            if !progress.incomplete {
+                complete = true;
+                break;
+            }
+            assert!(!cold.anonymous_source_verified);
+        }
+        assert!(complete);
+        assert!(cold.anonymous_source_verified && !cold.prefix_needs_validation);
+        assert_eq!(checkpoint_history_days(&cold, "").values().sum::<u64>(), 27);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_continuation_cache_enforces_entry_and_byte_caps() {
+        let mut cache = VecDeque::new();
+        for i in 0..MAX_LINE_CONTINUATIONS + 3 {
+            cache_line_continuation(
+                &mut cache,
+                LineContinuationIdentity {
+                    path: PathBuf::from(format!("synthetic-small-{i}")),
+                    offset: 1,
+                    source_modified_nanos: 1,
+                    digest: Some([0; 32]),
+                    proof_target: None,
+                },
+                Some(0),
+                b"x".to_vec(),
+            );
+        }
+        assert_eq!(cache.len(), MAX_LINE_CONTINUATIONS);
+        assert!(!cache
+            .iter()
+            .any(|saved| saved.identity.path == Path::new("synthetic-small-0")));
+        let bytes = vec![b'x'; MAX_LINE_BYTES];
+        for i in 0..5 {
+            cache_line_continuation(
+                &mut cache,
+                LineContinuationIdentity {
+                    path: PathBuf::from(format!("synthetic-large-{i}")),
+                    offset: MAX_LINE_BYTES as u64,
+                    source_modified_nanos: 1,
+                    digest: Some([0; 32]),
+                    proof_target: None,
+                },
+                Some(0),
+                bytes.clone(),
+            );
+            assert!(cache.len() <= MAX_LINE_CONTINUATIONS);
+            assert!(
+                cache.iter().map(|saved| saved.bytes.len()).sum::<usize>()
+                    <= MAX_LINE_CONTINUATION_BYTES
+            );
+        }
+        assert_eq!(cache.len(), MAX_LINE_CONTINUATION_BYTES / MAX_LINE_BYTES);
+    }
+
+    #[test]
+    fn g3262_partial_line_migration_proves_only_committed_legacy_prefix() {
+        let root = temp_root("g3262-partial-line-migration");
+        let folder = root.join("claude");
+        fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("session.jsonl");
+        let first = anonymous_event(ActivityTool::Claude, 10);
+        fs::write(&source, first.clone() + &large_private_body_line()).unwrap();
+        let path = root.join("index.json");
+        let mut bounded = options();
+        bounded.max_bytes = first.len() as u64 + 256;
+        let partial = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            kst(),
+            bounded,
+        )
+        .unwrap();
+        assert_eq!(
+            partial
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            10
+        );
+        assert!(partial.local_backfill_pending);
+        assert_no_private_body_in_index(&path);
+        forget_test_line_continuations(&source);
+        let migrated = refresh_at(
+            &path,
+            &roots(&root),
+            true,
+            false,
+            false,
+            now(),
+            FixedOffset::west_opt(4 * 3600).unwrap(),
+            options(),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated
+                .days
+                .iter()
+                .map(|day| day.claude_tokens)
+                .sum::<u64>(),
+            27
+        );
+        assert!(!migrated.local_partial && !migrated.local_backfill_pending);
+        assert!(load_index(&path, -240).0.legacy_files.is_empty());
+        assert_no_private_body_in_index(&path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn g3262_changed_lossy_source_resets_instead_of_trusting_growth() {
+        let root = temp_root("g3262-lossy-rewrite");
+        let source = root.join("session.jsonl");
+        fs::write(
+            &source,
+            anonymous_event(ActivityTool::Claude, 10) + &"x".repeat(MAX_LINE_BYTES + 1024),
+        )
+        .unwrap();
+        let mut checkpoint = FileCheckpoint::new(ActivityTool::Claude);
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert!(checkpoint.discarding_line && checkpoint.prefix_digest.is_none());
+        fs::write(
+            &source,
+            anonymous_event(ActivityTool::Claude, 90) + &"x".repeat(MAX_LINE_BYTES + 1025),
+        )
+        .unwrap();
+        File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(1))
+            .unwrap();
+        scan_file(
+            &source,
+            &mut checkpoint,
+            "2026-01-01",
+            kst(),
+            Instant::now() + Duration::from_secs(2),
+            1024,
+            None,
+        )
+        .unwrap();
+        assert_eq!(checkpoint.offset, 1024);
+        assert_eq!(
+            checkpoint_history_days(&checkpoint, "")
+                .values()
+                .sum::<u64>(),
+            90
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn now() -> DateTime<Utc> {
@@ -2643,7 +4321,8 @@ mod tests {
             .unwrap();
             make_cache_legacy(&path);
             let mut bounded = options();
-            bounded.max_bytes = 1;
+            // One complete event per pass, now that byte limits are strict.
+            bounded.max_bytes = anonymous_event(tool, 10).len() as u64;
             let mut previous_offset = 0;
             for step in 0..5 {
                 if step > 0 {
@@ -2833,6 +4512,8 @@ mod tests {
             target_offset: checkpoint.offset,
             source_modified_nanos: modified_nanos(&fs::metadata(&source).unwrap()),
             legacy_prefix_matches: false,
+            pending_line: Vec::new(),
+            pending_line_start_offset: None,
         });
         let progress = validate_scanned_prefix(
             &source,
@@ -3034,7 +4715,13 @@ mod tests {
         save_index(&path, &cache).unwrap();
         let identity = test_local_identity("Eastern Standard Time");
         let mut bounded = options();
-        bounded.max_bytes = 1;
+        // Preserve this test's one-event partial rebuild, without overreading.
+        bounded.max_bytes = fs::read(root.join("claude").join("session.jsonl"))
+            .unwrap()
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap() as u64
+            + 1;
         let partial = refresh_in_timezone(
             &path,
             &roots(&root),
@@ -3305,6 +4992,7 @@ mod tests {
                     expected.clone()
                 })
             },
+            None,
         );
         assert!(result.unwrap_err().to_string().contains("timezone changed"));
         assert_eq!(checks, 3);
@@ -3386,6 +5074,7 @@ mod tests {
                     }
                     Ok(identity.clone())
                 },
+                None,
             );
             assert!(result.is_err());
             assert_eq!(checks, 3);

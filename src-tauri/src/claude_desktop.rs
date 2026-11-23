@@ -69,6 +69,7 @@ fn observe_http(url: &str, response: &http_transport::HttpResponse) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
+    PolicyCancelled,
     Unavailable,
     LoginRequired,
     Transport,
@@ -76,10 +77,11 @@ pub(crate) enum Error {
     Parse,
     Changed,
     RateLimited,
+    RateLimitedChanged,
     Decode,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Revision {
     Files(Vec<(PathBuf, Option<(u64, SystemTime)>)>, bool),
     Desktop(PathBuf, String, String),
@@ -458,6 +460,7 @@ fn http(url: &str, token: &str, deadline: Instant) -> Result<Vec<u8>, Error> {
         "Claude desktop account request failed",
     )
     .map_err(|e| match e.kind {
+        HttpErrorKind::PolicyCancelled => Error::PolicyCancelled,
         HttpErrorKind::Deadline => Error::Deadline,
         _ => Error::Transport,
     })?;
@@ -587,7 +590,11 @@ fn query_credentials_cached(
     })();
     if !credentials_unchanged(&c) {
         *proof.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return Err(Error::Changed);
+        return Err(if matches!(result, Err(Error::RateLimited)) {
+            Error::RateLimitedChanged
+        } else {
+            Error::Changed
+        });
     }
     if Instant::now() >= deadline && result.is_ok() {
         return Err(Error::Deadline);
@@ -704,14 +711,14 @@ mod tests {
         let previous = Mutex::new(None);
         let cache = Mutex::new(None);
         let revision = |desktop| Revision::Files(vec![], desktop);
-        crate::reconcile_claude_source(&cache, &previous, revision(false));
+        crate::reconcile_claude_source(&cache, &previous, revision(false), || {});
         crate::cached_status_attempt(&cache, chrono::Utc::now(), 60, true, || {
             Err(crate::CollectionErrorKind::LoginRequired)
         });
         assert!(cache.lock().unwrap().is_some());
-        crate::reconcile_claude_source(&cache, &previous, revision(false));
+        crate::reconcile_claude_source(&cache, &previous, revision(false), || {});
         assert!(cache.lock().unwrap().is_some());
-        crate::reconcile_claude_source(&cache, &previous, revision(true));
+        crate::reconcile_claude_source(&cache, &previous, revision(true), || {});
         assert!(cache.lock().unwrap().is_none());
         crate::cached_status_attempt(&cache, chrono::Utc::now(), 60, true, || {
             Err(crate::CollectionErrorKind::Unavailable)
@@ -720,6 +727,7 @@ mod tests {
             &cache,
             &previous,
             Revision::Files(vec![(PathBuf::from("fixture"), None)], true),
+            || {},
         );
         assert!(cache.lock().unwrap().is_none());
     }
@@ -740,6 +748,7 @@ mod tests {
             &cache,
             &previous,
             revision_from(Some(code.clone()), roots, false),
+            || {},
         );
         crate::cached_status_attempt(&cache, now, 300, false, || {
             Err(crate::CollectionErrorKind::RateLimited)
@@ -751,6 +760,7 @@ mod tests {
                 &cache,
                 &previous,
                 revision_from(Some(code.clone()), roots, false),
+                || {},
             );
             for force in [false, true] {
                 assert!(crate::cached_status_attempt(
@@ -770,7 +780,12 @@ mod tests {
         }
         assert!(desktop_before != revision_from(Some(code.clone()), roots, true));
         std::fs::write(&code, b"changed-code-auth-fixture").unwrap();
-        crate::reconcile_claude_source(&cache, &previous, revision_from(Some(code), roots, false));
+        crate::reconcile_claude_source(
+            &cache,
+            &previous,
+            revision_from(Some(code), roots, false),
+            || {},
+        );
         assert!(cache.lock().unwrap().is_none());
     }
     struct Temp(PathBuf);
@@ -998,7 +1013,14 @@ mod tests {
                     Err(error)
                 },
             );
-            assert_eq!(result, Err(Error::Changed));
+            assert_eq!(
+                result,
+                Err(if error == Error::RateLimited {
+                    Error::RateLimitedChanged
+                } else {
+                    Error::Changed
+                })
+            );
         }
     }
 

@@ -72,6 +72,77 @@ pub struct UpdateCheckResult {
     pub error: Option<String>,
 }
 
+type CheckOutcome = Result<UpdateCheckResult, String>;
+type CheckReceiver = tokio::sync::watch::Receiver<Option<CheckOutcome>>;
+
+#[derive(Default)]
+pub(crate) struct UpdateCheckCoordinator {
+    in_flight: Mutex<Option<CheckReceiver>>,
+}
+
+impl UpdateCheckCoordinator {
+    pub(crate) async fn check<F>(&self, operation: impl FnOnce() -> F) -> CheckOutcome
+    where
+        F: std::future::Future<Output = CheckOutcome>,
+    {
+        let (mut receiver, sender) = {
+            let mut current = self.in_flight.lock().unwrap_or_else(|err| err.into_inner());
+            if let Some(receiver) = current.as_ref() {
+                (receiver.clone(), None)
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                *current = Some(receiver.clone());
+                (receiver, Some(sender))
+            }
+        };
+
+        if let Some(sender) = sender {
+            let mut pending = PendingUpdateCheck {
+                coordinator: self,
+                sender: Some(sender),
+            };
+            let result = operation().await;
+            pending.finish(result.clone());
+            return result;
+        }
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "update check was interrupted".to_string())?;
+        }
+    }
+}
+
+struct PendingUpdateCheck<'a> {
+    coordinator: &'a UpdateCheckCoordinator,
+    sender: Option<tokio::sync::watch::Sender<Option<CheckOutcome>>>,
+}
+
+impl PendingUpdateCheck<'_> {
+    fn finish(&mut self, result: CheckOutcome) {
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+        let mut current = self
+            .coordinator
+            .in_flight
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _ = sender.send(Some(result));
+        *current = None;
+    }
+}
+
+impl Drop for PendingUpdateCheck<'_> {
+    fn drop(&mut self) {
+        self.finish(Err("update check was interrupted".into()));
+    }
+}
+
 pub struct PreparedNotification {
     path: PathBuf,
     version: String,
@@ -1299,6 +1370,106 @@ fn replace_existing_state_file(path: &Path, temp: &Path) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn successful_check() -> UpdateCheckResult {
+        UpdateCheckResult {
+            status: "current".into(),
+            current_version: "0.1.43".into(),
+            latest_version: Some("0.1.43".into()),
+            release_url: None,
+            checked_at: Some("2026-11-17T00:00:00Z".into()),
+            checked_now: true,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn update_check_futures_can_move_between_runtime_threads() {
+        fn assert_send(_: impl Send) {}
+        let coordinator = UpdateCheckCoordinator::default();
+        assert_send(coordinator.check(|| async { Ok(successful_check()) }));
+    }
+
+    #[tokio::test]
+    async fn simultaneous_checks_share_success_failure_and_timeout_results() {
+        use std::sync::atomic::AtomicUsize;
+        for expected in [
+            Ok(successful_check()),
+            Err("update check failed".to_string()),
+            Err("update check timed out".to_string()),
+        ] {
+            let coordinator = UpdateCheckCoordinator::default();
+            let calls = AtomicUsize::new(0);
+            let leader = coordinator.check(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                expected.clone()
+            });
+            let follower = coordinator.check(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                panic!("a joining check must not start another request");
+            });
+            let (first, second) = tokio::join!(biased; leader, follower);
+            assert_eq!(first, expected);
+            assert_eq!(second, expected);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                coordinator.check(|| async { Ok(successful_check()) }).await,
+                Ok(successful_check())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_leader_releases_waiters_and_allows_a_new_check() {
+        use std::{future::Future, task::Poll};
+        let coordinator = UpdateCheckCoordinator::default();
+        let mut leader = Box::pin(coordinator.check(std::future::pending::<CheckOutcome>));
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let mut follower = Box::pin(coordinator.check(|| async {
+            panic!("a joining check must wait for the leader");
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(leader);
+        assert_eq!(follower.await.unwrap_err(), "update check was interrupted");
+        assert_eq!(
+            coordinator.check(|| async { Ok(successful_check()) }).await,
+            Ok(successful_check())
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_follower_does_not_cancel_the_running_check() {
+        use std::{future::Future, task::Poll};
+        let coordinator = UpdateCheckCoordinator::default();
+        let mut leader = Box::pin(coordinator.check(|| async {
+            tokio::task::yield_now().await;
+            Ok(successful_check())
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let mut follower = Box::pin(coordinator.check(|| async {
+            panic!("a joining check must not take ownership");
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(follower);
+        assert_eq!(leader.await, Ok(successful_check()));
+    }
 
     #[test]
     fn install_release_uses_the_fresh_target_not_a_cached_version() {

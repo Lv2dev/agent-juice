@@ -40,7 +40,7 @@ function harness(invoke = async () => null) {
   context = vm.createContext({
     DEFAULT_SETTINGS, createSettingsAuthority, TEXT_SCALE_EVENT, URLSearchParams, barViewModel,
     createStatusRequests: options => createStatusRequests({...options, setTimer: context.setTimeout, clearTimer: context.clearTimeout}),
-    window: {location: {search: "?tool=codex"}, __TAURI__: {
+    window: {location: {search: "?tool=codex&menuGeneration=1"}, __TAURI__: {
       core: {invoke(name, args) { commands.push(name); return invoke(name, args); }},
       event: {listen(name, handler) {events.set(name, handler); return () => {}; }},
     }},
@@ -133,11 +133,13 @@ test("bar native status and health events still win over pending RPC snapshots",
   const response = deferred();
   const h = harness(command => command === "get_status" ? response.promise : {codex: "ready"});
   h.bar.bind(); await settle();
+  h.events.get("collection-health-updated")({payload: {codex: "login_required"}});
   const pending = h.bar.loadStatus();
   h.events.get("status-updated")({payload: status(90)});
   response.resolve(status(10)); await pending;
   assert.equal(h.bar.inspect().statuses[0].primary.used_percent, 90);
-  assert.deepEqual(h.commands, ["get_status"]);
+  assert.deepEqual(h.commands, ["get_status", "get_collection_health"]);
+  assert.equal(h.renders.at(-1).health.codex, "ready");
   const health = deferred();
   const other = harness(command => command === "get_status" ? status(10) : health.promise);
   other.bar.bind(); await settle();

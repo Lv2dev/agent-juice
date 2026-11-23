@@ -49,6 +49,11 @@
   color-scheme: light;
 }
 
+html[lang="ko"] .panel-window {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
 @media (prefers-color-scheme: dark) {
   html:not([data-theme="light"]) .panel-window {
     --pn-bg: #0c0d11;
@@ -543,6 +548,66 @@ html[data-panel-look="paper"] .panel-window {
   white-space: nowrap;
 }
 
+.overview-head {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.overview-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.overview-actions .view-meta {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.panel-window .usage-refresh-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--pn-text-dim);
+  background: transparent;
+}
+
+.usage-refresh-icon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  background: currentColor;
+  mask: url("./icons/refresh-cw.svg") center / contain no-repeat;
+}
+
+.usage-refresh-button:focus-visible,
+.tool-retry-button:focus-visible {
+  outline: 2px solid var(--pn-accent);
+  outline-offset: 3px;
+}
+
+.overview-refresh-status {
+  min-width: 0;
+  margin: 0;
+  color: var(--pn-muted);
+  font-size: calc(12px * var(--system-text-scale, 1));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.overview-refresh-status[data-state="error"] {
+  color: var(--pn-text);
+}
+
 .group-title {
   margin: 6px 2px -4px;
   color: var(--pn-text-dim);
@@ -911,6 +976,38 @@ html[data-text-scale="enlarged"] .update-band-actions {
   display: none;
 }
 
+.tool-retry-row {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  justify-self: end;
+  min-width: 0;
+}
+
+.panel-window .tool-retry-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--pn-accent);
+  font-size: calc(12px * var(--system-text-scale, 1));
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.tool-retry-button:disabled,
+.usage-refresh-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .empty-hint {
   display: none;
   grid-column: 2 / -1;
@@ -1138,7 +1235,11 @@ html[data-text-scale="enlarged"] .update-band-actions {
   overflow-x: auto;
   padding-bottom: 8px;
   --activity-cell-min: calc(12px * var(--system-text-scale, 1));
-  --activity-label-width: calc(22px * var(--system-text-scale, 1));
+  --activity-label-width: calc(26px * var(--system-text-scale, 1));
+}
+
+html[lang="en"] .activity-chart {
+  --activity-label-width: calc(32px * var(--system-text-scale, 1));
 }
 
 .activity-grid-wrap,
@@ -1151,8 +1252,9 @@ html[data-text-scale="enlarged"] .update-band-actions {
 }
 
 .activity-months {
+  position: relative;
   min-height: calc(15px * var(--system-text-scale, 1));
-  margin-left: var(--activity-label-width);
+  padding-left: var(--activity-label-width);
   display: grid;
   grid-template-columns: repeat(var(--activity-weeks), var(--activity-cell-size));
   grid-auto-columns: var(--activity-cell-size);
@@ -1160,6 +1262,20 @@ html[data-text-scale="enlarged"] .update-band-actions {
   color: var(--pn-faint);
   font-size: calc(10px * var(--system-text-scale, 1));
   line-height: 1;
+}
+
+.activity-months::before {
+  content: "";
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  grid-row: 1;
+  grid-column: 1;
+  width: var(--activity-label-width);
+  margin-left: calc(var(--activity-label-width) * -1);
+  background: var(--pn-surface);
+  box-shadow: 4px 0 6px -2px var(--pn-surface);
+  pointer-events: none;
 }
 
 .activity-months span {
@@ -1171,15 +1287,18 @@ html[data-text-scale="enlarged"] .update-band-actions {
   min-width: 0;
   width: max-content;
   display: grid;
-  grid-template-columns: calc(var(--activity-label-width) - 4px) max-content;
-  gap: 4px;
+  grid-template-columns: var(--activity-label-width) max-content;
+  gap: 0;
 }
 
 .activity-weekdays {
   position: sticky;
   left: 0;
   z-index: 1;
+  width: var(--activity-label-width);
+  padding-right: 6px;
   background: var(--pn-surface);
+  box-shadow: 4px 0 6px -2px var(--pn-surface);
   display: grid;
   grid-template-rows: repeat(7, var(--activity-cell-size));
   gap: var(--activity-gap);
@@ -1665,9 +1784,10 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
 }
 
 .range-value-editor {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: 66px 18px;
   align-items: center;
-  justify-content: flex-end;
+  justify-items: start;
   gap: 5px;
 }
 
@@ -1678,7 +1798,7 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
 }
 
 .range-unit {
-  min-width: 14px;
+  min-width: 18px;
   color: var(--pn-muted);
   font-size: calc(11.5px * var(--system-text-scale, 1));
 }
@@ -1703,13 +1823,25 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  column-gap: 8px;
+  column-gap: 6px;
   row-gap: 2px;
 }
 
+.field-grid label.field-with-help input[type="number"] {
+  width: 86px;
+  text-align: right;
+}
+
 .field-grid label.field-with-help > span:not(:first-child) {
+  min-width: 24px;
   color: var(--pn-muted);
   font-size: calc(11.5px * var(--system-text-scale, 1));
+  text-align: left;
+}
+
+html[lang="en"] .field-grid label.field-with-help > span:not(:first-child),
+html[lang="en"] .number-unit-control > span {
+  min-width: 40px;
 }
 
 .field-grid label.field-with-help .field-help {
@@ -1905,6 +2037,11 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
   gap: 8px;
 }
 
+.tool-threshold-grid > :nth-last-child(-n+2),
+.taskbar-text-color-grid > .taskbar-text-color-item:last-child {
+  border-bottom: 0;
+}
+
 .taskbar-text-color-toggle {
   min-width: 0;
   min-height: 0;
@@ -2060,8 +2197,10 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
 }
 
 .number-unit-control > span {
+  min-width: 24px;
   color: var(--pn-muted);
   font-size: calc(11.5px * var(--system-text-scale, 1));
+  text-align: left;
 }
 
 .activity-scale-picker {
@@ -2338,7 +2477,7 @@ html[data-text-scale="enlarged"] .panel-window .tool-display-control {
 .tool-card[data-collection-issue="true"] .meta {
   grid-area: auto;
   grid-column: 1 / -1;
-  padding: 6px 0 0 16px;
+  padding: 6px 0 0;
   color: var(--pn-warn);
   white-space: normal;
 }
@@ -2405,6 +2544,10 @@ html[data-panel-look="paper"] .taskbar-profile-option {
 
 html[data-panel-look="paper"] :is(.pc, .meta) {
   padding-left: 16px;
+}
+
+html[data-panel-look="paper"] .tool-card[data-collection-issue="true"] .meta {
+  padding-left: 0;
 }
 
 html[data-panel-look="paper"] .tool-dot,
@@ -2496,6 +2639,24 @@ html[data-panel-look="paper"] .settings-toast {
     grid-row: 3;
   }
 
+  .tool-retry-row {
+    grid-row: 4;
+  }
+
+  .meta,
+  .tool-card[data-collection-issue="true"] .meta,
+  html[data-panel-look="paper"] .meta {
+    padding-left: 0;
+  }
+
+  .tool-threshold-grid > :nth-last-child(-n+2) {
+    border-bottom: 1px solid var(--pn-line-soft);
+  }
+
+  .tool-threshold-grid > :last-child {
+    border-bottom: 0;
+  }
+
   .update-band {
     align-items: stretch;
     grid-template-columns: minmax(0, 1fr);
@@ -2584,6 +2745,16 @@ html[data-text-scale="enlarged"] .empty-hint {
   grid-row: 3;
 }
 
+html[data-text-scale="enlarged"] .meta,
+html[data-text-scale="enlarged"] .tool-card[data-collection-issue="true"] .meta,
+html[data-text-scale="enlarged"][data-panel-look="paper"] .meta {
+  padding-left: 0;
+}
+
+html[data-text-scale="enlarged"] .range-value-editor {
+  grid-template-columns: auto minmax(18px, auto);
+}
+
 html[data-text-scale="enlarged"] .metric {
   grid-template-columns: auto minmax(0, 1fr);
 }
@@ -2591,6 +2762,10 @@ html[data-text-scale="enlarged"] .metric {
 html[data-text-scale="enlarged"] .metric .reset {
   grid-row: 3;
   grid-column: 1 / -1;
+}
+
+html[data-text-scale="enlarged"] .tool-retry-row {
+  grid-row: 4;
 }
 
 html[data-text-scale="enlarged"] .metric-row .val {

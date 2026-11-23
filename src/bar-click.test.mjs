@@ -865,7 +865,7 @@ test("bar right click waits for native resize before showing the refresh menu", 
   };
 
   global.window = {
-    location: { search: "?tool=codex" },
+    location: { search: "?tool=codex&menuGeneration=1" },
     innerWidth: 260,
     innerHeight: 40,
     __TAURI__: {
@@ -989,7 +989,7 @@ test("bar refresh menu rolls back when native resize fails", async () => {
   const tools = { claude: toolStub(), codex: toolStub() };
 
   global.window = {
-    location: { search: "?tool=claude" },
+    location: { search: "?tool=claude&menuGeneration=1" },
     innerWidth: 260,
     innerHeight: 40,
     __TAURI__: {
@@ -1053,7 +1053,7 @@ test("bar refresh menu tolerates transient window leave and closes after a grace
   };
 
   global.window = {
-    location: { search: "?tool=codex" },
+    location: { search: "?tool=codex&menuGeneration=1" },
     innerWidth: 260,
     innerHeight: 40,
     __TAURI__: {
@@ -1134,7 +1134,7 @@ test("bar refresh menu closes when another tool bar opens its menu", async () =>
   };
 
   global.window = {
-    location: { search: "?tool=claude" },
+    location: { search: "?tool=claude&menuGeneration=1" },
     innerWidth: 260,
     innerHeight: 40,
     __TAURI__: {

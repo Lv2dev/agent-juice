@@ -193,14 +193,32 @@ fn spawn_in_process_tree(
     command: &mut Command,
     cleanup_deadline: Instant,
 ) -> anyhow::Result<(Child, ProcessTree)> {
-    spawn_in_process_tree_with_hook(command, cleanup_deadline, |_| Ok(()))
+    spawn_in_process_tree_with_policy(command, cleanup_deadline, || true)
+}
+
+fn ensure_process_admitted(admitted: &impl Fn() -> bool) -> anyhow::Result<()> {
+    crate::collection_admission::ensure_current()?;
+    if !admitted() {
+        return Err(CollectionPolicyCancelled.into());
+    }
+    Ok(())
+}
+
+fn spawn_in_process_tree_with_policy(
+    command: &mut Command,
+    cleanup_deadline: Instant,
+    admitted: impl Fn() -> bool,
+) -> anyhow::Result<(Child, ProcessTree)> {
+    spawn_in_process_tree_with_hook(command, cleanup_deadline, admitted, |_| Ok(()))
 }
 
 fn spawn_in_process_tree_with_hook(
     command: &mut Command,
     cleanup_deadline: Instant,
+    admitted: impl Fn() -> bool,
     after_suspended_spawn: impl FnOnce(&Child) -> anyhow::Result<()>,
 ) -> anyhow::Result<(Child, ProcessTree)> {
+    ensure_process_admitted(&admitted)?;
     let tree = ProcessTree::create()?;
 
     #[cfg(windows)]
@@ -211,9 +229,12 @@ fn spawn_in_process_tree_with_hook(
         command.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
     }
 
+    ensure_process_admitted(&admitted)?;
     let mut child = command.spawn()?;
     if let Err(error) = after_suspended_spawn(&child)
+        .and_then(|()| ensure_process_admitted(&admitted))
         .and_then(|()| tree.assign(&child))
+        .and_then(|()| ensure_process_admitted(&admitted))
         .and_then(|()| ProcessTree::resume(&child))
     {
         terminate_process_tree_until(&mut child, Some(&tree), cleanup_deadline);
@@ -689,16 +710,7 @@ pub fn codex_account_usage_response(timeout: Duration) -> anyhow::Result<String>
     codex_app_server_broker()?.request("account/usage/read", timeout)
 }
 
-#[derive(Debug)]
-pub(crate) struct CollectionPolicyCancelled;
-
-impl std::fmt::Display for CollectionPolicyCancelled {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("command unavailable by collection policy")
-    }
-}
-
-impl std::error::Error for CollectionPolicyCancelled {}
+pub(crate) use crate::collection_admission::PolicyCancelled as CollectionPolicyCancelled;
 
 pub(crate) fn codex_collection_generation() -> Option<u64> {
     match CODEX_APP_SERVER_BROKER.get() {
@@ -1362,8 +1374,20 @@ impl CodexAppServerSession {
         let hard_deadline = deadline
             .checked_add(PROCESS_CLEANUP_GRACE)
             .unwrap_or(deadline);
-        let (mut child, tree) = spawn_in_process_tree(&mut command, hard_deadline)
-            .map_err(|_| format!("{} transport failed", protocol.label()))?;
+        let (mut child, tree) =
+            spawn_in_process_tree_with_policy(&mut command, hard_deadline, || {
+                policy.is_current(generation)
+            })
+            .map_err(|error| {
+                if error.is::<CollectionPolicyCancelled>() {
+                    format!(
+                        "{} command unavailable by collection policy",
+                        protocol.label()
+                    )
+                } else {
+                    format!("{} transport failed", protocol.label())
+                }
+            })?;
         let setup = (|| {
             let stdout = child
                 .stdout
@@ -2059,6 +2083,7 @@ fn claude_oauth_usage_response_from(
         "Claude OAuth usage request failed",
     )
     .map_err(|error| match error.kind {
+        HttpErrorKind::PolicyCancelled => CollectionPolicyCancelled.into(),
         HttpErrorKind::Deadline => anyhow::anyhow!("Claude OAuth usage timed out"),
         HttpErrorKind::Oversized => {
             anyhow::anyhow!("Claude OAuth usage response exceeded its limit")
@@ -2068,10 +2093,20 @@ fn claude_oauth_usage_response_from(
         }
         HttpErrorKind::Transport => anyhow::anyhow!("Claude OAuth usage request failed"),
     })?;
+    claude_oauth_usage_response_body(response)
+}
+
+fn claude_oauth_usage_response_body(
+    response: http_transport::HttpResponse,
+) -> anyhow::Result<String> {
     if response.status == 429 {
         return Err(ClaudeUsageRateLimited.into());
     }
-    if matches!(response.status, 401 | 403)
+    let explicit_auth_error = serde_json::from_slice::<Value>(&response.body).is_ok_and(|body| {
+        body.pointer("/error/type").and_then(Value::as_str) == Some("authentication_error")
+    });
+    if response.status == 401
+        || explicit_auth_error
         || text_requires_login(&String::from_utf8_lossy(&response.body))
     {
         anyhow::bail!("Claude OAuth authentication required");
@@ -2674,6 +2709,7 @@ mod tests {
         let (mut child, tree) = spawn_in_process_tree_with_hook(
             &mut command,
             Instant::now() + Duration::from_secs(1),
+            || true,
             move |_| {
                 std::thread::sleep(Duration::from_millis(150));
                 anyhow::ensure!(
@@ -2745,6 +2781,115 @@ mod tests {
             &mut helper,
             Instant::now() + Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn broker_process_admission_checks_captured_generation_and_direct_scope() {
+        let broker = BrokerPolicy::new(true);
+        let generation = broker.admission().unwrap();
+        let admitted = || broker.is_current(generation);
+        assert!(ensure_process_admitted(&admitted).is_ok());
+        broker.set_enabled(false);
+        assert!(ensure_process_admitted(&admitted)
+            .unwrap_err()
+            .is::<CollectionPolicyCancelled>());
+        broker.set_enabled(true);
+        assert!(ensure_process_admitted(&admitted)
+            .unwrap_err()
+            .is::<CollectionPolicyCancelled>());
+        let current = broker.admission().unwrap();
+        let admitted = || broker.is_current(current);
+        assert!(ensure_process_admitted(&admitted).is_ok());
+
+        let direct = crate::collection_admission::CollectionAdmission::new();
+        direct.set_enabled(true);
+        direct.admit().unwrap().run(|| {
+            direct.set_enabled(false);
+            assert!(ensure_process_admitted(&admitted)
+                .unwrap_err()
+                .is::<CollectionPolicyCancelled>());
+        });
+    }
+
+    #[test]
+    fn claude_oauth_response_distinguishes_auth_permission_and_rate_errors() {
+        use crate::CollectionErrorKind as E;
+        for (status, body, expected) in [
+            (401, "{}", E::LoginRequired),
+            (
+                403,
+                r#"{"error":{"type":"authentication_error","message":"invalid token"}}"#,
+                E::LoginRequired,
+            ),
+            (403, r#"{"error":"invalid_grant"}"#, E::LoginRequired),
+            (
+                403,
+                r#"{"error":{"type":"permission_error","message":"organization policy denied access"}}"#,
+                E::Transport,
+            ),
+            (403, "gateway rejection", E::Transport),
+            (503, "unavailable", E::Transport),
+            (429, "authentication required", E::RateLimited),
+        ] {
+            let error = claude_oauth_usage_response_body(http_transport::HttpResponse {
+                status,
+                content_type: "application/json".into(),
+                body: body.as_bytes().to_vec(),
+            })
+            .unwrap_err();
+            assert_eq!(crate::classify_collection_error(&error), expected);
+            assert_eq!(error_requires_login(&error), expected == E::LoginRequired);
+            for force in [false, true] {
+                if matches!(expected, E::LoginRequired | E::RateLimited) {
+                    assert!(!crate::claude_legacy_fallback_allowed(&expected, force));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn claude_oauth_permission_error_preserves_current_epoch_last_good() {
+        let now = chrono::Utc::now();
+        let sample = crate::adapters::claude::parse_oauth_usage_response(
+            r#"{"five_hour":{"utilization":1},"seven_day":{"utilization":2}}"#,
+            "fixture",
+            &now.to_rfc3339(),
+        )
+        .unwrap();
+        let cache = Mutex::new(None);
+        crate::cached_status_attempt_with_policy(
+            &cache,
+            now,
+            300,
+            false,
+            || Some(42),
+            || Ok(sample.clone()),
+        );
+        let error = claude_oauth_usage_response_body(http_transport::HttpResponse {
+            status: 403,
+            content_type: "application/json".into(),
+            body: br#"{"error":{"type":"permission_error"}}"#.to_vec(),
+        })
+        .unwrap_err();
+        assert_eq!(
+            crate::cached_status_attempt_with_policy(
+                &cache,
+                now + chrono::Duration::seconds(301),
+                300,
+                false,
+                || Some(42),
+                || Err(crate::classify_collection_error(&error)),
+            ),
+            Some(sample)
+        );
+        assert_eq!(
+            crate::cached_collection_health_for_policy(&cache, Some(42)),
+            crate::CollectionHealth::TransientError
+        );
+        assert_eq!(
+            crate::cached_collection_health_for_policy(&cache, Some(43)),
+            crate::CollectionHealth::Unavailable
+        );
     }
 
     #[test]

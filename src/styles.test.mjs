@@ -32,6 +32,7 @@ const rustLib = readFileSync(resolve(here, "../src-tauri/src/lib.rs"), "utf8").r
   /\r\n?/g,
   "\n",
 );
+const rustQuit = readFileSync(resolve(here, "../src-tauri/src/quit.rs"), "utf8").replace(/\r\n?/g, "\n");
 const rustBuild = readFileSync(resolve(here, "../src-tauri/build.rs"), "utf8").replace(
   /\r\n?/g,
   "\n",
@@ -1444,15 +1445,15 @@ test("public README and release template are the only tracked markdown exception
 test("settings copy uses accurate collection timing labels and hides obsolete Claude connect action", () => {
   const limitsSection = markupSection("collection");
 
-  assert.match(panelMarkup, />수집주기</);
+  assert.match(panelMarkup, />수집 주기</);
   assert.match(panelMarkup, />오래됨</);
   assert.doesNotMatch(panelMarkup, />오래됨 기준</);
   assert.match(panelMarkup, />잔여량 경고</);
   assert.match(panelMarkup, />잔여량 위험</);
   assert.match(panelMarkup, /name="display_basis"/);
   assert.match(panelMarkup, /data-display-basis-copy="help"/);
-  assert.match(i18nJs, /작업표시줄은 남은 사용량을 표시하므로/);
-  assert.match(i18nJs, /표시 사용량이 이 값 이상이 되면/);
+  assert.match(i18nJs, /남은 사용량이 이 값 이하이면/);
+  assert.match(i18nJs, /사용량이 이 값 이상이면/);
   assert.match(limitsSection, /name="poll-output">60<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
   assert.match(limitsSection, /name="stale-output">90<\/output>\s*<span data-i18n="unit\.seconds">초<\/span>/);
   const timingFields = [...limitsSection.matchAll(/<label class="field-with-help">/g)];
@@ -1465,8 +1466,8 @@ test("settings copy uses accurate collection timing labels and hides obsolete Cl
   assert.match(panelCss, /\.activity-settings \.field-row > span:first-child,[\s\S]*?font-size: calc\(13px \* var\(--system-text-scale, 1\)\);[\s\S]*?font-weight: 400;/);
   assert.doesNotMatch(panelCss, /\.field-grid span,/);
   assert.match(panelMarkup, /data-i18n="help.staleAfter"/);
-  assert.match(i18nJs, /마지막 기록 후 오래됨 표시까지/);
-  assert.match(i18nJs, /로컬 상태를 다시 읽는 간격/);
+  assert.match(i18nJs, /마지막 기록 이후 오래됨으로 표시할 시간입니다/);
+  assert.match(i18nJs, /로컬 상태를 다시 확인하는 간격입니다/);
   assert.doesNotMatch(i18nJs, /마지막 기록이 몇 초 지나면 오래됨으로 표시할지/);
   assert.match(i18nJs, /"unit\.seconds": "초"/);
   assert.doesNotMatch(panelMarkup, />신선도</);
@@ -1790,8 +1791,13 @@ test("taskbar idle and drag paths reuse snapshots instead of repeated disk and s
 });
 
 test("tray quit flushes pending settings before native cleanup and exit", () => {
-  assert.match(rustLib, /app\.emit\("app-quit-requested"/);
-  assert.match(rustLib, /fn complete_app_quit/);
+  assert.match(rustLib, /mod quit;/);
+  assert.match(rustLib, /quit::complete_app_quit/);
+  assert.match(rustLib, /quit::fail_app_quit/);
+  assert.match(rustQuit, /\.emit\(\s*"app-quit-requested"/);
+  assert.match(rustQuit, /fn complete_app_quit[\s\S]*?machine\.complete\(request_id\)/);
+  assert.match(rustQuit, /TaskDialogIndirect/);
+  assert.match(rustQuit, /Resolution::Exit\([^)]*\)[\s\S]*?exit_after_taskbar_cleanup/);
   assert.match(rustLib, /TaskbarShutdownState/);
   assert.match(settingsJs, /enqueueLatestSettingsSave/);
   assert.match(settingsJs, /flushSettingsAndQuit/);
@@ -1858,7 +1864,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.43"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.44"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1924,5 +1930,14 @@ test("collection issue messages get a full-width row instead of the narrow meta 
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /grid-column: 1 \/ -1/);
   assert.match(panelBlock('.tool-card[data-collection-issue="true"] .meta'), /white-space: normal/);
   assert.match(panelJs, /card\.dataset\.collectionIssue = String\(/);
-  assert.match(panelJs, /import \{ panelCollectionIssue \} from "\.\/collection-state\.js";/);
+  assert.match(panelJs, /import \{[^}]*\bpanelCollectionIssue\b[^}]*\} from "\.\/collection-state\.js";/);
+});
+
+test("dark taskbar ring numbers use a dark outline and panel typography keeps Korean words intact", () => {
+  assert.match(cssBlock('html[data-theme="dark"] .bar-shell'), /--ring-number-outline-color:\s*rgba\(13,\s*15,\s*16/);
+  assert.match(css, /@media \(prefers-color-scheme: dark\)\s*\{\s*html:not\(\[data-theme="light"\]\) \.bar-shell\s*\{[^}]*--ring-number-outline-color:\s*rgba\(13,\s*15,\s*16/);
+  assert.match(panelBlock('html[lang="ko"] .panel-window'), /word-break:\s*keep-all/);
+  assert.match(panelBlock(".range-value-editor"), /display:\s*inline-grid/);
+  assert.match(panelBlock(".activity-months::before"), /position:\s*sticky/);
+  assert.match(panelBlock(".activity-weekdays"), /padding-right:\s*6px/);
 });

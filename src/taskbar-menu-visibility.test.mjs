@@ -33,7 +33,7 @@ function fixture(tool, { delayedOpen = false, failedClose = false } = {}) {
   for (const name of ['refreshMenu', 'clampMenuPosition', 'showRefreshMenu', 'hideRefreshMenu', 'setRefreshMenuState', 'renderBar']) assert(body(name), name);
   vm.runInContext(`
     const CURRENT_TOOL=${JSON.stringify(tool)}, PREVIEW=false, TOOLS=${JSON.stringify(tools)};
-    const MENU_MARGIN=4,REFRESH_MENU_OPENED_EVENT='opened';
+    const MENU_MARGIN=4,REFRESH_MENU_OPENED_EVENT='opened',MENU_WINDOW_GENERATION='1';
     const MENU_CLOSE_RETRY_DELAY_MS=250,MENU_CLOSE_MAX_RETRIES=3,MENU_CLOSE_RECOVERY_DELAY_MS=5000;
     const MENU_STATES={CLOSED:'closed',OPENING:'opening',OPEN:'open',CLOSING:'closing'};
     let refreshMenuState='closed',refreshMenuRequest=0,refreshMenuDesiredOpen=false,refreshMenuAnchor=null;
