@@ -5885,10 +5885,7 @@ fn reconcile_taskbar_layout_profile(
     update_taskbar_settings(|current| {
         changed = reconcile_taskbar_profile_state(current, topology, pending);
     })?;
-    if !changed {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(changed)
 }
 
 fn reconcile_taskbar_profile_state(
@@ -8211,10 +8208,7 @@ fn migrate_legacy_taskbar_monitor_keys(
     update_taskbar_settings(|current| {
         changed = current.migrate_taskbar_monitor_key_aliases(&replacements);
     })?;
-    if !changed {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(changed)
 }
 
 #[cfg(windows)]
