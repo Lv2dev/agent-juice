@@ -1864,7 +1864,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.44"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.45"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1940,4 +1940,16 @@ test("dark taskbar ring numbers use a dark outline and panel typography keeps Ko
   assert.match(panelBlock(".range-value-editor"), /display:\s*inline-grid/);
   assert.match(panelBlock(".activity-months::before"), /position:\s*sticky/);
   assert.match(panelBlock(".activity-weekdays"), /padding-right:\s*6px/);
+  assert.match(panelBlock('.settings-save-state[data-state="error"] .settings-status'), /color:\s*var\(--pn-danger\)/);
+  assert.match(panelBlock('.overview-refresh-status[data-state="error"]'), /color:\s*var\(--pn-danger\)/);
+  assert.match(panelBlock(".panel-window select"), /flex:\s*0 0 auto/);
+  assert.match(panelBlock(".panel-window .usage-refresh-button"), /border-radius:\s*var\(--pn-radius-sm\)/);
+  assert.match(panelBlock(".activity-empty"), /margin:\s*0;/);
+  assert.match(panelBlock('html[data-panel-look="paper"] .toggle-row.taskbar-profile-option'), /padding-left:\s*16px/);
+  assert.match(panelBlock('html[data-text-scale="enlarged"] .activity-scale-picker'), /calc\(186px \* var\(--system-text-scale\)\)/);
+  assert.match(panelBlock('html[data-text-scale="enlarged"] .panel-window .usage-refresh-button'), /width:\s*max\(30px,\s*calc\(1\.3em \+ 10px\)\)/);
+  const chartBlock = panelMarkup.match(/<div class="activity-chart"[\s\S]*?<\/div>\s*<div class="activity-tooltip"/)?.[0] ?? "";
+  assert.match(chartBlock, /data-activity-grid/);
+  assert.doesNotMatch(panelMarkup.match(/<div class="activity-chart"[\s\S]*?<\/div>\s*<\/div>/)?.[0] ?? "", /data-activity-tooltip/);
+  assert.match(panelJs, /activityTooltipPosition\(cardRect,\s*cellRect,\s*tooltipRect,\s*viewportRect\)/);
 });

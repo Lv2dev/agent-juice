@@ -251,18 +251,19 @@ export function formatActivityMonth(value, language = "ko") {
   return new Intl.DateTimeFormat(locale, { month: "short" }).format(value);
 }
 
-export function activityTooltipPosition(cardRect, chartRect, cellRect, tooltipRect) {
+export function activityTooltipPosition(cardRect, cellRect, tooltipRect, viewportRect = cardRect) {
   const padding = 8;
   const gap = 7;
-  const preferredLeft = cellRect.left - chartRect.left + cellRect.width / 2 - tooltipRect.width / 2;
-  const maxLeft = Math.max(padding, chartRect.width - tooltipRect.width - padding);
+  const preferredLeft = cellRect.left - cardRect.left + cellRect.width / 2 - tooltipRect.width / 2;
+  const maxLeft = Math.max(padding, cardRect.width - tooltipRect.width - padding);
   const left = Math.min(maxLeft, Math.max(padding, preferredLeft));
-  const above = cellRect.top - chartRect.top - tooltipRect.height - gap;
-  const below = cellRect.bottom - chartRect.top + gap;
+  const minTop = Math.max(0, viewportRect.top - cardRect.top) + padding;
   const maxTop = Math.max(
-    0,
-    cardRect.bottom - chartRect.top - tooltipRect.height - padding,
+    minTop,
+    Math.min(cardRect.bottom, viewportRect.bottom) - cardRect.top - tooltipRect.height - padding,
   );
-  const top = Math.min(maxTop, Math.max(0, above >= 0 ? above : below));
+  const above = cellRect.top - cardRect.top - tooltipRect.height - gap;
+  const below = cellRect.bottom - cardRect.top + gap;
+  const top = Math.min(maxTop, Math.max(minTop, above >= minTop ? above : below));
   return { left, top };
 }

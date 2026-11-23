@@ -394,12 +394,14 @@ function showActivityTooltip(cellElement, cell) {
     row.textContent = detail;
     details?.append(row);
   }
+  tooltip.style.left = "0px";
+  tooltip.style.top = "0px";
   tooltip.hidden = false;
   const cardRect = card.getBoundingClientRect();
-  const chartRect = card.querySelector("[data-activity-chart]").getBoundingClientRect();
+  const viewportRect = card.closest(".panel-shell")?.getBoundingClientRect() ?? cardRect;
   const cellRect = cellElement.getBoundingClientRect();
   const tooltipRect = tooltip.getBoundingClientRect();
-  const { left, top } = activityTooltipPosition(cardRect, chartRect, cellRect, tooltipRect);
+  const { left, top } = activityTooltipPosition(cardRect, cellRect, tooltipRect, viewportRect);
   tooltip.style.left = `${left}px`;
   tooltip.style.top = `${top}px`;
 }
@@ -859,6 +861,7 @@ async function bootstrap() {
   selectPanelView("overview");
   bindPanelDragFallback();
   bindStatusUpdates();
+  document.querySelector?.("[data-activity-chart]")?.addEventListener?.("scroll", hideActivityTooltip, { passive: true });
   void systemTextScale.load(invoke);
   scheduleActivityRefresh();
   document.addEventListener("keydown", (event) => {
