@@ -232,22 +232,33 @@ test("activity formatters return localized compact and exact labels", () => {
 });
 
 test("tooltip positioning stays inside the card from edge cells", () => {
-  const card = { bottom: 300 };
-  const chart = { left: 20, top: 100, width: 260 };
+  const card = { left: 20, top: 100, bottom: 300, width: 260 };
   const tooltip = { width: 100, height: 40 };
   const nearTopRight = activityTooltipPosition(
     card,
-    chart,
     { left: 270, top: 110, bottom: 118, width: 8 },
     tooltip,
   );
   const nearBottom = activityTooltipPosition(
     card,
-    chart,
     { left: 80, top: 270, bottom: 278, width: 8 },
     tooltip,
   );
 
   assert.deepEqual(nearTopRight, { left: 152, top: 25 });
-  assert.ok(nearBottom.top + tooltip.height <= card.bottom - chart.top - 8);
+  assert.ok(nearBottom.top + tooltip.height <= card.bottom - card.top - 8);
+});
+
+test("large activity tooltips stay inside the visible panel when the card extends past it", () => {
+  const viewport = { top: 155, bottom: 560 };
+  const card = { left: 24, top: 161, bottom: 799, width: 432 };
+  const cell = { left: 225, top: 342, bottom: 371, width: 27 };
+  const tooltip = { width: 392, height: 188 };
+  assert.equal(activityTooltipPosition(card, cell, tooltip, viewport).top, 203);
+
+  const scrolledCard = { ...card, top: -82, bottom: 556 };
+  const nearTop = { ...cell, top: 161, bottom: 188 };
+  const placement = activityTooltipPosition(scrolledCard, nearTop, tooltip, viewport);
+  assert.equal(placement.top + scrolledCard.top, 195);
+  assert.ok(placement.top + scrolledCard.top + tooltip.height <= viewport.bottom - 8);
 });

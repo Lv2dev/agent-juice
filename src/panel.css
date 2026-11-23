@@ -225,6 +225,7 @@ html[data-panel-look="paper"] .panel-window {
 
 .panel-window select {
   width: 150px;
+  flex: 0 0 auto;
   padding: 0 28px 0 10px;
   appearance: none;
   background:
@@ -575,7 +576,7 @@ html[data-panel-look="paper"] .panel-window {
   display: grid;
   place-items: center;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--pn-radius-sm);
   color: var(--pn-text-dim);
   background: transparent;
 }
@@ -605,7 +606,7 @@ html[data-panel-look="paper"] .panel-window {
 }
 
 .overview-refresh-status[data-state="error"] {
-  color: var(--pn-text);
+  color: var(--pn-danger);
 }
 
 .group-title {
@@ -1253,6 +1254,7 @@ html[lang="en"] .activity-chart {
 
 .activity-months {
   position: relative;
+  width: max-content;
   min-height: calc(15px * var(--system-text-scale, 1));
   padding-left: var(--activity-label-width);
   display: grid;
@@ -1270,8 +1272,11 @@ html[lang="en"] .activity-chart {
   left: 0;
   z-index: 2;
   grid-row: 1;
-  grid-column: 1;
+  grid-column: 1 / -1;
+  justify-self: start;
+  align-self: stretch;
   width: var(--activity-label-width);
+  height: 100%;
   margin-left: calc(var(--activity-label-width) * -1);
   background: var(--pn-surface);
   box-shadow: 4px 0 6px -2px var(--pn-surface);
@@ -1279,6 +1284,7 @@ html[lang="en"] .activity-chart {
 }
 
 .activity-months span {
+  grid-row: 1;
   overflow: visible;
   white-space: nowrap;
 }
@@ -1314,6 +1320,7 @@ html[lang="en"] .activity-chart {
 
 .activity-grid {
   width: max-content;
+  padding-right: 4px;
   display: grid;
   grid-auto-flow: column;
   grid-template-columns: repeat(var(--activity-weeks), var(--activity-cell-size));
@@ -1403,7 +1410,7 @@ html[lang="en"] .activity-chart {
 }
 
 .activity-empty {
-  margin: 0 0 0 22px;
+  margin: 0;
   color: var(--pn-muted);
   font-size: calc(11.5px * var(--system-text-scale, 1));
 }
@@ -1590,6 +1597,10 @@ html[lang="en"] .activity-chart {
 
 .settings-save-state[data-state="error"] .settings-save-dot {
   background: var(--pn-danger);
+}
+
+.settings-save-state[data-state="error"] .settings-status {
+  color: var(--pn-danger);
 }
 
 .settings-status {
@@ -2204,7 +2215,8 @@ html[lang="en"] .number-unit-control > span {
 }
 
 .activity-scale-picker {
-  width: 170px;
+  width: 186px;
+  flex: 0 0 auto;
   padding: 2px;
   border: 1px solid var(--pn-line-strong);
   border-radius: var(--pn-radius-sm);
@@ -2528,7 +2540,8 @@ html[data-panel-look="paper"] .settings-section-grid {
 html[data-panel-look="paper"] :is(
   .field-row, .range-row, .toggle-row, .swatch-row, .settings-action-row, .activity-scale-preview,
   .button-row, .field-grid, .palette-field, .tool-color-field, .taskbar-text-color-field, .effect-field,
-  .indicator-track-field, .settings-subgroup h3, .settings-section-grid > .field-help, .update-check-status
+  .indicator-track-field, .settings-subgroup h3, .settings-section-grid > .field-help, .update-check-status,
+  .update-controls > .update-install-progress
 ) {
   padding-left: 0;
   padding-right: 0;
@@ -2538,7 +2551,7 @@ html[data-panel-look="paper"] .activity-settings-head {
   padding-right: 0;
 }
 
-html[data-panel-look="paper"] .taskbar-profile-option {
+html[data-panel-look="paper"] .toggle-row.taskbar-profile-option {
   padding-left: 16px;
 }
 
@@ -2570,7 +2583,9 @@ html[data-panel-look="paper"] .panel-window input[type="checkbox"]:checked {
   background: var(--pn-text);
 }
 
-html[data-panel-look="paper"] .panel-window :is(.settings-tabs button, .activity-filter button) {
+html[data-panel-look="paper"] .panel-window :is(.settings-tabs button, .activity-filter button, .activity-scale-picker button),
+html[data-panel-look="paper"] .palette-sample,
+html[data-panel-look="paper"] .panel-window input[type="color"]::-webkit-color-swatch {
   border-radius: 0;
 }
 
@@ -2727,6 +2742,18 @@ html[data-text-scale="enlarged"] .panel-window :is(button:not(.window-button, .a
   min-height: max(30px, calc(1.3em + 10px));
 }
 
+html[data-text-scale="enlarged"] .panel-window .usage-refresh-button {
+  width: max(30px, calc(1.3em + 10px));
+  height: max(30px, calc(1.3em + 10px));
+  flex: 0 0 max(30px, calc(1.3em + 10px));
+}
+
+html[data-text-scale="enlarged"] .usage-refresh-button .usage-refresh-icon {
+  width: min(24px, calc(16px * var(--system-text-scale, 1)));
+  height: min(24px, calc(16px * var(--system-text-scale, 1)));
+  flex: 0 0 auto;
+}
+
 html[data-text-scale="enlarged"] .tool-card {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
@@ -2799,6 +2826,10 @@ html[data-text-scale="enlarged"] .panel-window :is(label, button, h1, h2, h3, .t
 html[data-text-scale="enlarged"] .panel-window select {
   width: min(100%, calc(150px * var(--system-text-scale)));
   background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%, 0 0;
+}
+
+html[data-text-scale="enlarged"] .activity-scale-picker {
+  width: min(100%, calc(186px * var(--system-text-scale)));
 }
 
 html[data-text-scale="enlarged"] .panel-window input[type="number"] {
