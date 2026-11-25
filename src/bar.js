@@ -515,17 +515,34 @@ function renderTool(vm, limitOrder) {
 }
 
 function fitRingNumbers() {
-  const item = toolElement(CURRENT_TOOL);
-  if (!item || !document.createRange || !currentBarView) return;
-  for (const number of item.querySelectorAll?.(".bar-worst, .quad-number") ?? []) {
-    number.style.removeProperty("font-size");
-    if (currentBarView.textScale <= 1 || !number.getClientRects().length || !number.textContent) continue;
-    const range = document.createRange();
-    range.selectNodeContents(number);
-    const rect = range.getBoundingClientRect();
-    const size = fittedRingNumberSize(currentBarView.ringNumberFontSizePx, rect.width, rect.height,
-      currentBarView.ringCenterSizePx, currentBarView.ringNumberOutlineOn ? currentBarView.ringNumberOutlineWidthPx : 0);
-    number.style.fontSize = `${size}px`;
+  if (!document.createRange || !currentBarView) return;
+  const items = CURRENT_TOOL
+    ? [toolElement(CURRENT_TOOL)].filter(Boolean)
+    : [...(document.querySelectorAll?.(".bar-tool:not([hidden])") ?? [])];
+  for (const item of items) {
+    for (const number of item.querySelectorAll?.(".bar-worst, .quad-number") ?? []) {
+      number.style?.removeProperty?.("font-size");
+      number.style?.removeProperty?.("visibility");
+      number.style?.removeProperty?.("--ring-number-outline-width");
+      if (!number.getClientRects?.().length || !number.textContent) continue;
+      const range = document.createRange();
+      range.selectNodeContents(number);
+      const rect = range.getBoundingClientRect();
+      const baseOutline = currentBarView.ringNumberOutlineOn ? currentBarView.ringNumberOutlineWidthPx : 0;
+      const maxOutline = Math.min(baseOutline, currentBarView.ringCenterSizePx * 0.15);
+      const size = fittedRingNumberSize(currentBarView.ringNumberFontSizePx, rect.width, rect.height,
+        currentBarView.ringCenterSizePx, maxOutline);
+      if (size < 4.5) {
+        number.style?.setProperty?.("visibility", "hidden");
+        continue;
+      }
+      if (number.style) {
+        number.style.fontSize = `${size}px`;
+        if (maxOutline < baseOutline) {
+          number.style.setProperty("--ring-number-outline-width", `${Math.round(maxOutline * 100) / 100}px`);
+        }
+      }
+    }
   }
 }
 
@@ -746,17 +763,22 @@ function renderBar() {
     if (CURRENT_TOOL && tool.tool !== CURRENT_TOOL) continue;
     renderTool(tool, vm.limitOrder);
   }
+  if (typeof fitRingNumbers === "function") fitRingNumbers();
   const menu = refreshMenu();
   if (refreshMenuState === MENU_STATES.OPEN && menu && !menu.hidden) positionRefreshMenu(menu);
   scheduleTaskbarContentWidthSync();
   if (PREVIEW) {
-    clearTimeout(contentWidthSyncTimer);
-    contentWidthSyncTimer = setTimeout(() => {
+    const syncPreviewSize = () => {
       fitRingNumbers();
       const item = toolElement(CURRENT_TOOL);
       const width = Math.ceil(Math.max(item?.scrollWidth ?? 0, item?.getBoundingClientRect?.().width ?? 0));
-      window.parent.postMessage({ type: "juice-bar-preview-size", width }, window.location.origin === "null" ? "*" : window.location.origin);
-    }, CONTENT_WIDTH_SYNC_DELAY_MS);
+      if (width > 0) {
+        window.parent.postMessage({ type: "juice-bar-preview-size", width }, window.location.origin === "null" ? "*" : window.location.origin);
+      }
+    };
+    syncPreviewSize();
+    clearTimeout(contentWidthSyncTimer);
+    contentWidthSyncTimer = setTimeout(syncPreviewSize, CONTENT_WIDTH_SYNC_DELAY_MS);
   }
 }
 

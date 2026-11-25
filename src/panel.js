@@ -861,7 +861,10 @@ async function bootstrap() {
   selectPanelView("overview");
   bindPanelDragFallback();
   bindStatusUpdates();
-  document.querySelector?.("[data-activity-chart]")?.addEventListener?.("scroll", hideActivityTooltip, { passive: true });
+  let suppressActivityScrollHide = false;
+  document.querySelector?.("[data-activity-chart]")?.addEventListener?.("scroll", () => {
+    if (!suppressActivityScrollHide) hideActivityTooltip();
+  }, { passive: true });
   void systemTextScale.load(invoke);
   scheduleActivityRefresh();
   document.addEventListener("keydown", (event) => {
@@ -875,10 +878,19 @@ async function bootstrap() {
     else if (event.key === "ArrowLeft") next = Math.max(0, current - 7);
     else if (event.key === "ArrowDown") next = Math.min(cells.length - 1, current + 1);
     else if (event.key === "ArrowUp") next = Math.max(0, current - 1);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = cells.length - 1;
     else return;
     event.preventDefault();
     cells.forEach((item, index) => { item.tabIndex = index === next ? 0 : -1; });
-    cells[next]?.focus?.();
+    suppressActivityScrollHide = true;
+    cells[next]?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    cells[next]?.focus?.({ preventScroll: true });
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => { suppressActivityScrollHide = false; });
+    } else {
+      setTimeout(() => { suppressActivityScrollHide = false; }, 0);
+    }
   });
   await Promise.all([loadSettings(), loadStatus()]);
 }

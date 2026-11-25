@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { barToolViewModel } from "./bar-state.js";
 import { viewModelForTool } from "./panel-state.js";
-import { collectionIssue, collectionRetryState } from "./collection-state.js";
+import { collectionIssue, collectionRetryState, panelCollectionIssue } from "./collection-state.js";
 import { t } from "./i18n.js";
 
 const now = new Date("2026-09-28T03:00:00Z");
@@ -91,4 +91,30 @@ test("Claude recovery clears notices, zero stays numeric, and auth failure hides
   }
   for (const tool of ["codex", "cursor", "grok", "antigravity"]) assert.equal(collectionIssue(tool, "unavailable", "ko"), null);
   assert.equal(collectionIssue("claude", "idle", "ko"), null);
+});
+
+test("panelCollectionIssue surfaces recoverable non-Claude provider errors in Overview without changing bar contracts", () => {
+  for (const language of ["ko", "en"]) {
+    for (const tool of ["grok", "cursor", "antigravity"]) {
+      for (const health of ["rate_limited", "parse_error", "credentials_error", "source_changed", "transient_error"]) {
+        const issue = panelCollectionIssue(tool, health, language);
+        assert.ok(issue?.detail, `${tool}:${health}:${language}`);
+        const sample = {
+          tool,
+          session_id: `${tool}-session`,
+          captured_at: now.toISOString(),
+          approx: false,
+          session: { active: true },
+          primary: { used_percent: 42 },
+          secondary: { used_percent: 18 },
+        };
+        const panelWithValue = viewModelForTool([sample], tool, { language }, now, { [tool]: health });
+        assert.ok(panelWithValue.meta.includes(issue.detail));
+        const panelEmpty = viewModelForTool([], tool, { language }, now, { [tool]: health });
+        assert.ok(panelEmpty.emptyHint.includes(issue.detail));
+      }
+      assert.equal(panelCollectionIssue(tool, "unavailable", language), null);
+      assert.equal(collectionIssue(tool, "transient_error", language), null);
+    }
+  }
 });
