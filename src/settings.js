@@ -121,6 +121,7 @@ function setSettingsFormEnabled(enabled) {
     control.disabled = !enabled;
   }
   if (enabled) {
+    updatePanelSkinAvailability();
     updateIndicatorTrackColorAvailability();
     updateTaskbarTextColorAvailability();
     updateTaskbarProfileOptionAvailability();
@@ -326,6 +327,22 @@ function syncRangeNumberEditors() {
   }
 }
 
+function updatePanelSkinAvailability() {
+  if (!form) return;
+  const theme = String(form.elements.namedItem("theme")?.value || "system").toLowerCase();
+  const prefersDark = globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.matches === true;
+  const dark = theme === "dark" || (theme === "system" && prefersDark);
+  const skinField = form.elements.namedItem("panel_skin");
+  if (!skinField) return;
+  const unavailable = form.dataset?.loadState !== "ready" || dark;
+  skinField.setAttribute?.("aria-disabled", String(unavailable));
+  skinField.ariaDisabled = String(unavailable);
+  skinField.inert = unavailable;
+  skinField.tabIndex = unavailable ? -1 : 0;
+  const row = skinField.closest?.(".field-row");
+  if (row?.dataset) row.dataset.disabled = String(unavailable);
+}
+
 function updateIndicatorTrackColorAvailability() {
   const autoColor = form?.elements.namedItem("indicator_track_color_auto");
   const customColor = form?.elements.namedItem("indicator_track_color");
@@ -413,6 +430,7 @@ function updateOutputs() {
     updateRangeProgress(field);
   }
   syncRangeNumberEditors();
+  updatePanelSkinAvailability();
   updateIndicatorTrackColorAvailability();
   updateTaskbarTextColorAvailability();
   updateTaskbarProfileOptionAvailability();
@@ -651,7 +669,10 @@ function renderUpdateStatus(result, fromInstall = false) {
       : state?.status === "error"
         ? "status.updateFailed"
         : "status.updateUnknown";
-  updateStatusEl.textContent = t(key, language);
+  const baseText = t(key, language);
+  updateStatusEl.textContent = state?.status === "update_available" && state?.latest_version
+    ? `${baseText} (v${state.latest_version})`
+    : baseText;
   updateStatusEl.dataset.state = state?.status ?? "unknown";
 }
 
@@ -1304,6 +1325,7 @@ if (form) {
   });
   selectSettingsTab("general");
   setSettingsFormEnabled(false);
+  globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", updatePanelSkinAvailability);
   bindSettingsUpdates();
   void ensureSettingsLoad();
   loadUpdateStatus();

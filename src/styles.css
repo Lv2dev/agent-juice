@@ -241,10 +241,10 @@ html[data-theme="dark"] .bar-shell {
   top: var(--menu-y);
   z-index: 8;
   padding: 3px;
-  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, var(--hi));
+  border: 1px solid color-mix(in srgb, var(--line-strong) 86%, var(--hi));
   border-radius: 7px;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  box-shadow: 0 8px 22px -18px rgba(15, 23, 42, 0.52), inset 0 1px 0 var(--hi);
+  background: var(--bg-soft);
+  box-shadow: 0 8px 22px -14px rgba(15, 23, 42, 0.62), inset 0 1px 0 var(--hi);
 }
 
 .bar-context-menu[hidden] {
@@ -252,6 +252,9 @@ html[data-theme="dark"] .bar-shell {
 }
 
 .bar-context-menu button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 74px;
   height: 24px;
   padding: 0 9px;
@@ -268,6 +271,10 @@ html[data-theme="dark"] .bar-shell {
 
 .bar-context-menu button:hover {
   background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.bar-context-menu button:focus-visible {
+  outline-offset: 0;
 }
 
 .bar-tool {
@@ -935,6 +942,25 @@ html[data-theme="dark"] .bar-shell {
 .bar-shell[data-taskbar-orientation="horizontal"][data-mode="dual"] .bar-tool,
 .bar-shell[data-taskbar-orientation="horizontal"][data-mode="quad"] .bar-tool {
   width: max-content;
+  overflow: visible;
+}
+
+.bar-shell[data-taskbar-orientation="horizontal"] :is(.bar-ring, .bar-bars) {
+  margin-left: 2px;
+}
+
+.bar-shell[data-taskbar-orientation="horizontal"][data-mode="dual"] :is(.bar-ring, .bar-bars) {
+  margin-right: 2px;
+}
+
+.bar-shell[data-taskbar-orientation="horizontal"][data-mode="quad"] .bar-quad {
+  padding-inline: 2px;
+}
+
+.bar-shell[data-current-tool="all"]:not([data-taskbar-orientation="vertical"]) {
+  width: max-content;
+  grid-auto-columns: max-content;
+  column-gap: 16px;
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] {
@@ -949,6 +975,7 @@ html[data-theme="dark"] .bar-shell {
   padding: 6px 0;
   flex-direction: column;
   justify-content: flex-start;
+  overflow: visible;
 }
 
 .bar-shell[data-taskbar-orientation="vertical"] .bar-copy {
@@ -1013,7 +1040,7 @@ button {
     background 120ms ease;
 }
 
-button:hover:not(:disabled) {
+:where(html.bar-root) button:hover:not(:disabled) {
   border-color: var(--line-strong);
   background: color-mix(in srgb, var(--surface-2) 70%, transparent);
 }
@@ -1058,10 +1085,18 @@ button:hover:not(:disabled) {
 html[data-text-scale="enlarged"] .bar-context-menu button {
   font-size: min(calc(11px * var(--system-text-scale)), 18px);
   height: auto;
-  min-height: 24px;
+  min-height: 28px;
   line-height: 1.2;
   padding-block: 0;
   padding-inline: 7px;
+}
+
+html[data-text-scale="enlarged"] .bar-shell[data-taskbar-orientation="vertical"] .bar-context-menu button {
+  width: auto;
+  min-width: 28px;
+  min-height: 74px;
+  padding-block: 3px;
+  padding-inline: 4px;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -468,7 +468,10 @@ export function barViewModel(
   const available = Number.isFinite(crossAxis) && crossAxis > 0 ? crossAxis : 48;
   const footprint = normalizeIndicatorStyle(merged.indicator_style) === "bar"
     ? Math.max(baseRingSize, 2 * baseThickness + baseGap) : baseRingSize;
-  const indicatorScale = Math.min(textScale, available / footprint);
+  const paddedAvailable = textScale > 1
+    ? Math.max(Math.min(available, footprint), available - 4)
+    : available;
+  const indicatorScale = Math.min(textScale, paddedAvailable / footprint);
   const ringSizePx = baseRingSize * indicatorScale;
   const ringThicknessPx = baseThickness * indicatorScale;
   const ringGapPx = baseGap * indicatorScale;

@@ -205,9 +205,15 @@ html[data-panel-look="paper"] .panel-window {
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.panel-window button:hover:not(:disabled) {
+.panel-window button:where(:not(.activity-cell)):hover:not(:disabled) {
   border-color: var(--pn-line-strong);
   background: var(--pn-surface-2);
+}
+
+.panel-window button:disabled,
+#settings-form[aria-disabled="true"] :is(button:not(:disabled), select, input) {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .panel-window select,
@@ -224,19 +230,35 @@ html[data-panel-look="paper"] .panel-window {
 }
 
 .panel-window select {
-  width: 150px;
+  width: 168px;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
   padding: 0 28px 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   appearance: none;
   background:
-    linear-gradient(45deg, transparent 50%, var(--pn-muted) 50%) calc(100% - 15px) 13px / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--pn-muted) 50%, transparent 50%) calc(100% - 10px) 13px / 5px 5px no-repeat,
+    linear-gradient(45deg, transparent 50%, var(--pn-muted) 50%) calc(100% - 15px) 50% / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--pn-muted) 50%, transparent 50%) calc(100% - 10px) 50% / 5px 5px no-repeat,
     var(--pn-field);
+}
+
+.panel-window select::picker-icon {
+  display: none;
 }
 
 .panel-window input[type="number"] {
   width: 64px;
   padding: 0 8px;
+  appearance: textfield;
+}
+
+.panel-window input[type="number"]::-webkit-inner-spin-button,
+.panel-window input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
 }
 
 .panel-window select:hover,
@@ -459,6 +481,10 @@ html[data-panel-look="paper"] .panel-window {
   background: #c42b1c;
 }
 
+.panel-window .window-button:focus-visible {
+  outline-offset: -3px;
+}
+
 .window-button svg {
   width: 10px;
   height: 10px;
@@ -471,7 +497,7 @@ html[data-panel-look="paper"] .panel-window {
   width: 100%;
   flex: 1 1 auto;
   min-height: 0;
-  padding: 16px 18px 24px;
+  padding: 16px 18px calc(2px + 60px * var(--system-text-scale, 1));
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-auto-rows: max-content;
@@ -619,6 +645,10 @@ html[data-panel-look="paper"] .panel-window {
 
 /* ---------- update band ---------- */
 
+html[data-active-panel-view="about"] .update-band {
+  display: none;
+}
+
 .update-band {
   min-width: 0;
   padding: 10px 12px 10px 14px;
@@ -737,8 +767,8 @@ html[data-text-scale="enlarged"] .update-band-actions {
   color: var(--pn-danger);
 }
 
-.update-install-progress[data-state="error"] .update-install-track i {
-  background: var(--pn-danger);
+.update-install-progress[data-state="error"] .update-install-track {
+  display: none;
 }
 
 /* ---------- overview: tool rows ---------- */
@@ -988,6 +1018,8 @@ html[data-text-scale="enlarged"] .update-band-actions {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  height: auto;
+  min-height: 24px;
   max-width: 100%;
   padding: 3px 0;
   border: 0;
@@ -1001,6 +1033,14 @@ html[data-text-scale="enlarged"] .update-band-actions {
   white-space: normal;
   overflow-wrap: anywhere;
   text-align: left;
+}
+
+.panel-window .tool-retry-button:hover:not(:disabled) {
+  border: 0;
+  background: transparent;
+  color: var(--pn-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .tool-retry-button:disabled,
@@ -1223,7 +1263,8 @@ html[data-text-scale="enlarged"] .update-band-actions {
   background: var(--pn-hover);
 }
 
-.panel-window .activity-filter button[aria-pressed="true"] {
+.panel-window .activity-filter button[aria-pressed="true"],
+.panel-window .activity-filter button[aria-pressed="true"]:hover:not(:disabled) {
   border-color: var(--pn-text);
   color: var(--pn-bg);
   background: var(--pn-text);
@@ -1235,6 +1276,7 @@ html[data-text-scale="enlarged"] .update-band-actions {
   container-type: inline-size;
   overflow-x: auto;
   padding-bottom: 8px;
+  scroll-padding-inline: calc(var(--activity-label-width) + 4px) 4px;
   --activity-cell-min: calc(12px * var(--system-text-scale, 1));
   --activity-label-width: calc(26px * var(--system-text-scale, 1));
 }
@@ -1256,7 +1298,7 @@ html[lang="en"] .activity-chart {
   position: relative;
   width: max-content;
   min-height: calc(15px * var(--system-text-scale, 1));
-  padding-left: var(--activity-label-width);
+  padding-left: calc(var(--activity-label-width) + 3px);
   display: grid;
   grid-template-columns: repeat(var(--activity-weeks), var(--activity-cell-size));
   grid-auto-columns: var(--activity-cell-size);
@@ -1275,11 +1317,11 @@ html[lang="en"] .activity-chart {
   grid-column: 1 / -1;
   justify-self: start;
   align-self: stretch;
-  width: var(--activity-label-width);
+  width: calc(var(--activity-label-width) + 3px);
   height: 100%;
-  margin-left: calc(var(--activity-label-width) * -1);
+  margin-left: calc((var(--activity-label-width) + 3px) * -1);
   background: var(--pn-surface);
-  box-shadow: 4px 0 6px -2px var(--pn-surface);
+  box-shadow: 1px 0 0 var(--pn-surface);
   pointer-events: none;
 }
 
@@ -1302,9 +1344,10 @@ html[lang="en"] .activity-chart {
   left: 0;
   z-index: 1;
   width: var(--activity-label-width);
+  padding-block: 3px;
   padding-right: 6px;
   background: var(--pn-surface);
-  box-shadow: 4px 0 6px -2px var(--pn-surface);
+  box-shadow: 1px 0 0 var(--pn-surface);
   display: grid;
   grid-template-rows: repeat(7, var(--activity-cell-size));
   gap: var(--activity-gap);
@@ -1320,7 +1363,7 @@ html[lang="en"] .activity-chart {
 
 .activity-grid {
   width: max-content;
-  padding-right: 4px;
+  padding: 3px 4px 3px 3px;
   display: grid;
   grid-auto-flow: column;
   grid-template-columns: repeat(var(--activity-weeks), var(--activity-cell-size));
@@ -1340,22 +1383,22 @@ html[lang="en"] .activity-chart {
   cursor: default;
 }
 
-.activity-cell[data-level="1"],
+.panel-window .activity-cell[data-level="1"],
 .activity-legend i[data-level="1"] {
   background: color-mix(in srgb, var(--activity-color) 28%, var(--pn-heat-0));
 }
 
-.activity-cell[data-level="2"],
+.panel-window .activity-cell[data-level="2"],
 .activity-legend i[data-level="2"] {
   background: color-mix(in srgb, var(--activity-color) 50%, var(--pn-heat-0));
 }
 
-.activity-cell[data-level="3"],
+.panel-window .activity-cell[data-level="3"],
 .activity-legend i[data-level="3"] {
   background: color-mix(in srgb, var(--activity-color) 74%, var(--pn-heat-0));
 }
 
-.activity-cell[data-level="4"],
+.panel-window .activity-cell[data-level="4"],
 .activity-legend i[data-level="4"] {
   background: var(--activity-color);
 }
@@ -1474,6 +1517,14 @@ html[lang="en"] .activity-chart {
 .activity-legend {
   flex: 0 0 auto;
   gap: 3px;
+}
+
+.activity-legend > span:first-child {
+  margin-right: 3px;
+}
+
+.activity-legend > span:last-child {
+  margin-left: 3px;
 }
 
 .activity-legend i {
@@ -1697,6 +1748,11 @@ html[lang="en"] .activity-chart {
   order: 1;
 }
 
+.toggle-row:not(.tool-display-control) > span:not(.toggle-copy) {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .toggle-row input[type="checkbox"] {
   order: 2;
 }
@@ -1898,6 +1954,10 @@ html[lang="en"] .number-unit-control > span {
   opacity: 0.5;
 }
 
+.field-row[data-disabled="true"] > * {
+  opacity: 0.5;
+}
+
 /* settings: grouped fields (palette, tool colors, effects, track) */
 
 .palette-field,
@@ -1956,6 +2016,14 @@ html[lang="en"] .number-unit-control > span {
 
 .panel-window .palette-option[aria-checked="true"],
 .panel-window .effect-option[aria-checked="true"] {
+  border-color: var(--pn-accent);
+  color: var(--pn-text);
+  background: var(--pn-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--pn-accent);
+}
+
+.panel-window .palette-option[aria-checked="true"]:hover:not(:disabled),
+.panel-window .effect-option[aria-checked="true"]:hover:not(:disabled) {
   border-color: var(--pn-accent);
   color: var(--pn-text);
   background: var(--pn-accent-soft);
@@ -2049,7 +2117,7 @@ html[lang="en"] .number-unit-control > span {
 }
 
 .tool-threshold-grid > :nth-last-child(-n+2),
-.taskbar-text-color-grid > .taskbar-text-color-item:last-child {
+.taskbar-text-color-grid > .taskbar-text-color-item:nth-last-child(-n+2) {
   border-bottom: 0;
 }
 
@@ -2240,7 +2308,8 @@ html[lang="en"] .number-unit-control > span {
   background: var(--pn-hover);
 }
 
-.panel-window .activity-scale-picker button[aria-checked="true"] {
+.panel-window .activity-scale-picker button[aria-checked="true"],
+.panel-window .activity-scale-picker button[aria-checked="true"]:hover:not(:disabled) {
   color: var(--pn-bg);
   background: var(--pn-text);
 }
@@ -2316,7 +2385,7 @@ html[lang="en"] .number-unit-control > span {
   min-height: 0;
   margin: 0;
   padding: 0;
-  flex: 1 1 160px;
+  flex: 1 1 calc(240px * var(--system-text-scale, 1));
   line-height: 1.5;
   white-space: normal;
 }
@@ -2401,11 +2470,8 @@ html[lang="en"] .number-unit-control > span {
   font-size: calc(12px * var(--system-text-scale, 1));
 }
 
-.taskbar-preview-head select {
-  margin-left: auto;
-}
-
 [data-preview-source] {
+  margin-right: auto;
   color: var(--pn-muted);
   font-size: calc(11px * var(--system-text-scale, 1));
 }
@@ -2414,7 +2480,8 @@ html[lang="en"] .number-unit-control > span {
   min-width: 0;
   overflow-x: auto;
   margin-top: 6px;
-  padding: 8px 0;
+  padding: 8px 12px;
+  border-radius: var(--pn-radius-sm);
   background: var(--pn-surface-2);
 }
 
@@ -2534,6 +2601,7 @@ html[data-panel-look="paper"] .activity-stat {
 }
 
 html[data-panel-look="paper"] .settings-section-grid {
+  overflow: visible;
   border-width: 1px 0;
 }
 
@@ -2664,11 +2732,13 @@ html[data-panel-look="paper"] .settings-toast {
     padding-left: 0;
   }
 
-  .tool-threshold-grid > :nth-last-child(-n+2) {
+  .tool-threshold-grid > :nth-last-child(-n+2),
+  .taskbar-text-color-grid > .taskbar-text-color-item:nth-last-child(-n+2) {
     border-bottom: 1px solid var(--pn-line-soft);
   }
 
-  .tool-threshold-grid > :last-child {
+  .tool-threshold-grid > :last-child,
+  .taskbar-text-color-grid > .taskbar-text-color-item:last-child {
     border-bottom: 0;
   }
 
@@ -2726,15 +2796,16 @@ html[data-text-scale="enlarged"] .panel-chrome {
   row-gap: 0;
 }
 
-html[data-text-scale="enlarged"] .brand-name {
-  display: none;
-}
-
 html[data-text-scale="enlarged"] .panel-nav {
   order: 3;
   flex: 1 0 100%;
   margin: 0 12px 8px 0;
   flex-wrap: wrap;
+}
+
+html[data-text-scale="enlarged"] .panel-nav button {
+  font-size: min(21px, calc(12.5px * var(--system-text-scale, 1)));
+  padding: 0 10px;
 }
 
 html[data-text-scale="enlarged"] .panel-window :is(button:not(.window-button, .activity-cell), select, input[type="number"]) {
@@ -2803,8 +2874,24 @@ html[data-text-scale="enlarged"] .activity-stats {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(150px * var(--system-text-scale))), 1fr));
 }
 
-html[data-text-scale="enlarged"] :is(.tool-swatch-row, .tool-threshold-grid, .taskbar-text-color-grid, .indicator-track-grid) {
+html[data-text-scale="enlarged"] .tool-swatch-row {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(200px * var(--system-text-scale))), 1fr));
+}
+
+html[data-text-scale="enlarged"] :is(.tool-threshold-grid, .taskbar-text-color-grid, .indicator-track-grid) {
+  grid-template-columns: 1fr;
+}
+
+html[data-text-scale="enlarged"] .indicator-track-opacity-row {
+  grid-column: auto;
+}
+
+html[data-text-scale="enlarged"] :is(.tool-threshold-grid > :nth-last-child(-n+2), .taskbar-text-color-grid > .taskbar-text-color-item:nth-last-child(-n+2)) {
+  border-bottom: 1px solid var(--pn-line-soft);
+}
+
+html[data-text-scale="enlarged"] :is(.tool-threshold-grid > :last-child, .taskbar-text-color-grid > .taskbar-text-color-item:last-child) {
+  border-bottom: 0;
 }
 
 html[data-text-scale="enlarged"] .palette-picker {
@@ -2815,7 +2902,7 @@ html[data-text-scale="enlarged"] .effect-picker {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(80px * var(--system-text-scale))), 1fr));
 }
 
-html[data-text-scale="enlarged"] .panel-window :is(.field-row, .swatch-row, .button-row, .toggle-row, .activity-head, .activity-foot, .activity-filter, .about-heading, .view-head, .overview-activity-head) {
+html[data-text-scale="enlarged"] .panel-window :is(.field-row, .swatch-row, .button-row, .activity-head, .activity-foot, .activity-filter, .about-heading, .view-head, .overview-activity-head) {
   flex-wrap: wrap;
 }
 
@@ -2824,8 +2911,14 @@ html[data-text-scale="enlarged"] .panel-window :is(label, button, h1, h2, h3, .t
 }
 
 html[data-text-scale="enlarged"] .panel-window select {
-  width: min(100%, calc(150px * var(--system-text-scale)));
+  width: min(100%, calc(168px * var(--system-text-scale)));
   background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%, 0 0;
+}
+
+@media (max-width: 560px) {
+  html[data-text-scale="enlarged"] .panel-window .taskbar-preview-head select {
+    width: 100%;
+  }
 }
 
 html[data-text-scale="enlarged"] .activity-scale-picker {
@@ -2849,6 +2942,23 @@ html[data-text-scale="enlarged"] :is(.reset, .empty-hint, .hero-label, .pc, .act
 
 html[data-text-scale="enlarged"] .activity-chart {
   overflow-x: auto;
+}
+
+html[data-text-scale="enlarged"] .settings-toast {
+  max-width: min(calc(360px * var(--system-text-scale)), 100%);
+}
+
+html[data-text-scale="enlarged"] .activity-legend > span:first-child {
+  margin-right: 5px;
+}
+
+html[data-text-scale="enlarged"] .activity-legend > span:last-child {
+  margin-left: 5px;
+}
+
+html[data-text-scale="enlarged"] .activity-legend i {
+  width: 13px;
+  height: 13px;
 }
 
 

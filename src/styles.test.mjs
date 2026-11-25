@@ -1864,7 +1864,7 @@ test("all application version sources stay synchronized", () => {
     cargoLockVersion,
     tauriConfig.version,
   ];
-  assert.deepEqual(new Set(versions), new Set(["0.1.45"]));
+  assert.deepEqual(new Set(versions), new Set(["0.1.46"]));
 });
 
 test("login-required status remains visible in compact indicator and vertical layouts", () => {
@@ -1952,4 +1952,30 @@ test("dark taskbar ring numbers use a dark outline and panel typography keeps Ko
   assert.match(chartBlock, /data-activity-grid/);
   assert.doesNotMatch(panelMarkup.match(/<div class="activity-chart"[\s\S]*?<\/div>\s*<\/div>/)?.[0] ?? "", /data-activity-tooltip/);
   assert.match(panelJs, /activityTooltipPosition\(cardRect,\s*cellRect,\s*tooltipRect,\s*viewportRect\)/);
+});
+
+test("visual audit polish preserves panel and taskbar hover, focus, toast, and menu clearance contracts", () => {
+  assert.match(panelCss, /\.panel-window select::picker-icon\s*\{\s*display:\s*none;/);
+  assert.match(panelCss, /\n\.panel-window input\[type="number"\]\s*\{[^}]*appearance:\s*textfield/);
+  assert.match(panelBlock('html[data-active-panel-view="about"] .update-band'), /display:\s*none/);
+  assert.match(panelBlock('.update-install-progress[data-state="error"] .update-install-track'), /display:\s*none/);
+  assert.match(panelBlock(".panel-shell"), /padding:\s*16px 18px calc\(2px \+ 60px \* var\(--system-text-scale, 1\)\)/);
+  assert.match(panelBlock('html[data-text-scale="enlarged"] .settings-toast'), /max-width:\s*min\(calc\(360px \* var\(--system-text-scale\)\),\s*100%\)/);
+  assert.match(panelBlock(".panel-window button:where(:not(.activity-cell)):hover:not(:disabled)"), /border-color:\s*var\(--pn-line-strong\)/);
+  assert.match(panelBlock(".panel-window .window-button:focus-visible"), /outline-offset:\s*-3px/);
+  assert.match(panelBlock('html[data-panel-look="paper"] .settings-section-grid'), /overflow:\s*visible/);
+  assert.match(panelBlock(".activity-chart"), /scroll-padding-inline:\s*calc\(var\(--activity-label-width\) \+ 4px\) 4px/);
+  assert.match(cssBlock(":where(html.bar-root) button:hover:not(:disabled)"), /border-color:\s*var\(--line-strong\)/);
+  assert.match(cssBlock(".bar-context-menu"), /background:\s*var\(--bg-soft\)/);
+  assert.match(cssBlock(".bar-context-menu button:focus-visible"), /outline-offset:\s*0/);
+  const verticalEnlargedMenuBtn = cssBlock('html[data-text-scale="enlarged"] .bar-shell[data-taskbar-orientation="vertical"] .bar-context-menu button');
+  assert.match(verticalEnlargedMenuBtn, /min-width:\s*28px/);
+  assert.match(verticalEnlargedMenuBtn, /padding-block:\s*3px/);
+  assert.match(verticalEnlargedMenuBtn, /padding-inline:\s*4px/);
+  assert.match(settingsJs, /function updatePanelSkinAvailability\(/);
+  assert.match(panelJs, /event\.key === "Home"[\s\S]*event\.key === "End"/);
+  assert.match(barJs, /if \(typeof fitRingNumbers === "function"\) fitRingNumbers\(\);/);
+  assert.doesNotMatch(barJs, /currentBarView\.textScale <= 1/);
+  assert.match(panelBlock(".activity-legend > span:first-child"), /margin-right:\s*3px/);
+  assert.match(panelBlock('html[data-text-scale="enlarged"] .activity-legend i'), /width:\s*13px/);
 });

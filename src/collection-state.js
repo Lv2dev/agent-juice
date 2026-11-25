@@ -17,13 +17,27 @@ export function collectionIssue(tool, health, language) {
 }
 
 export function panelCollectionIssue(tool, health, language) {
-  if (tool !== "codex") return collectionIssue(tool, health, language);
-  if (["unavailable", "credentials_error"].includes(health)) {
+  if (tool === "codex") {
+    if (["unavailable", "credentials_error"].includes(health)) {
+      return {
+        short: t("collection.codexUnavailable", language),
+        detail: t("collection.codexUnavailableDetail", language),
+      };
+    }
+    return issueForHealth(health, language);
+  }
+  if (tool === "claude") return collectionIssue(tool, health, language);
+  if (tool === "cursor" && health === "credentials_error") {
+    return collectionIssue(tool, health, language);
+  }
+  if (tool === "antigravity" && health === "transient_error") {
     return {
-      short: t("collection.codexUnavailable", language),
-      detail: t("collection.codexUnavailableDetail", language),
+      short: t("collection.transportError", language),
+      detail: `${t("empty.antigravity", language)}.`,
     };
   }
+  if (health === "unavailable") return null;
+  if (health === "credentials_error") return issueForHealth("transient_error", language);
   return issueForHealth(health, language);
 }
 

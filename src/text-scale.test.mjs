@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 import { createTextScaleState, fittedRingNumberSize, normalizeTextScale } from "./text-scale.js";
 import { barViewModel } from "./bar-state.js";
 
@@ -39,7 +41,7 @@ test("large system text expands indicators within taskbar height without changin
   for (const textScale of [1, 1.25, 1.5, 2, 2.25]) {
     for (const crossAxisSize of [40, 48, 64]) {
       const vm = barViewModel([], settings, new Date(), { textScale, crossAxisSize });
-      assert.ok(vm.ringSizePx <= crossAxisSize);
+      assert.ok(vm.ringSizePx <= (textScale > 1 ? crossAxisSize - 4 : crossAxisSize));
       assert.ok(vm.barTextFontSizePx * 1.4 <= crossAxisSize);
       assert.equal(vm.ringNumberFontSizePx, 9 * textScale);
       assert.ok(vm.ringCenterSizePx >= 16);
@@ -53,4 +55,80 @@ test("large system text expands indicators within taskbar height without changin
   assert.equal(normal.ringSizePx, 36);
   assert.equal(normal.barTextFontSizePx, 11);
   assert.equal(normal.ringNumberFontSizePx, 9);
+});
+
+test("fitRingNumbers shrinks 3-digit 100 at scale 1, caps wide outlines, and hides pinhole specks", () => {
+  const barSource = fs.readFileSync(new URL("./bar.js", import.meta.url), "utf8");
+  const start = barSource.indexOf("function fitRingNumbers()");
+  const end = barSource.indexOf("function scheduleTaskbarContentWidthSync()", start);
+  assert.ok(start >= 0 && end > start);
+
+  const props = new Map();
+  const number = {
+    textContent: "100",
+    getClientRects: () => [{}],
+    style: {
+      fontSize: "",
+      setProperty(k, v) { props.set(k, v); },
+      removeProperty(k) {
+        if (k === "font-size") this.fontSize = "";
+        props.delete(k);
+      },
+    },
+  };
+  let rect = { width: 16.2, height: 9 };
+  const ctx = vm.createContext({
+    CURRENT_TOOL: "claude",
+    currentBarView: null,
+    fittedRingNumberSize,
+    toolElement: () => ({ querySelectorAll: () => [number] }),
+    document: {
+      createRange: () => ({
+        selectNodeContents() {},
+        getBoundingClientRect: () => rect,
+      }),
+    },
+  });
+  vm.runInContext(`${barSource.slice(start, end)}\nglobalThis.runFit = fitRingNumbers;`, ctx);
+
+  // 1) At normal scale=1, 3-digit "100" shrinks inside 16px center opening.
+  ctx.currentBarView = {
+    textScale: 1,
+    ringNumberFontSizePx: 9,
+    ringCenterSizePx: 16,
+    ringNumberOutlineOn: true,
+    ringNumberOutlineWidthPx: 1.2,
+  };
+  ctx.runFit();
+  assert.equal(number.style.fontSize, "6.6px");
+  assert.equal(props.has("visibility"), false);
+
+  // 2) Thick 4px outline is capped proportionally to center opening (16 * 0.15 = 2.4px).
+  ctx.currentBarView = {
+    ...ctx.currentBarView,
+    ringNumberOutlineWidthPx: 4,
+  };
+  ctx.runFit();
+  assert.equal(props.get("--ring-number-outline-width"), "2.4px");
+  assert.equal(props.has("visibility"), false);
+
+  // 3) Pinhole centerSize=4 hides illegible sub-pixel number cleanly, then restores when enlarged.
+  rect = { width: 25.2, height: 14 };
+  ctx.currentBarView = {
+    textScale: 1,
+    ringNumberFontSizePx: 14,
+    ringCenterSizePx: 4,
+    ringNumberOutlineOn: true,
+    ringNumberOutlineWidthPx: 1.2,
+  };
+  ctx.runFit();
+  assert.equal(props.get("visibility"), "hidden");
+
+  ctx.currentBarView = {
+    ...ctx.currentBarView,
+    ringCenterSizePx: 16,
+  };
+  ctx.runFit();
+  assert.equal(props.has("visibility"), false);
+  assert.ok(Number.parseFloat(number.style.fontSize) >= 4.5);
 });
